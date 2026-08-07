@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "tools": {
+    "uv": {
+      "version": "0.8.3",
+      "path": "uv.exe",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.8.3/uv-x86_64-pc-windows-msvc.zip",
+      "archive_sha256": "4ca84e28b08f48255f95156c5987d61a5e4c51a43372708bc6d84e994eeb7bdb",
+      "archive_member": "uv.exe",
+      "sha256": "d964edeffd15b148d382ad50e592c3b4bca3dffe8db268cabe0dd77ee9999efc"
+    },
+    "winsw": {
+      "version": "3.0.0-alpha.11",
+      "path": "WinSW.exe",
+      "url": "https://github.com/winsw/winsw/releases/download/v3.0.0-alpha.11/WinSW-x64.exe",
+      "archive_sha256": "a2daa6a33a9c2b791ae31d9092e7935c339d1e03e89bfb747618ce2f4e819e20",
+      "sha256": "a2daa6a33a9c2b791ae31d9092e7935c339d1e03e89bfb747618ce2f4e819e20"
+    },
+    "tunnel-client": {
+      "version": "0.0.10",
+      "path": "tunnel-client.exe",
+      "url": "https://persistent.oaistatic.com/tunnel-client/v0.0.10/tunnel-client-v0.0.10-windows-amd64.zip",
+      "archive_sha256": "5e64a056f1d96786da0a6f8db1da5f5f4a03fd19a90d951a25cf2ca8d9093d00",
+      "archive_member": "tunnel-client.exe",
+      "sha256": "d893d8127eee35070d265c1be29bfe008f8d9fcb476e7febf56c8fdc6c0615c8"
+    }
+  }
+}

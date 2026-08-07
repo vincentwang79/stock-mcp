@@ -1,0 +1,34 @@
+# A 股私有 MCP
+
+面向个人短线复盘的确定性 A 股研究服务。服务在 Windows Server 上运行，通过 OpenAI Secure MCP Tunnel 私有接入 ChatGPT，不提供下单、账户或仓位管理能力。
+
+产品规格来源：`/Users/VincentWang/Documents/Codex/2026-08-07/ys/outputs/a-share-chatgpt-mcp-spec.md`。
+
+## 核心测试 seam
+
+`normalized market snapshot + immutable strategy version -> validated daily review`
+
+所有数据源、策略、MCP 和部署实现最终都必须在该行为边界上验收。
+
+## 本地验证
+
+```bash
+uv sync --locked --extra dev
+uv run python -m unittest discover -s tests -t . -p 'test_*.py'
+uv run ruff check src tests
+uv build
+```
+
+标准测试全部使用固定夹具，不访问实时行情。生产服务仅监听
+`127.0.0.1:8765/mcp`，同时提供 loopback `/healthz` 与 `/readyz`。
+
+## Windows 发布
+
+发布材料位于 `deploy/windows`。发布工程先运行 `fetch-tools.ps1` 获取并验证
+固定版本的 uv、WinSW 和 OpenAI tunnel-client，再用 `build-release.ps1` 生成
+`stock-mcp-windows-x64.zip` 及其外部 SHA-256。服务器侧只需解压后依次运行
+`install.ps1` 与 `configure.ps1`；具体升级、诊断、回滚和卸载流程见
+`deploy/windows/README-WINDOWS.md`。
+
+策略版本由 MCP 创建和比较，但激活还需要 Windows 主机上的一次性本地批准；
+这使模型无法仅靠传入 `confirmed=true` 绕过人的最终确认。

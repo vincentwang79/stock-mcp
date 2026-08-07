@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+*.db
+*.sqlite*
+data/
+logs/
+backups/
+config/secrets.env
+*.zip
+deploy/windows/tools-cache/

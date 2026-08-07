@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "a-share-stock-mcp"
+version = "0.1.0"
+description = "Private deterministic A-share review MCP service"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "apscheduler>=3.10,<4",
+  "mcp>=2,<3",
+  "pydantic>=2.8,<3",
+  "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+providers = [
+  "akshare>=1.16",
+  "baostock>=0.8.9",
+  "pandas>=2.2,<3",
+  "tushare>=1.4",
+]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=5,<7",
+  "pytest-timeout>=2.3,<3",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+stock-mcp = "stock_mcp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stock_mcp"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

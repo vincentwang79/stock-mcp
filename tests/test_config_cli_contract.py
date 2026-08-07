@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+
+from stock_mcp.cli import doctor, main
+from stock_mcp.config import Settings
+
+
+class ConfigAndCliContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+
+    def test_default_http_endpoint_is_loopback_only(self) -> None:
+        settings = Settings.load(root=self.root, environ={})
+
+        self.assertEqual(settings.host, "127.0.0.1")
+        self.assertEqual(settings.port, 8765)
+        self.assertEqual(settings.mcp_path, "/mcp")
+        self.assertEqual(settings.timezone, "Asia/Shanghai")
+
+    def test_non_loopback_bind_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            Settings.load(root=self.root, environ={"STOCK_MCP_HOST": "0.0.0.0"})
+
+    def test_doctor_reports_configuration_required_without_crashing(self) -> None:
+        report = doctor(Settings.load(root=self.root, environ={}))
+
+        self.assertEqual(report.status, "configuration_required")
+        self.assertIn("TUSHARE_TOKEN", report.missing)
+        self.assertNotIn("TUNNEL_API_KEY", report.missing)
+
+    def test_doctor_output_never_contains_secret_values(self) -> None:
+        secrets_dir = self.root / "config"
+        secrets_dir.mkdir(parents=True)
+        secret_value = "top-secret-value-for-contract-test"
+        (secrets_dir / "secrets.env").write_text(
+            "\n".join((f"TUSHARE_TOKEN={secret_value}",)),
+            encoding="utf-8",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["doctor", "--root", str(self.root), "--json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn(secret_value, output.getvalue())
+        self.assertIn('"status": "ready"', output.getvalue())
+
+    def test_cli_creates_and_verifies_online_database_backup(self) -> None:
+        self.assertEqual(0, main(["migrate", "--root", str(self.root)]))
+        destination = self.root / "backups" / "stock-mcp-before-update.sqlite3"
+
+        exit_code = main(["backup", "--root", str(self.root), "--destination", str(destination)])
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(destination.is_file())
+        self.assertTrue(destination.with_suffix(".sqlite3.sha256").is_file())
+
+    def test_project_console_script_points_to_the_real_cli_entrypoint(self) -> None:
+        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('stock-mcp = "stock_mcp.cli:main"', pyproject)
+
+    def test_custom_ca_from_protected_host_file_is_loaded(self) -> None:
+        config = self.root / "config"
+        config.mkdir(parents=True)
+        ca = config / "custom-ca.pem"
+        ca.write_text("test-ca", encoding="utf-8")
+        (config / "secrets.env").write_text(
+            f"STOCK_MCP_CA_FILE={ca}\nTUSHARE_TOKEN=test-token\n",
+            encoding="utf-8",
+        )
+
+        settings = Settings.load(root=self.root, environ={})
+
+        self.assertEqual(ca, settings.custom_ca_file)
+
+
+if __name__ == "__main__":
+    unittest.main()

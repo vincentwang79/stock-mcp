@@ -1,0 +1,8 @@
+name = "reviewer"
+description = "Read-only reviewer for correctness, security, look-ahead, and operability risks."
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+developer_instructions = """
+Report concrete prioritized findings with reproduction evidence. Do not edit files, commit, spawn subagents, or produce style-only feedback.
+"""

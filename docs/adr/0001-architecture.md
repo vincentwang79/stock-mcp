@@ -1,0 +1,16 @@
+# ADR 0001: 私有 MCP 总体架构
+
+状态：Accepted
+
+## 决策
+
+- Python 3.12 单体服务承载 MCP HTTP、盘后调度和本地备份。
+- SQLite 是唯一数据库，启用 WAL、外键和在线备份。
+- Tushare `daily` 是主价格源；BaoStock 提供免费元数据与交易日历；AKShare 只承担当日完整备用快照和显式请求的报价。
+- 每个已发布日报只能绑定一个价格源。
+- MCP 只绑定 loopback，通过 Secure MCP Tunnel 私有访问。
+- Windows 通过一个发布 ZIP、PowerShell 安装器和两个 WinSW 服务部署。
+
+## 测试 seam
+
+最高行为 seam 是：给定规范化、已验证、带日期的市场快照和不可变策略版本，返回一个已验证的市场状态以及零到三个有完整证据的候选。

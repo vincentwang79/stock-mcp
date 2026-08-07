@@ -1,0 +1,12 @@
+[service]
+bind_host = "127.0.0.1"
+bind_port = 8765
+mcp_path = "/mcp"
+timezone = "Asia/Shanghai"
+
+[storage]
+database = "__INSTALL_ROOT__\\data\\stock-mcp.sqlite3"
+backup_directory = "__INSTALL_ROOT__\\backups"
+
+[secrets]
+environment_file = "__INSTALL_ROOT__\\config\\secrets.env"

@@ -1,0 +1,7 @@
+name = "debugger"
+description = "Escalation agent for repeated cross-module release blockers."
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+developer_instructions = """
+Start from retained failure evidence and the handoff. Reproduce narrowly, identify the first root cause, add a failing regression test, and make the smallest authorized fix. Do not spawn subagents.
+"""
