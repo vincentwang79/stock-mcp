@@ -136,7 +136,6 @@ if (-not (Test-Path -LiteralPath $appConfig)) {
     (Get-Content -LiteralPath (Join-Path $release 'deploy\config\app.toml.example') -Raw).Replace('__INSTALL_ROOT__', $InstallRoot) |
         Set-Content -LiteralPath $appConfig -Encoding UTF8
 }
-Set-PrivateAcl (Join-Path $InstallRoot 'config') -ReadableByApp -ReadableByTunnel
 New-CurrentJunction $InstallRoot $release
 Install-WinSWServices $InstallRoot $winsw
 

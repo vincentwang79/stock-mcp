@@ -330,6 +330,17 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         tunnel_start = install.rindex("Start-Service -Name StockMcpTunnel")
         self.assertIn("Wait-TunnelReady", install[tunnel_start:])
 
+    def test_service_account_acl_grants_follow_winsw_service_registration(self) -> None:
+        install = self._read_required("install.ps1")
+        config_acl = (
+            "Set-PrivateAcl (Join-Path $InstallRoot 'config') -ReadableByApp -ReadableByTunnel"
+        )
+
+        self.assertEqual(1, install.count(config_acl))
+        self.assertLess(
+            install.index("Install-WinSWServices $InstallRoot $winsw"), install.index(config_acl)
+        )
+
     def test_source_checkout_can_install_without_a_release_zip(self) -> None:
         install = self._read_required("install.ps1")
         source_install = self._read_required("install-from-source.ps1")
