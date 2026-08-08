@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
 
 from .config import Settings
@@ -112,6 +113,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         database = Database(settings.database_path)
         database.initialize()
         reported_failures = 0
+        token = settings.tushare_token or ""
+        token_fingerprint = sha256(token.encode("utf-8")).hexdigest()[:12]
+        print(
+            "stock-mcp: Tushare credential "
+            f"length={len(token)} sha256={token_fingerprint}"
+        )
 
         def report_incomplete(trade_date: date, error: Exception) -> None:
             nonlocal reported_failures

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +33,34 @@ class TushareProbeScriptContractTest(unittest.TestCase):
             json.loads(result.stdout),
         )
         self.assertEqual("", result.stderr)
+
+    def test_explicit_secrets_file_is_the_probe_source_of_truth(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            secrets_file = Path(directory) / "secrets.env"
+            secrets_file.write_text("TUSHARE_TOKEN=file-token\n", encoding="utf-8")
+            environment = dict(os.environ)
+            environment.pop("TUSHARE_TOKEN", None)
+            environment["TUSHARE_ENDPOINT"] = "http://127.0.0.1:1"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(repository / "scripts" / "tushare_probe.py"),
+                    "--secrets-file",
+                    str(secrets_file),
+                ],
+                capture_output=True,
+                check=False,
+                env=environment,
+                text=True,
+            )
+
+        payload = json.loads(result.stdout)
+        self.assertEqual(1, result.returncode)
+        self.assertEqual("request_error", payload["status"])
+        self.assertEqual(10, payload["token_length"])
+        self.assertEqual("35365b8fc3cb", payload["token_fingerprint"])
 
     def test_daily_request_sends_token_in_tushare_json_body(self) -> None:
         received: dict[str, object] = {}

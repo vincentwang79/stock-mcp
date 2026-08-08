@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from datetime import date
+from hashlib import sha256
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -137,6 +138,11 @@ class ConfigAndCliContractTest(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 2)
+        expected_fingerprint = sha256(b"fixture").hexdigest()[:12]
+        self.assertIn(
+            f"Tushare credential length=7 sha256={expected_fingerprint}",
+            output.getvalue(),
+        )
         self.assertIn("Tushare latest-day probe trade_date=2023-08-07 rows=4321", output.getvalue())
         self.assertIn("trade_date=2023-08-07", output.getvalue())
         self.assertIn("reason=fixture validation failed", output.getvalue())
