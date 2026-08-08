@@ -22,7 +22,10 @@ function Invoke-ToolDownload {
         try {
             if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
             Write-Host "Downloading $Name from $hostName (attempt $attempt/3)"
-            Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing -TimeoutSec 120
+            $request = @{ Uri = $Uri; OutFile = $Destination; UseBasicParsing = $true; TimeoutSec = 120 }
+            $proxy = Get-ConfiguredHttpsProxy
+            if ($proxy) { $request.Proxy = $proxy }
+            Invoke-WebRequest @request
             return
         } catch {
             $lastError = $_.Exception.Message

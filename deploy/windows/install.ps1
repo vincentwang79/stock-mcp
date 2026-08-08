@@ -44,11 +44,21 @@ function Assert-FreeSpace([string] $Path, [int64] $MinimumBytes = 4294967296) {
 }
 
 function Assert-OutboundHttps {
-    try {
-        Invoke-WebRequest -Uri 'https://api.github.com' -UseBasicParsing -TimeoutSec 15 | Out-Null
-        if (-not (Test-NetConnection -ComputerName 'api.openai.com' -Port 443 -InformationLevel Quiet)) {
-            throw 'api.openai.com:443 is unreachable.'
+    function Test-ExternalHttps([string] $Uri) {
+        $request = @{ Uri = $Uri; UseBasicParsing = $true; TimeoutSec = 15 }
+        $proxy = Get-ConfiguredHttpsProxy
+        if ($proxy) { $request.Proxy = $proxy }
+        try {
+            Invoke-WebRequest @request | Out-Null
+        } catch {
+            $response = $_.Exception.Response
+            if ($null -ne $response -and [int] $response.StatusCode -ne 407) { return }
+            throw
         }
+    }
+    try {
+        Test-ExternalHttps 'https://api.github.com'
+        Test-ExternalHttps 'https://api.openai.com'
     }
     catch { throw "Outbound HTTPS is required for verified tool retrieval and Secure MCP Tunnel. $($_.Exception.Message)" }
 }

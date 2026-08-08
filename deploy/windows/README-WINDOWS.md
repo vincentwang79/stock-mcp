@@ -18,15 +18,25 @@ cd E:\code\stock-mcp
 
 ## 源码直接安装（推荐）
 
-在管理员 PowerShell 中，从干净的 Git 工作区执行：
+从普通 PowerShell 先打开管理员窗口：
+
+```powershell
+Start-Process PowerShell -Verb RunAs
+```
+
+随后在新打开的管理员 PowerShell 中，从干净的 Git 工作区执行：
 
 ```powershell
 cd E:\code\stock-mcp
-git pull --ff-only
 
 # 仅对当前 PowerShell 窗口生效；关闭窗口后自动恢复。
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
+# 此服务器经本机代理访问 api.openai.com:443。
+$env:HTTP_PROXY = "http://127.0.0.1:7897"
+$env:HTTPS_PROXY = "http://127.0.0.1:7897"
+
+git pull --ff-only
 .\deploy\windows\install-from-source.ps1 -InstallRoot E:\StockMcp
 .\deploy\windows\configure.ps1 -InstallRoot E:\StockMcp
 ```
@@ -41,6 +51,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
 ```powershell
 cd E:\code\stock-mcp
+$env:HTTP_PROXY = "http://127.0.0.1:7897"
+$env:HTTPS_PROXY = "http://127.0.0.1:7897"
 git pull --ff-only
 .\deploy\windows\install-from-source.ps1 -InstallRoot E:\StockMcp
 ```
@@ -54,7 +66,7 @@ Test-NetConnection persistent.oaistatic.com -Port 443
 Test-NetConnection api.openai.com -Port 443
 ```
 
-如果网络要求代理或 TLS 解密，应由服务器网络管理员配置受信任的系统代理和根证书；不要关闭 TLS 校验，也不要修改工具清单中的固定 SHA-256。
+如果网络要求代理或 TLS 解密，应由服务器网络管理员配置受信任的系统代理和根证书；不要关闭 TLS 校验，也不要修改工具清单中的固定 SHA-256。对于本服务器，在 `configure.ps1` 的 `Optional HTTPS proxy` 提示中输入 `http://127.0.0.1:7897`；该值会写入受 ACL 保护的应用配置和 Tunnel 配置，当前会话的环境变量不会自动传给 Windows 服务。
 
 配置脚本通过安全交互提示采集生产密钥，并只将其保存到 ACL 保护的主机配置文件。它完成数据权限检查、三年历史回填、Tunnel 自检、MCP 本地就绪检查和 Tunnel 服务身份就绪检查后，才启动 `StockMcpService` 与 `StockMcpTunnel`。
 

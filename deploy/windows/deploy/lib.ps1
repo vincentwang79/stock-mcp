@@ -1,5 +1,17 @@
 Set-StrictMode -Version Latest
 
+function Get-ConfiguredHttpsProxy {
+    $value = $env:HTTPS_PROXY
+    if ([string]::IsNullOrWhiteSpace($value)) { $value = $env:HTTP_PROXY }
+    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+    $proxy = $null
+    if (-not [Uri]::TryCreate($value, [UriKind]::Absolute, [ref] $proxy) -or
+        $proxy.Scheme -notin @('http', 'https')) {
+        throw 'HTTPS_PROXY or HTTP_PROXY must be an absolute HTTP(S) proxy URL.'
+    }
+    return $proxy.AbsoluteUri
+}
+
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)

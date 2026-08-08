@@ -45,7 +45,7 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("SecurityProtocolType]::Tls12", fetch)
         self.assertIn("function Invoke-ToolDownload", fetch)
         self.assertIn("$attempt -le 3", fetch)
-        self.assertIn("-TimeoutSec 120", fetch)
+        self.assertIn("TimeoutSec = 120", fetch)
         self.assertIn("Failed to download", fetch)
 
     def test_tool_fetch_accepts_a_direct_executable_without_archive_member(self) -> None:
@@ -53,6 +53,19 @@ class WindowsDeploymentContractTest(unittest.TestCase):
 
         self.assertIn("PSObject.Properties['archive_member']", fetch)
         self.assertIn("IsNullOrWhiteSpace($archiveMember)", fetch)
+
+    def test_external_https_downloads_and_preflight_honor_session_proxy(self) -> None:
+        fetch = self._read_required("fetch-tools.ps1")
+        install = self._read_required("install.ps1")
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("function Get-ConfiguredHttpsProxy", library)
+        self.assertIn("$env:HTTPS_PROXY", library)
+        self.assertIn("Get-ConfiguredHttpsProxy", fetch)
+        self.assertIn("$request.Proxy = $proxy", fetch)
+        self.assertIn("Get-ConfiguredHttpsProxy", install)
+        self.assertIn("$request.Proxy = $proxy", install)
+        self.assertNotIn("Test-NetConnection -ComputerName 'api.openai.com'", install)
 
     def test_install_uses_isolated_python_and_two_services(self) -> None:
         install = self._read_required("install.ps1")
