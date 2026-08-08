@@ -1,15 +1,17 @@
 # 本地可执行任务规格
 
 当前仓库尚未连接远程 Issue Tracker，因此这里保存与 `ready-for-agent` Issue
-同构的本地任务规格，作为 Agent 任务卡的来源。它们不是已发布的 Issue，也不代表
+同构的本地任务规格，作为 Agent 任务卡的来源。它们不是已发布的问题单，也不代表
 外部标签或权限已经配置完成。
 
 原始产品规格：
 `/Users/VincentWang/Documents/Codex/2026-08-07/ys/outputs/a-share-chatgpt-mcp-spec.md`
 
-所有任务共享最高测试 seam：
+所有任务共享最高测试边界：
 
-`normalized market snapshot + immutable strategy version -> validated daily review`
+`规范化市场快照 + 不可变策略版本 → 已验证的每日报告`
+
+所有任务同时受根目录[项目基本规则](../../GROUND_RULES.md)约束。
 
 ## 任务目录
 

@@ -258,9 +258,9 @@ class WindowsDeploymentContractTest(unittest.TestCase):
     def test_readme_requires_manual_hash_verification_before_untrusted_bootstrap_runs(self) -> None:
         readme = self._read_required("README-WINDOWS.md")
 
-        self.assertIn("before extracting the zip or running any script", readme.lower())
+        self.assertIn("在解压 ZIP 或执行任何脚本之前", readme)
         self.assertIn("Get-FileHash", readme)
-        self.assertIn("not Authenticode-signed", readme)
+        self.assertIn("未使用 Authenticode 签名", readme)
 
     def test_update_rollback_refreshes_restored_services_using_the_old_winsw(self) -> None:
         update = self._read_required("update.ps1")
