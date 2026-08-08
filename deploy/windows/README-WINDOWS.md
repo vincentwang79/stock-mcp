@@ -35,6 +35,27 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
 如果 `Get-ExecutionPolicy -List` 显示 `MachinePolicy` 或 `UserPolicy` 已由组策略强制，当前窗口的设置也会被拒绝；此时应由 Windows Server 管理员为该受控仓库配置相应的脚本执行策略。不要将机器级策略设为 `Unrestricted`，也不要对不可信目录使用绕过命令。
 
+### 工具下载故障排查
+
+安装器会下载并校验 `uv`、WinSW 和 `tunnel-client`。若提示下载失败，先更新脚本后重试：
+
+```powershell
+cd E:\code\stock-mcp
+git pull --ff-only
+.\deploy\windows\install-from-source.ps1 -InstallRoot E:\StockMcp
+```
+
+新版下载器会强制 TLS 1.2 并自动重试三次。若仍失败，请确认服务器可对以下主机建立出站 HTTPS 连接：
+
+```powershell
+Test-NetConnection github.com -Port 443
+Test-NetConnection release-assets.githubusercontent.com -Port 443
+Test-NetConnection persistent.oaistatic.com -Port 443
+Test-NetConnection api.openai.com -Port 443
+```
+
+如果网络要求代理或 TLS 解密，应由服务器网络管理员配置受信任的系统代理和根证书；不要关闭 TLS 校验，也不要修改工具清单中的固定 SHA-256。
+
 配置脚本通过安全交互提示采集生产密钥，并只将其保存到 ACL 保护的主机配置文件。它完成数据权限检查、三年历史回填、Tunnel 自检、MCP 本地就绪检查和 Tunnel 服务身份就绪检查后，才启动 `StockMcpService` 与 `StockMcpTunnel`。
 
 ## 发布 ZIP 安装（无 Git 或离线环境）

@@ -39,6 +39,15 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("Expand-Archive", fetch)
         self.assertIn("Assert-Sha256 $destination $entry.sha256", fetch)
 
+    def test_tool_fetch_uses_tls12_and_retries_transient_https_failures(self) -> None:
+        fetch = self._read_required("fetch-tools.ps1")
+
+        self.assertIn("SecurityProtocolType]::Tls12", fetch)
+        self.assertIn("function Invoke-ToolDownload", fetch)
+        self.assertIn("$attempt -le 3", fetch)
+        self.assertIn("-TimeoutSec 120", fetch)
+        self.assertIn("Failed to download", fetch)
+
     def test_install_uses_isolated_python_and_two_services(self) -> None:
         install = self._read_required("install.ps1")
 

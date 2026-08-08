@@ -8,6 +8,33 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'deploy\lib.ps1')
 
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+function Invoke-ToolDownload {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string] $Uri,
+        [Parameter(Mandatory = $true)][string] $Destination
+    )
+    $hostName = ([Uri] $Uri).Host
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+            Write-Host "Downloading $Name from $hostName (attempt $attempt/3)"
+            Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing -TimeoutSec 120
+            return
+        } catch {
+            $lastError = $_.Exception.Message
+            if ($attempt -lt 3) {
+                Write-Warning "Download attempt $attempt for $Name failed: $lastError"
+                Start-Sleep -Seconds (3 * $attempt)
+            }
+        }
+    }
+    throw "Failed to download $Name from $hostName after 3 attempts. Confirm outbound HTTPS, proxy, and TLS access. Last error: $lastError"
+}
+
 $tools = Get-ToolManifest $Manifest
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 foreach ($name in @('uv', 'winsw', 'tunnel-client')) {
@@ -16,7 +43,7 @@ foreach ($name in @('uv', 'winsw', 'tunnel-client')) {
     New-Item -ItemType Directory -Path $temporary -Force | Out-Null
     try {
         $download = Join-Path $temporary 'asset'
-        Invoke-WebRequest -Uri $entry.url -OutFile $download -UseBasicParsing
+        Invoke-ToolDownload $name $entry.url $download
         Assert-Sha256 $download $entry.archive_sha256
         $destination = Join-Path $OutputDirectory $entry.path
         if ([string]::IsNullOrWhiteSpace($entry.archive_member)) {
