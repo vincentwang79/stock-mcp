@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string] $InstallRoot = 'E:\StockMcp',
+    [switch] $TushareTokenFromClipboard,
     [switch] $TunnelRuntimeKeyFromClipboard,
     [string] $ConfigurationFile,
     [switch] $WriteConfigurationTemplate
@@ -40,8 +41,8 @@ Assert-WindowsX64
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $configDirectory = Join-Path $InstallRoot 'config'
 if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot 'current'))) { throw 'Stock MCP is not installed.' }
-if ($WriteConfigurationTemplate -and $TunnelRuntimeKeyFromClipboard) {
-    throw '-WriteConfigurationTemplate cannot be combined with -TunnelRuntimeKeyFromClipboard.'
+if ($WriteConfigurationTemplate -and ($TushareTokenFromClipboard -or $TunnelRuntimeKeyFromClipboard)) {
+    throw '-WriteConfigurationTemplate cannot be combined with clipboard input switches.'
 }
 if ($WriteConfigurationTemplate) {
     if ([string]::IsNullOrWhiteSpace($ConfigurationFile)) {
@@ -73,13 +74,37 @@ if ($ConfigurationFile) {
     foreach ($name in $configuration.Keys) {
         if ($name -notin $expectedNames) { throw "Configuration file has unsupported key '$name'." }
     }
-    $tushare = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'TushareToken')
+    if ($TushareTokenFromClipboard) {
+        if ($null -eq (Get-Command Get-Clipboard -ErrorAction SilentlyContinue)) {
+            throw 'Clipboard input is unavailable in this PowerShell host.'
+        }
+        $clipboardToken = Get-Clipboard -Raw
+        if ([string]::IsNullOrWhiteSpace($clipboardToken)) {
+            throw 'Clipboard does not contain a Tushare token.'
+        }
+        $tushare = ConvertTo-SecureString $clipboardToken.Trim() -AsPlainText -Force
+        $clipboardToken = $null
+    } else {
+        $tushare = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'TushareToken')
+    }
     $tunnelId = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'TunnelId')
     $tunnelKey = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'TunnelRuntimeApiKey')
     $proxy = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'HttpsProxy' -Optional)
     $customCa = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'CustomCaFilePath' -Optional)
 } else {
-    $tushare = Read-Host 'Tushare token' -AsSecureString
+    if ($TushareTokenFromClipboard) {
+        if ($null -eq (Get-Command Get-Clipboard -ErrorAction SilentlyContinue)) {
+            throw 'Clipboard input is unavailable in this PowerShell host.'
+        }
+        $clipboardToken = Get-Clipboard -Raw
+        if ([string]::IsNullOrWhiteSpace($clipboardToken)) {
+            throw 'Clipboard does not contain a Tushare token.'
+        }
+        $tushare = ConvertTo-SecureString $clipboardToken.Trim() -AsPlainText -Force
+        $clipboardToken = $null
+    } else {
+        $tushare = Read-Host 'Tushare token' -AsSecureString
+    }
     $tunnelId = Read-Host 'Platform Tunnel ID' -AsSecureString
     if ($TunnelRuntimeKeyFromClipboard) {
         if ($null -eq (Get-Command Get-Clipboard -ErrorAction SilentlyContinue)) {
@@ -98,6 +123,11 @@ if ($ConfigurationFile) {
     $customCa = Read-Host 'Optional custom CA file path (leave blank)' -AsSecureString
 }
 
+$tushareValue = (Get-Plaintext $tushare).Trim()
+if ($tushareValue -notmatch '^[0-9a-fA-F]{56}$') {
+    throw 'Tushare token must be exactly 56 hexadecimal characters.'
+}
+
 $customCaValue = Get-Plaintext $customCa
 $managedCa = ''
 if (-not [string]::IsNullOrWhiteSpace($customCaValue)) {
@@ -109,11 +139,12 @@ if (-not [string]::IsNullOrWhiteSpace($customCaValue)) {
 
 $secretFile = Join-Path $configDirectory 'secrets.env'
 $lines = @(
-    'TUSHARE_TOKEN=' + (Get-Plaintext $tushare),
+    'TUSHARE_TOKEN=' + $tushareValue,
     'HTTPS_PROXY=' + (Get-Plaintext $proxy),
     'STOCK_MCP_CA_FILE=' + $managedCa
 )
 [IO.File]::WriteAllLines($secretFile, $lines, [Text.UTF8Encoding]::new($false))
+$tushareValue = $null
 # The MCP application can read only its Tushare configuration. It cannot modify
 # code/tools and it cannot read the Tunnel runtime-key file.
 Set-PrivateFileAcl $secretFile -Reader StockMcpService

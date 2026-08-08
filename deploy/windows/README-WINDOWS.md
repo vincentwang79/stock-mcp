@@ -71,6 +71,17 @@ notepad E:\StockMcp\config\configure-input.psd1
   -ConfigurationFile E:\StockMcp\config\configure-input.psd1
 ```
 
+如果配置文件中的 Tushare Token 曾被错误内容污染，可先只复制官网显示的完整 Token，再使用剪贴板值覆盖配置文件中的 `TushareToken`。其他配置仍从文件读取，Token 不会进入命令历史：
+
+```powershell
+.\deploy\windows\configure.ps1 `
+  -InstallRoot E:\StockMcp `
+  -ConfigurationFile E:\StockMcp\config\configure-input.psd1 `
+  -TushareTokenFromClipboard
+```
+
+脚本会在写入主机配置前要求 Tushare Token 是 56 位十六进制字符串；格式不符时立即停止，不会再用错误值覆盖当前配置。完成后可执行 `Set-Clipboard -Value ''` 清空剪贴板。
+
 脚本会先将输入文件限制为 Administrators 和 SYSTEM 可读，再读取它。只有配置、三年回填、本地 MCP 与 Tunnel 验证全部成功后，才删除该临时输入文件；失败时会保留文件供修正后重试。运行时密钥仍只会写入专用的受限密钥文件，不会出现在服务命令行或日志中。
 
 `install-from-source.ps1` 不生成或解压发布 ZIP。它要求 Git 工作区没有已修改或未跟踪的文件，记录当前提交和远程地址，下载并验证固定版本的 `uv`、WinSW 与 `tunnel-client`，然后建立可回滚的 `E:\StockMcp\releases\<版本+提交>` 运行副本。每次 `git pull` 到新提交后，再次运行同一安装命令即可升级；失败时仍保留旧版本和数据库备份。

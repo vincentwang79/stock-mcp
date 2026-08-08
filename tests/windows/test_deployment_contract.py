@@ -102,6 +102,16 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("ConvertTo-SecureString", configure)
         self.assertIn("-TunnelRuntimeKeyFromClipboard", readme)
 
+    def test_configuration_can_override_file_tushare_token_from_clipboard(self) -> None:
+        configure = self._read_required("configure.ps1")
+        readme = self._read_required("README-WINDOWS.md")
+
+        self.assertIn("[switch] $TushareTokenFromClipboard", configure)
+        self.assertIn("if ($TushareTokenFromClipboard)", configure)
+        self.assertIn("Tushare token must be exactly 56 hexadecimal characters", configure)
+        self.assertIn("'^[0-9a-fA-F]{56}$'", configure)
+        self.assertIn("-TushareTokenFromClipboard", readme)
+
     def test_configuration_can_use_one_acl_protected_input_file(self) -> None:
         configure = self._read_required("configure.ps1")
         example = self._read_required("configure-input.psd1.example")
