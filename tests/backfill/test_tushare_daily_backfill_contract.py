@@ -471,8 +471,9 @@ class _RecordedBaoStockClient:
         }
         return _BaoStockRows(("code", "code_name", "tradeStatus"), rows[day])
 
-    def query_stock_basic(self, *, date: str = "") -> _BaoStockRows:
-        self.basic_requests.append(date)
+    def query_stock_basic(self) -> _BaoStockRows:
+        """Match BaoStock's production API, which takes no ``date`` argument."""
+        self.basic_requests.append("called")
         return _BaoStockRows(
             ("code", "code_name", "ipoDate", "type", "status"),
             [
@@ -591,6 +592,7 @@ class ProductionBackfillCompositionContractTest(unittest.TestCase):
             baostock.calendar_requests,
             [(PRODUCTION_START.isoformat(), PRODUCTION_END.isoformat())],
         )
+        self.assertEqual(baostock.basic_requests, ["called"])
         self.assertEqual(
             baostock.all_stock_requests,
             [day.isoformat() for day in PRODUCTION_DAYS],

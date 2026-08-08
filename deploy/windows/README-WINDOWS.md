@@ -41,6 +41,16 @@ git pull --ff-only
 .\deploy\windows\configure.ps1 -InstallRoot E:\StockMcp
 ```
 
+如果 Windows PowerShell 的安全输入提示不能一次粘贴完整的 Tunnel runtime API key，请先在本机复制完整密钥，然后改用下列命令。开关只让脚本在进程内读取剪贴板；密钥不会成为命令参数、命令历史或日志的一部分。运行后可执行 `Set-Clipboard -Value ''` 清空剪贴板。
+
+```powershell
+.\deploy\windows\configure.ps1 `
+  -InstallRoot E:\StockMcp `
+  -TunnelRuntimeKeyFromClipboard
+```
+
+脚本仍会安全提示输入 Tushare Token、Tunnel ID、代理和可选 CA 路径，但不会再次提示输入 Tunnel runtime API key。
+
 `install-from-source.ps1` 不生成或解压发布 ZIP。它要求 Git 工作区没有已修改或未跟踪的文件，记录当前提交和远程地址，下载并验证固定版本的 `uv`、WinSW 与 `tunnel-client`，然后建立可回滚的 `E:\StockMcp\releases\<版本+提交>` 运行副本。每次 `git pull` 到新提交后，再次运行同一安装命令即可升级；失败时仍保留旧版本和数据库备份。
 
 如果 `Get-ExecutionPolicy -List` 显示 `MachinePolicy` 或 `UserPolicy` 已由组策略强制，当前窗口的设置也会被拒绝；此时应由 Windows Server 管理员为该受控仓库配置相应的脚本执行策略。不要将机器级策略设为 `Unrestricted`，也不要对不可信目录使用绕过命令。

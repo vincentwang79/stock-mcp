@@ -93,6 +93,15 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("icacls", library)
         self.assertNotIn("param([string]$TushareToken", configure.replace(" ", ""))
 
+    def test_configuration_can_read_runtime_key_from_clipboard_without_argv_secret(self) -> None:
+        configure = self._read_required("configure.ps1")
+        readme = self._read_required("README-WINDOWS.md")
+
+        self.assertIn("[switch] $TunnelRuntimeKeyFromClipboard", configure)
+        self.assertIn("Get-Clipboard -Raw", configure)
+        self.assertIn("ConvertTo-SecureString", configure)
+        self.assertIn("-TunnelRuntimeKeyFromClipboard", readme)
+
     def test_update_has_health_checked_rollback_and_uninstall_preserves_data(self) -> None:
         update = self._read_required("update.ps1")
         uninstall = self._read_required("uninstall.ps1")

@@ -276,7 +276,7 @@ def run_production_backfill(
                 end_date=end.isoformat(),
             )
         )
-        basic_rows = _baostock_rows(_call_baostock(baostock_client, "query_stock_basic", date=""))
+        basic_rows = _baostock_rows(_call_baostock(baostock_client, "query_stock_basic"))
         industry_rows = _baostock_rows(_call_baostock(baostock_client, "query_stock_industry"))
 
         def securities_for_date(target: date) -> tuple[Security, ...]:

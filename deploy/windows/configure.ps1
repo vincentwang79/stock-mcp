@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([string] $InstallRoot = 'E:\StockMcp')
+param(
+    [string] $InstallRoot = 'E:\StockMcp',
+    [switch] $TunnelRuntimeKeyFromClipboard
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -17,7 +20,19 @@ if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot 'current'))) { throw 'S
 
 $tushare = Read-Host 'Tushare token' -AsSecureString
 $tunnelId = Read-Host 'Platform Tunnel ID' -AsSecureString
-$tunnelKey = Read-Host 'Tunnel runtime API key' -AsSecureString
+if ($TunnelRuntimeKeyFromClipboard) {
+    if ($null -eq (Get-Command Get-Clipboard -ErrorAction SilentlyContinue)) {
+        throw 'Clipboard input is unavailable in this PowerShell host. Run without -TunnelRuntimeKeyFromClipboard.'
+    }
+    $clipboardKey = Get-Clipboard -Raw
+    if ([string]::IsNullOrWhiteSpace($clipboardKey)) {
+        throw 'Clipboard does not contain a Tunnel runtime API key.'
+    }
+    $tunnelKey = ConvertTo-SecureString $clipboardKey.Trim() -AsPlainText -Force
+    $clipboardKey = $null
+} else {
+    $tunnelKey = Read-Host 'Tunnel runtime API key' -AsSecureString
+}
 $proxy = Read-Host 'Optional HTTPS proxy (leave blank)' -AsSecureString
 $customCa = Read-Host 'Optional custom CA file path (leave blank)' -AsSecureString
 
