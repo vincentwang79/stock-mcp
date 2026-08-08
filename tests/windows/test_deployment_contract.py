@@ -125,6 +125,21 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("-WriteConfigurationTemplate", readme)
         self.assertIn("-ConfigurationFile", readme)
 
+    def test_configuration_file_allows_blank_optional_proxy_and_ca_values(self) -> None:
+        configure = self._read_required("configure.ps1")
+
+        self.assertIn("function ConvertTo-ConfigurationSecureString", configure)
+        self.assertIn("[AllowEmptyString()][string] $Value", configure)
+        self.assertIn("return [Security.SecureString]::new()", configure)
+        self.assertIn(
+            "ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'HttpsProxy' -Optional)",
+            configure,
+        )
+        self.assertIn(
+            "ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'CustomCaFilePath' -Optional)",
+            configure,
+        )
+
     def test_release_builders_include_the_configuration_template(self) -> None:
         build = self._read_required("build-release.ps1")
         source_install = self._read_required("install-from-source.ps1")

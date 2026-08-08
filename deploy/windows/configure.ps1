@@ -14,6 +14,11 @@ function Get-Plaintext([Security.SecureString] $Value) {
     return (New-Object System.Net.NetworkCredential('', $Value)).Password
 }
 
+function ConvertTo-ConfigurationSecureString([AllowEmptyString()][string] $Value) {
+    if ([string]::IsNullOrEmpty($Value)) { return [Security.SecureString]::new() }
+    return ConvertTo-SecureString -String $Value -AsPlainText -Force
+}
+
 function Get-ConfigurationText {
     param(
         [Parameter(Mandatory = $true)][hashtable] $Configuration,
@@ -68,11 +73,11 @@ if ($ConfigurationFile) {
     foreach ($name in $configuration.Keys) {
         if ($name -notin $expectedNames) { throw "Configuration file has unsupported key '$name'." }
     }
-    $tushare = ConvertTo-SecureString (Get-ConfigurationText $configuration 'TushareToken') -AsPlainText -Force
-    $tunnelId = ConvertTo-SecureString (Get-ConfigurationText $configuration 'TunnelId') -AsPlainText -Force
-    $tunnelKey = ConvertTo-SecureString (Get-ConfigurationText $configuration 'TunnelRuntimeApiKey') -AsPlainText -Force
-    $proxy = ConvertTo-SecureString (Get-ConfigurationText $configuration 'HttpsProxy' -Optional) -AsPlainText -Force
-    $customCa = ConvertTo-SecureString (Get-ConfigurationText $configuration 'CustomCaFilePath' -Optional) -AsPlainText -Force
+    $tushare = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'TushareToken')
+    $tunnelId = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'TunnelId')
+    $tunnelKey = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'TunnelRuntimeApiKey')
+    $proxy = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'HttpsProxy' -Optional)
+    $customCa = ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'CustomCaFilePath' -Optional)
 } else {
     $tushare = Read-Host 'Tushare token' -AsSecureString
     $tunnelId = Read-Host 'Platform Tunnel ID' -AsSecureString
