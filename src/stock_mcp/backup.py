@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import time
+from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -70,10 +72,25 @@ class BackupManager:
             ):
                 if sidecar.exists():
                     sidecar.unlink()
-            os.replace(temporary, destination_path)
+            self._replace_atomically(temporary, destination_path)
         finally:
             if temporary.exists():
-                temporary.unlink()
+                with suppress(PermissionError):
+                    temporary.unlink()
+
+    @staticmethod
+    def _replace_atomically(source: Path, destination: Path, *, attempts: int = 30) -> None:
+        for attempt in range(1, attempts + 1):
+            try:
+                os.replace(source, destination)
+                return
+            except PermissionError as error:
+                if attempt == attempts:
+                    raise BackupIntegrityError(
+                        "database restore could not replace "
+                        f"{destination} after {attempts} attempts"
+                    ) from error
+                time.sleep(1)
 
     def _apply_retention(self) -> None:
         backups = sorted(

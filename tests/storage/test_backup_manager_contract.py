@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import UTC, date, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from stock_mcp.backup import BackupIntegrityError, BackupManager
 from stock_mcp.domain import DailyBar
@@ -68,6 +69,31 @@ class BackupManagerContractTest(unittest.TestCase):
 
         self.assertFalse(wal.exists())
         self.assertFalse(shm.exists())
+
+    def test_restore_retries_a_transient_windows_file_lock_during_atomic_replace(self) -> None:
+        manager = BackupManager(self.root / "backups", retention=3)
+        artifact = manager.create(self.database, label="20260807")
+        destination = self.root / "restored.sqlite3"
+        real_replace = __import__("os").replace
+        attempts = 0
+
+        def replace_after_one_lock(source: str | Path, target: str | Path) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError("simulated transient Windows file lock")
+            real_replace(source, target)
+
+        with (
+            patch("stock_mcp.backup.os.replace", side_effect=replace_after_one_lock),
+            patch("stock_mcp.backup.time.sleep", create=True) as sleep,
+        ):
+            manager.restore(artifact.database_path, destination)
+
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once()
+        restored = Database(destination).load_daily_bars(date(2026, 8, 7), "fixture")
+        self.assertEqual((_bar(7),), restored)
 
     def test_retention_removes_oldest_complete_backup_pair(self) -> None:
         manager = BackupManager(self.root / "backups", retention=2)

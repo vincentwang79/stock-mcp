@@ -16,6 +16,14 @@ function Set-UpdateState([Parameter(Mandatory = $true)][string] $State) {
     $State | Set-Content -LiteralPath (Join-Path $stateDirectory 'service-status') -Encoding ASCII
 }
 
+function Get-ConfigurationState([Parameter(Mandatory = $true)][string] $Root) {
+    $stateFile = Join-Path $Root 'state\service-status'
+    if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) { return 'configuration_required' }
+    $state = (Get-Content -LiteralPath $stateFile -Raw).Trim()
+    if ($state -in @('ready', 'rollback_ready')) { return 'ready' }
+    return 'configuration_required'
+}
+
 function Get-CurrentReleaseTarget([Parameter(Mandatory = $true)][string] $Root) {
     $current = Get-Item -LiteralPath (Join-Path $Root 'current')
     $targets = @($current.Target)
@@ -114,6 +122,7 @@ if ($packageIsArchive) {
 
 $backupRoot = Join-Path $InstallRoot ('backups\update-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $oldTarget = Get-CurrentReleaseTarget $InstallRoot
+$configurationState = Get-ConfigurationState $InstallRoot
 $newRelease = $null
 $newReleaseStaging = $null
 $newReleaseCreated = $false
@@ -243,7 +252,7 @@ try {
     if (Test-Path -LiteralPath $customCa -PathType Leaf) {
         Set-PrivateFileAcl $customCa -Reader StockMcpService -SharedWithOtherService
     }
-    if ($doctorStatus -eq 'configuration_required') {
+    if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready') {
         Set-UpdateState 'configuration_required'
         Write-Host "Updated to $version. Configuration is still required. Backup: $backupRoot"
     } else {
@@ -281,7 +290,7 @@ try {
             if (-not (Test-Path -LiteralPath $oldWinSw -PathType Leaf)) { throw 'Rollback WinSW executable is missing.' }
             Refresh-WinSWServiceDefinitions $servicesDirectory $oldWinSw
             $rollbackDoctorStatus = Invoke-UpdateDoctor $oldPython $InstallRoot
-            if ($rollbackDoctorStatus -eq 'configuration_required') {
+            if ($rollbackDoctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready') {
                 Set-UpdateState 'configuration_required'
                 Write-Warning 'Rollback succeeded; configuration is still required.'
             } else {

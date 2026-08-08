@@ -378,10 +378,27 @@ class WindowsDeploymentContractTest(unittest.TestCase):
 
         self.assertIn("function Invoke-UpdateDoctor", update)
         self.assertIn("$doctorStatus = Invoke-UpdateDoctor $python $InstallRoot", update)
-        self.assertIn("if ($doctorStatus -eq 'configuration_required')", update)
+        self.assertIn(
+            "if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready')",
+            update,
+        )
         self.assertIn("Set-UpdateState 'configuration_required'", update)
         self.assertLess(
-            update.index("if ($doctorStatus -eq 'configuration_required')"),
+            update.index("if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready')"),
+            update.index("Start-Service -Name StockMcpService"),
+        )
+
+    def test_update_does_not_start_services_after_an_interrupted_configuration(self) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("function Get-ConfigurationState", update)
+        self.assertIn("$configurationState = Get-ConfigurationState $InstallRoot", update)
+        self.assertIn(
+            "if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready')",
+            update,
+        )
+        self.assertLess(
+            update.index("if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready')"),
             update.index("Start-Service -Name StockMcpService"),
         )
 
