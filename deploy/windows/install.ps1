@@ -91,16 +91,7 @@ function Install-WinSWServices([string] $Root, [string] $WinSw) {
             & $WinSw install $xml
             if ($LASTEXITCODE -ne 0) { throw "WinSW could not install $name." }
         }
-        $sidOutput = & sc.exe sidtype $name unrestricted 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not enable Service SID for $name. $sidOutput"
-        }
-        # Keep the empty password as a literal native-command argument.  Windows PowerShell
-        # otherwise can omit an empty argument while invoking sc.exe.
-        $serviceOutput = & sc.exe config $name obj= "NT SERVICE\$name" password= '""' type= own 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not configure virtual service identity for $name. $serviceOutput"
-        }
+        Set-StockMcpServiceIdentity $name
     }
 }
 
@@ -147,8 +138,8 @@ if (-not (Test-Path -LiteralPath $appConfig)) {
 New-CurrentJunction $InstallRoot $release
 Install-WinSWServices $InstallRoot $winsw
 
-# Virtual service identities become resolvable after registration. Grant the minimum
-# runtime rights only now; program, tools, releases, services and config stay read-only.
+# Service accounts are set before these ACLs. Program, tools, releases, services and
+# config stay read-only; only the LocalService application account may write data.
 Set-PrivateAcl $InstallRoot -ReadableByApp -ReadableByTunnel
 Set-PrivateAcl (Join-Path $InstallRoot 'config') -ReadableByApp -ReadableByTunnel
 Set-PrivateAcl (Join-Path $InstallRoot 'data') -WritableByApp

@@ -102,6 +102,22 @@ function Get-VerifiedTool {
     return $destination
 }
 
+function Get-StockMcpServiceAccount([Parameter(Mandatory = $true)][string] $Name) {
+    switch ($Name) {
+        'StockMcpService' { return 'NT AUTHORITY\LocalService' }
+        'StockMcpTunnel' { return 'NT AUTHORITY\NetworkService' }
+        default { throw "Unknown Stock MCP service: $Name" }
+    }
+}
+
+function Set-StockMcpServiceIdentity([Parameter(Mandatory = $true)][string] $Name) {
+    $account = Get-StockMcpServiceAccount $Name
+    $serviceOutput = & sc.exe config $Name obj= $account password= '""' type= own 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not configure service identity for $Name. $serviceOutput"
+    }
+}
+
 function Set-PrivateAcl {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -114,11 +130,13 @@ function Set-PrivateAcl {
     & icacls $Path /inheritance:r /grant:r "BUILTIN\Administrators:(OI)(CI)F" "NT AUTHORITY\SYSTEM:(OI)(CI)F" | Out-Null
     if ($WritableByApp -or $ReadableByApp) {
         $rights = if ($WritableByApp) { 'M' } else { 'RX' }
-        & icacls $Path /grant "NT SERVICE\StockMcpService:(OI)(CI)$rights" | Out-Null
+        $appAccount = Get-StockMcpServiceAccount 'StockMcpService'
+        & icacls $Path /grant "${appAccount}:(OI)(CI)$rights" | Out-Null
     }
     if ($WritableByTunnel -or $ReadableByTunnel) {
         $rights = if ($WritableByTunnel) { 'M' } else { 'RX' }
-        & icacls $Path /grant "NT SERVICE\StockMcpTunnel:(OI)(CI)$rights" | Out-Null
+        $tunnelAccount = Get-StockMcpServiceAccount 'StockMcpTunnel'
+        & icacls $Path /grant "${tunnelAccount}:(OI)(CI)$rights" | Out-Null
     }
     if ($LASTEXITCODE -ne 0) { throw "Could not set ACL on $Path." }
 }
@@ -129,10 +147,12 @@ function Set-PrivateFileAcl {
         [ValidateSet('StockMcpService', 'StockMcpTunnel')][string] $Reader,
         [switch] $SharedWithOtherService
     )
-    & icacls $Path /inheritance:r /grant:r "BUILTIN\Administrators:F" "NT AUTHORITY\SYSTEM:F" "NT SERVICE\${Reader}:R" | Out-Null
+    $readerAccount = Get-StockMcpServiceAccount $Reader
+    & icacls $Path /inheritance:r /grant:r "BUILTIN\Administrators:F" "NT AUTHORITY\SYSTEM:F" "${readerAccount}:R" | Out-Null
     if ($SharedWithOtherService) {
         $other = if ($Reader -eq 'StockMcpService') { 'StockMcpTunnel' } else { 'StockMcpService' }
-        & icacls $Path /grant "NT SERVICE\${other}:R" | Out-Null
+        $otherAccount = Get-StockMcpServiceAccount $other
+        & icacls $Path /grant "${otherAccount}:R" | Out-Null
     }
     if ($LASTEXITCODE -ne 0) { throw "Could not protect $Path." }
 }

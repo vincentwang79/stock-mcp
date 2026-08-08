@@ -69,12 +69,15 @@ class WindowsDeploymentContractTest(unittest.TestCase):
 
     def test_install_uses_isolated_python_and_two_services(self) -> None:
         install = self._read_required("install.ps1")
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
 
         self.assertIn("UV_PYTHON_INSTALL_DIR", install)
         self.assertIn("uv sync --locked --no-dev --no-editable", install)
         self.assertIn("StockMcpService", install)
         self.assertIn("StockMcpTunnel", install)
-        self.assertIn("NT SERVICE\\$name", install)
+        self.assertIn("Set-StockMcpServiceIdentity $name", install)
+        self.assertIn("NT AUTHORITY\\LocalService", library)
+        self.assertIn("NT AUTHORITY\\NetworkService", library)
         self.assertIn("StockMcpService", install)
         self.assertIn("StockMcpTunnel", install)
         self.assertNotIn("LocalSystem", install)
@@ -341,16 +344,23 @@ class WindowsDeploymentContractTest(unittest.TestCase):
             install.index("Install-WinSWServices $InstallRoot $winsw"), install.index(config_acl)
         )
 
-    def test_services_enable_a_service_sid_and_preserve_identity_errors(self) -> None:
+    def test_services_use_separate_restricted_accounts_and_preserve_identity_errors(self) -> None:
         install = self._read_required("install.ps1")
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
 
-        sid_type = "& sc.exe sidtype $name unrestricted"
-        account_config = "$serviceOutput = & sc.exe config $name"
-        self.assertIn(sid_type, install)
-        self.assertIn(account_config, install)
-        self.assertIn("Could not enable Service SID for $name.", install)
-        self.assertIn("Could not configure virtual service identity for $name.", install)
-        self.assertLess(install.index(sid_type), install.index(account_config))
+        account_lookup = "function Get-StockMcpServiceAccount"
+        account_config = "$serviceOutput = & sc.exe config $Name obj= $account"
+        self.assertIn(account_lookup, library)
+        self.assertIn(account_config, library)
+        self.assertIn("Could not configure service identity for $Name.", library)
+        self.assertNotIn("NT SERVICE\\$name", install)
+
+    def test_acl_separates_app_and_tunnel_built_in_service_accounts(self) -> None:
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("NT AUTHORITY\\LocalService", library)
+        self.assertIn("NT AUTHORITY\\NetworkService", library)
+        self.assertNotIn("NT SERVICE\\StockMcp", library)
 
     def test_update_keeps_an_unconfigured_installation_in_configuration_required_state(
         self,
@@ -381,13 +391,14 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("FileAttributes]::ReparsePoint", library)
         self.assertNotIn("Remove-Item -LiteralPath $current", library)
 
-    def test_update_repairs_missing_service_and_virtual_identity_before_refresh(self) -> None:
+    def test_update_repairs_missing_service_and_restricted_identity_before_refresh(self) -> None:
         update = self._read_required("update.ps1")
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
 
-        self.assertIn("function Set-StockMcpVirtualServiceIdentity", update)
+        self.assertIn("function Set-StockMcpServiceIdentity", library)
         self.assertIn("& $WinSw install $xml", update)
         self.assertIn("& $WinSw refresh $xml", update)
-        self.assertIn("Set-StockMcpVirtualServiceIdentity $name", update)
+        self.assertIn("Set-StockMcpServiceIdentity $name", update)
 
     def test_update_waits_for_database_handle_release_before_restore(self) -> None:
         update = self._read_required("update.ps1")

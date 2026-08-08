@@ -158,7 +158,7 @@ git pull --ff-only
 
 ## 权限与密钥规则
 
-两个服务分别使用 Windows 虚拟账户 `NT SERVICE\StockMcpService` 和 `NT SERVICE\StockMcpTunnel`。程序目录和版本目录对两个账户都只读；只有应用服务账户可以修改数据、备份和状态，只有 Tunnel 服务账户可以读取 Tunnel 运行密钥。
+两个服务使用彼此独立的受限内置账户：`StockMcpService` 使用 `NT AUTHORITY\LocalService`，`StockMcpTunnel` 使用 `NT AUTHORITY\NetworkService`。程序目录和版本目录对两个账户都只读；只有应用服务账户可以修改数据、备份和状态，只有 Tunnel 服务账户可以读取 Tunnel 运行密钥。这一组合兼容不允许 `NT SERVICE\…` 虚拟账户登录的 Windows Server 策略。
 
 不得将 Token、代理凭证或其他生产密钥写入 PowerShell 命令历史、服务 XML、日志、问题单、Agent 提示、交接文档或本手册。
 

@@ -61,13 +61,6 @@ function Wait-DatabaseExclusiveAccess {
     throw "Database is still in use after services stopped: $Path"
 }
 
-function Set-StockMcpVirtualServiceIdentity([Parameter(Mandatory = $true)][string] $Name) {
-    $sidOutput = & sc.exe sidtype $Name unrestricted 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { throw "Could not enable Service SID for $Name. $sidOutput" }
-    $accountOutput = & sc.exe config $Name obj= "NT SERVICE\$Name" password= '""' type= own 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { throw "Could not configure virtual service identity for $Name. $accountOutput" }
-}
-
 function New-WinSWServiceDefinitions {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -98,7 +91,7 @@ function Refresh-WinSWServiceDefinitions {
             & $WinSw refresh $xml
             if ($LASTEXITCODE -ne 0) { throw "WinSW could not refresh $name." }
         }
-        Set-StockMcpVirtualServiceIdentity $name
+        Set-StockMcpServiceIdentity $name
     }
 }
 
