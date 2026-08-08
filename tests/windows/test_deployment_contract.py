@@ -341,6 +341,17 @@ class WindowsDeploymentContractTest(unittest.TestCase):
             install.index("Install-WinSWServices $InstallRoot $winsw"), install.index(config_acl)
         )
 
+    def test_services_enable_a_service_sid_and_preserve_identity_errors(self) -> None:
+        install = self._read_required("install.ps1")
+
+        sid_type = "& sc.exe sidtype $name unrestricted"
+        account_config = "$serviceOutput = & sc.exe config $name"
+        self.assertIn(sid_type, install)
+        self.assertIn(account_config, install)
+        self.assertIn("Could not enable Service SID for $name.", install)
+        self.assertIn("Could not configure virtual service identity for $name.", install)
+        self.assertLess(install.index(sid_type), install.index(account_config))
+
     def test_source_checkout_can_install_without_a_release_zip(self) -> None:
         install = self._read_required("install.ps1")
         source_install = self._read_required("install-from-source.ps1")

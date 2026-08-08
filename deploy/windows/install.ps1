@@ -91,8 +91,16 @@ function Install-WinSWServices([string] $Root, [string] $WinSw) {
             & $WinSw install $xml
             if ($LASTEXITCODE -ne 0) { throw "WinSW could not install $name." }
         }
-        & sc.exe config $name obj= "NT SERVICE\$name" password= "" type= own | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Could not configure virtual service identity for $name." }
+        $sidOutput = & sc.exe sidtype $name unrestricted 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not enable Service SID for $name. $sidOutput"
+        }
+        # Keep the empty password as a literal native-command argument.  Windows PowerShell
+        # otherwise can omit an empty argument while invoking sc.exe.
+        $serviceOutput = & sc.exe config $name obj= "NT SERVICE\$name" password= '""' type= own 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not configure virtual service identity for $name. $serviceOutput"
+        }
     }
 }
 
