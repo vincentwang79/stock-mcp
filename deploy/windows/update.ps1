@@ -16,6 +16,31 @@ function Set-UpdateState([Parameter(Mandatory = $true)][string] $State) {
     $State | Set-Content -LiteralPath (Join-Path $stateDirectory 'service-status') -Encoding ASCII
 }
 
+function Get-CurrentReleaseTarget([Parameter(Mandatory = $true)][string] $Root) {
+    $current = Get-Item -LiteralPath (Join-Path $Root 'current')
+    $targets = @($current.Target)
+    if ($targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string] $targets[0])) {
+        throw "Current release junction does not have one usable target: $($current.FullName)"
+    }
+    return [string] $targets[0]
+}
+
+function Invoke-UpdateDoctor {
+    param(
+        [Parameter(Mandatory = $true)][string] $Python,
+        [Parameter(Mandatory = $true)][string] $Root
+    )
+    # The CLI deliberately returns 2 for the valid first-install state.  Capture
+    # output so it remains visible, then distinguish that state from a real failure.
+    $doctorOutput = & $Python -m stock_mcp.cli doctor --root $Root 2>&1 | Out-String
+    if (-not [string]::IsNullOrWhiteSpace($doctorOutput)) { Write-Host $doctorOutput.TrimEnd() }
+    if ($LASTEXITCODE -eq 0) { return 'ready' }
+    if ($LASTEXITCODE -eq 2 -and $doctorOutput -match '(?m)^stock-mcp:\s+configuration_required\s*$') {
+        return 'configuration_required'
+    }
+    throw "stock-mcp doctor failed. $doctorOutput"
+}
+
 function New-WinSWServiceDefinitions {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -62,7 +87,7 @@ if ($packageIsArchive) {
 }
 
 $backupRoot = Join-Path $InstallRoot ('backups\update-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-$oldTarget = (Get-Item -LiteralPath (Join-Path $InstallRoot 'current')).Target
+$oldTarget = Get-CurrentReleaseTarget $InstallRoot
 $newRelease = $null
 $newReleaseStaging = $null
 $newReleaseCreated = $false
@@ -152,8 +177,7 @@ try {
     & $python -m stock_mcp.cli migrate --root $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
     # Keep the literal command as an operator-visible acceptance criterion as well.
-    & $python -m stock_mcp.cli doctor --root $InstallRoot # stock-mcp doctor
-    if ($LASTEXITCODE -ne 0) { throw 'stock-mcp doctor failed.' }
+    $doctorStatus = Invoke-UpdateDoctor $python $InstallRoot # stock-mcp doctor
 
     Move-Item -LiteralPath $newReleaseStaging -Destination $newRelease
     $newReleaseCreated = $true
@@ -166,12 +190,17 @@ try {
     $servicesReplaced = $true
     if ($null -ne $servicesAcl) { Set-Acl -LiteralPath $servicesDirectory -AclObject $servicesAcl }
     Refresh-WinSWServiceDefinitions $servicesDirectory $winSw
-    Start-Service -Name StockMcpService
-    if (-not (Wait-LocalReady)) { throw 'Readiness check failed after update.' }
-    Start-Service -Name StockMcpTunnel
-    if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after update.' }
-    Set-UpdateState 'ready'
-    Write-Host "Updated to $version. Backup: $backupRoot"
+    if ($doctorStatus -eq 'configuration_required') {
+        Set-UpdateState 'configuration_required'
+        Write-Host "Updated to $version. Configuration is still required. Backup: $backupRoot"
+    } else {
+        Start-Service -Name StockMcpService
+        if (-not (Wait-LocalReady)) { throw 'Readiness check failed after update.' }
+        Start-Service -Name StockMcpTunnel
+        if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after update.' }
+        Set-UpdateState 'ready'
+        Write-Host "Updated to $version. Backup: $backupRoot"
+    }
 } catch {
     $failure = $_
     Set-UpdateState 'update_failed'
@@ -197,19 +226,25 @@ try {
             $oldWinSw = Join-Path $toolsDestination 'WinSW.exe'
             if (-not (Test-Path -LiteralPath $oldWinSw -PathType Leaf)) { throw 'Rollback WinSW executable is missing.' }
             Refresh-WinSWServiceDefinitions $servicesDirectory $oldWinSw
-            Start-Service -Name StockMcpService
-            if (-not (Wait-LocalReady)) { throw 'Rollback MCP readiness check failed.' }
-            Start-Service -Name StockMcpTunnel
-            if (-not (Wait-TunnelReady)) { throw 'Rollback Tunnel readiness check failed.' }
-            Set-UpdateState 'rollback_ready'
-            Write-Warning 'Rollback succeeded; the previous release is ready.'
+            $rollbackDoctorStatus = Invoke-UpdateDoctor $oldPython $InstallRoot
+            if ($rollbackDoctorStatus -eq 'configuration_required') {
+                Set-UpdateState 'configuration_required'
+                Write-Warning 'Rollback succeeded; configuration is still required.'
+            } else {
+                Start-Service -Name StockMcpService
+                if (-not (Wait-LocalReady)) { throw 'Rollback MCP readiness check failed.' }
+                Start-Service -Name StockMcpTunnel
+                if (-not (Wait-TunnelReady)) { throw 'Rollback Tunnel readiness check failed.' }
+                Set-UpdateState 'rollback_ready'
+                Write-Warning 'Rollback succeeded; the previous release is ready.'
+            }
         } catch {
             Set-UpdateState 'rollback_failed'
             Write-Warning "Rollback encountered an error: $($_.Exception.Message)"
         }
     }
     if ($newReleaseCreated -and $newRelease -and (Test-Path -LiteralPath $newRelease) -and
-        $newRelease -ne (Get-Item -LiteralPath (Join-Path $InstallRoot 'current')).Target) {
+        $newRelease -ne (Get-CurrentReleaseTarget $InstallRoot)) {
         try { Remove-Item -LiteralPath $newRelease -Recurse -Force }
         catch { Write-Warning "Could not remove failed release: $newRelease" }
     }

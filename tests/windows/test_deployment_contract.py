@@ -352,6 +352,28 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("Could not configure virtual service identity for $name.", install)
         self.assertLess(install.index(sid_type), install.index(account_config))
 
+    def test_update_keeps_an_unconfigured_installation_in_configuration_required_state(
+        self,
+    ) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("function Invoke-UpdateDoctor", update)
+        self.assertIn("$doctorStatus = Invoke-UpdateDoctor $python $InstallRoot", update)
+        self.assertIn("if ($doctorStatus -eq 'configuration_required')", update)
+        self.assertIn("Set-UpdateState 'configuration_required'", update)
+        self.assertLess(
+            update.index("if ($doctorStatus -eq 'configuration_required')"),
+            update.index("Start-Service -Name StockMcpService"),
+        )
+
+    def test_update_normalizes_a_junction_target_to_one_string_before_rollback(self) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("function Get-CurrentReleaseTarget", update)
+        self.assertIn("$targets = @($current.Target)", update)
+        self.assertIn("return [string] $targets[0]", update)
+        self.assertIn("$oldTarget = Get-CurrentReleaseTarget $InstallRoot", update)
+
     def test_source_checkout_can_install_without_a_release_zip(self) -> None:
         install = self._read_required("install.ps1")
         source_install = self._read_required("install-from-source.ps1")
