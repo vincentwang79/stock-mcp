@@ -48,6 +48,12 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("-TimeoutSec 120", fetch)
         self.assertIn("Failed to download", fetch)
 
+    def test_tool_fetch_accepts_a_direct_executable_without_archive_member(self) -> None:
+        fetch = self._read_required("fetch-tools.ps1")
+
+        self.assertIn("PSObject.Properties['archive_member']", fetch)
+        self.assertIn("IsNullOrWhiteSpace($archiveMember)", fetch)
+
     def test_install_uses_isolated_python_and_two_services(self) -> None:
         install = self._read_required("install.ps1")
 

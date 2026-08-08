@@ -46,14 +46,18 @@ foreach ($name in @('uv', 'winsw', 'tunnel-client')) {
         Invoke-ToolDownload $name $entry.url $download
         Assert-Sha256 $download $entry.archive_sha256
         $destination = Join-Path $OutputDirectory $entry.path
-        if ([string]::IsNullOrWhiteSpace($entry.archive_member)) {
+        $archiveMember = ''
+        if ($entry.PSObject.Properties['archive_member']) {
+            $archiveMember = [string] $entry.archive_member
+        }
+        if ([string]::IsNullOrWhiteSpace($archiveMember)) {
             Copy-Item -LiteralPath $download -Destination $destination -Force
         } else {
             $archive = Join-Path $temporary 'asset.zip'
             Move-Item -LiteralPath $download -Destination $archive
             $expanded = Join-Path $temporary 'expanded'
             Expand-Archive -LiteralPath $archive -DestinationPath $expanded
-            $member = [IO.Path]::GetFullPath((Join-Path $expanded $entry.archive_member))
+            $member = [IO.Path]::GetFullPath((Join-Path $expanded $archiveMember))
             $root = [IO.Path]::GetFullPath($expanded).TrimEnd('\') + '\'
             if (-not $member.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
                 throw "Archive member escapes extraction root for $name."
