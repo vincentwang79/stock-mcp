@@ -139,7 +139,15 @@ function Set-PrivateFileAcl {
 
 function New-CurrentJunction([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $Target) {
     $current = Join-Path $Root 'current'
-    if (Test-Path -LiteralPath $current) { Remove-Item -LiteralPath $current -Force }
+    if (Test-Path -LiteralPath $current) {
+        $currentItem = Get-Item -LiteralPath $current -Force
+        if (-not ($currentItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Refusing to replace non-junction current directory: $current"
+        }
+        # Directory.Delete removes the junction itself without recursively traversing
+        # the target release, and does not trigger PowerShell's child-item prompt.
+        [IO.Directory]::Delete($current)
+    }
     New-Item -ItemType Junction -Path $current -Target $Target | Out-Null
 }
 

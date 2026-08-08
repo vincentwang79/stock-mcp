@@ -41,6 +41,33 @@ function Invoke-UpdateDoctor {
     throw "stock-mcp doctor failed. $doctorOutput"
 }
 
+function Wait-DatabaseExclusiveAccess {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [int] $Attempts = 30
+    )
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $stream = $null
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            return
+        } catch [IO.IOException] {
+            if ($attempt -eq $Attempts) { break }
+            Start-Sleep -Seconds 1
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+        }
+    }
+    throw "Database is still in use after services stopped: $Path"
+}
+
+function Set-StockMcpVirtualServiceIdentity([Parameter(Mandatory = $true)][string] $Name) {
+    $sidOutput = & sc.exe sidtype $Name unrestricted 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Could not enable Service SID for $Name. $sidOutput" }
+    $accountOutput = & sc.exe config $Name obj= "NT SERVICE\$Name" password= '""' type= own 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Could not configure virtual service identity for $Name. $accountOutput" }
+}
+
 function New-WinSWServiceDefinitions {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -64,8 +91,14 @@ function Refresh-WinSWServiceDefinitions {
     )
     foreach ($name in @('StockMcpService', 'StockMcpTunnel')) {
         $xml = Join-Path $ServiceDirectory ("{0}.xml" -f $name)
-        & $WinSw refresh $xml
-        if ($LASTEXITCODE -ne 0) { throw "WinSW could not refresh $name." }
+        if ($null -eq (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
+            & $WinSw install $xml
+            if ($LASTEXITCODE -ne 0) { throw "WinSW could not install $name." }
+        } else {
+            & $WinSw refresh $xml
+            if ($LASTEXITCODE -ne 0) { throw "WinSW could not refresh $name." }
+        }
+        Set-StockMcpVirtualServiceIdentity $name
     }
 }
 
@@ -131,6 +164,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Verified online database backup failed.' }
     $servicesStopped = $true
     Stop-StockServices
+    Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\stock-mcp.sqlite3')
     Copy-Item -LiteralPath $oldTarget -Destination (Join-Path $backupRoot 'previous-release') -Recurse -Force
     if (Test-Path -LiteralPath $toolsDestination) {
         $toolsAcl = Get-Acl -LiteralPath $toolsDestination
@@ -208,6 +242,7 @@ try {
     if ($servicesStopped) {
         try {
             Stop-StockServices
+            Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\stock-mcp.sqlite3')
             if ($oldTarget -and (Test-Path -LiteralPath $oldTarget)) { New-CurrentJunction $InstallRoot $oldTarget }
             if ($databaseBackup -and (Test-Path -LiteralPath $databaseBackup)) {
                 & $oldPython -m stock_mcp.cli restore --root $InstallRoot --source $databaseBackup

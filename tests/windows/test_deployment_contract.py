@@ -374,6 +374,31 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("return [string] $targets[0]", update)
         self.assertIn("$oldTarget = Get-CurrentReleaseTarget $InstallRoot", update)
 
+    def test_current_junction_is_replaced_without_recursive_prompt_or_target_deletion(self) -> None:
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[IO.Directory]::Delete($current)", library)
+        self.assertIn("FileAttributes]::ReparsePoint", library)
+        self.assertNotIn("Remove-Item -LiteralPath $current", library)
+
+    def test_update_repairs_missing_service_and_virtual_identity_before_refresh(self) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("function Set-StockMcpVirtualServiceIdentity", update)
+        self.assertIn("& $WinSw install $xml", update)
+        self.assertIn("& $WinSw refresh $xml", update)
+        self.assertIn("Set-StockMcpVirtualServiceIdentity $name", update)
+
+    def test_update_waits_for_database_handle_release_before_restore(self) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("function Wait-DatabaseExclusiveAccess", update)
+        self.assertIn("[IO.FileShare]::None", update)
+        self.assertIn(
+            "Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\\stock-mcp.sqlite3')",
+            update,
+        )
+
     def test_source_checkout_can_install_without_a_release_zip(self) -> None:
         install = self._read_required("install.ps1")
         source_install = self._read_required("install-from-source.ps1")
