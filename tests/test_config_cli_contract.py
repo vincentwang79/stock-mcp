@@ -55,6 +55,16 @@ class ConfigAndCliContractTest(unittest.TestCase):
         self.assertNotIn(secret_value, output.getvalue())
         self.assertIn('"status": "ready"', output.getvalue())
 
+    def test_host_secret_file_wins_over_ambient_process_secret(self) -> None:
+        config = self.root / "config"
+        config.mkdir(parents=True)
+        (config / "secrets.env").write_text("TUSHARE_TOKEN=file-token\n", encoding="utf-8")
+
+        with patch.dict("stock_mcp.config.os.environ", {"TUSHARE_TOKEN": "stale-token"}):
+            settings = Settings.load(root=self.root)
+
+        self.assertEqual("file-token", settings.tushare_token)
+
     def test_cli_creates_and_verifies_online_database_backup(self) -> None:
         self.assertEqual(0, main(["migrate", "--root", str(self.root)]))
         destination = self.root / "backups" / "stock-mcp-before-update.sqlite3"

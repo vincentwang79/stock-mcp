@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_SECRET_NAMES = ("TUSHARE_TOKEN", "TUNNEL_ID", "TUNNEL_API_KEY")
 _APPLICATION_REQUIRED_SECRETS = ("TUSHARE_TOKEN",)
 
 
@@ -34,7 +33,6 @@ class Settings:
         values = dict(os.environ if environ is None else environ)
         resolved_root = Path(root or values.get("STOCK_MCP_HOME") or _default_root())
         secret_values = _read_env_file(resolved_root / "config" / "secrets.env")
-        secret_values.update({key: value for key, value in values.items() if key in _SECRET_NAMES})
 
         host = values.get("STOCK_MCP_HOST", "127.0.0.1")
         if host != "127.0.0.1":
