@@ -217,6 +217,32 @@ try {
     $servicesReplaced = $true
     if ($null -ne $servicesAcl) { Set-Acl -LiteralPath $servicesDirectory -AclObject $servicesAcl }
     Refresh-WinSWServiceDefinitions $servicesDirectory $winSw
+    # Account identities may have changed since a partial or older installation.
+    # Reapply all runtime ACLs before any service starts.
+    Set-PrivateAcl $InstallRoot -ReadableByApp -ReadableByTunnel
+    Set-PrivateAcl (Join-Path $InstallRoot 'config') -ReadableByApp -ReadableByTunnel
+    Set-PrivateAcl (Join-Path $InstallRoot 'data') -WritableByApp
+    Set-PrivateAcl (Join-Path $InstallRoot 'backups') -WritableByApp
+    Set-PrivateAcl (Join-Path $InstallRoot 'state') -WritableByApp
+    Set-PrivateAcl (Join-Path $InstallRoot 'logs') -WritableByApp -WritableByTunnel
+    Set-PrivateAcl (Join-Path $InstallRoot 'releases') -ReadableByApp -ReadableByTunnel
+    Set-PrivateAcl (Join-Path $InstallRoot 'runtime') -ReadableByApp -ReadableByTunnel
+    $secretFile = Join-Path $InstallRoot 'config\secrets.env'
+    if (Test-Path -LiteralPath $secretFile -PathType Leaf) {
+        Set-PrivateFileAcl $secretFile -Reader StockMcpService
+    }
+    $tunnelKeyFile = Join-Path $InstallRoot 'config\tunnel-api-key'
+    if (Test-Path -LiteralPath $tunnelKeyFile -PathType Leaf) {
+        Set-PrivateFileAcl $tunnelKeyFile -Reader StockMcpTunnel
+    }
+    $tunnelProfile = Join-Path $InstallRoot 'config\tunnel-client.yaml'
+    if (Test-Path -LiteralPath $tunnelProfile -PathType Leaf) {
+        Set-PrivateFileAcl $tunnelProfile -Reader StockMcpTunnel
+    }
+    $customCa = Join-Path $InstallRoot 'config\custom-ca.pem'
+    if (Test-Path -LiteralPath $customCa -PathType Leaf) {
+        Set-PrivateFileAcl $customCa -Reader StockMcpService -SharedWithOtherService
+    }
     if ($doctorStatus -eq 'configuration_required') {
         Set-UpdateState 'configuration_required'
         Write-Host "Updated to $version. Configuration is still required. Backup: $backupRoot"

@@ -400,6 +400,14 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("& $WinSw refresh $xml", update)
         self.assertIn("Set-StockMcpServiceIdentity $name", update)
 
+    def test_update_reapplies_restricted_service_acl_after_account_repair(self) -> None:
+        update = self._read_required("update.ps1")
+
+        identity_repair = update.index("Refresh-WinSWServiceDefinitions $servicesDirectory $winSw")
+        app_data_acl = "Set-PrivateAcl (Join-Path $InstallRoot 'data') -WritableByApp"
+        self.assertIn(app_data_acl, update)
+        self.assertGreater(update.index(app_data_acl), identity_repair)
+
     def test_update_waits_for_database_handle_release_before_restore(self) -> None:
         update = self._read_required("update.ps1")
 
