@@ -32,7 +32,8 @@ uv build
 
 ## Windows 发布
 
-发布材料位于 `deploy/windows`。发布工程先运行 `fetch-tools.ps1` 获取并验证
+源码仓库不提交 `stock-mcp-windows-x64.zip`；它是发布构建产物。发布材料位于
+`deploy/windows`，发布工程先运行 `fetch-tools.ps1` 获取并验证
 固定版本的 uv、WinSW 和 OpenAI tunnel-client，再用 `build-release.ps1` 生成
 `stock-mcp-windows-x64.zip` 及其外部 SHA-256。服务器侧先核对外部摘要，再从解压目录运行
 `install.ps1 -PackageArchive <zip> -PackageSha256 <digest>` 与 `configure.ps1`；配置阶段会
