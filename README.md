@@ -32,11 +32,9 @@ uv build
 
 ## Windows 发布
 
-源码仓库不提交 `stock-mcp-windows-x64.zip`；它是发布构建产物。发布材料位于
-`deploy/windows`，发布工程先运行 `fetch-tools.ps1` 获取并验证
-固定版本的 uv、WinSW 和 OpenAI tunnel-client，再用 `build-release.ps1` 生成
-`stock-mcp-windows-x64.zip` 及其外部 SHA-256。服务器侧先核对外部摘要，再从解压目录运行
-`install.ps1 -PackageArchive <zip> -PackageSha256 <digest>` 与 `configure.ps1`；配置阶段会
+Windows Server 的源码目录为 `E:\code\stock-mcp`，服务运行根目录为 `E:\StockMcp`。服务器已经克隆源码时，运行
+`deploy\windows\install-from-source.ps1 -InstallRoot E:\StockMcp` 即可直接安装：它不要求手工打包或解压 ZIP，并把干净 Git 提交复制为可回滚的运行版本。源码仓库不提交 `stock-mcp-windows-x64.zip`；该 ZIP 仅用于无 Git 或离线环境。发布工程先运行 `fetch-tools.ps1` 获取并验证
+固定版本的 uv、WinSW 和 OpenAI tunnel-client，再用 `build-release.ps1` 生成 ZIP 及其外部 SHA-256。配置阶段会
 幂等回填三年 Tushare 日线，此后的前 20 个成功交易日保持“仅观察”状态。具体升级、诊断、回滚和卸载流程见
 [Windows Server 部署手册](deploy/windows/README-WINDOWS.md)。
 

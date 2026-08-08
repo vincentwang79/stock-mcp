@@ -1,28 +1,39 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Archive')]
 param(
-    [Parameter(Mandatory = $true)][string] $PackageArchive,
-    [Parameter(Mandatory = $true)][string] $PackageSha256,
-    [string] $InstallRoot = 'C:\ProgramData\StockMcp',
+    [Parameter(Mandatory = $true, ParameterSetName = 'Archive')][string] $PackageArchive,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Archive')][string] $PackageSha256,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Directory')][string] $PackageDirectory,
+    [string] $InstallRoot = 'E:\StockMcp',
     [switch] $SkipConnectivityCheck
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$PackageArchive = [IO.Path]::GetFullPath($PackageArchive)
-if (-not (Test-Path -LiteralPath $PackageArchive -PathType Leaf)) { throw "Package not found: $PackageArchive" }
-if ($PackageSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'PackageSha256 must be a 64-character SHA-256 digest.' }
-$actualPackageSha256 = (Get-FileHash -LiteralPath $PackageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actualPackageSha256 -ne $PackageSha256.ToLowerInvariant()) { throw 'Package archive SHA-256 does not match the published digest.' }
-$packageWork = Join-Path ([IO.Path]::GetTempPath()) ('stock-mcp-install-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $packageWork -Force | Out-Null
+$packageWork = $null
+$PackageRoot = $null
+$packageIsArchive = $PSCmdlet.ParameterSetName -eq 'Archive'
+if ($packageIsArchive) {
+    $PackageArchive = [IO.Path]::GetFullPath($PackageArchive)
+    if (-not (Test-Path -LiteralPath $PackageArchive -PathType Leaf)) { throw "Package not found: $PackageArchive" }
+    if ($PackageSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'PackageSha256 must be a 64-character SHA-256 digest.' }
+    $actualPackageSha256 = (Get-FileHash -LiteralPath $PackageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualPackageSha256 -ne $PackageSha256.ToLowerInvariant()) { throw 'Package archive SHA-256 does not match the published digest.' }
+    $packageWork = Join-Path ([IO.Path]::GetTempPath()) ('stock-mcp-install-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $packageWork -Force | Out-Null
+} else {
+    $PackageRoot = [IO.Path]::GetFullPath($PackageDirectory)
+    if (-not (Test-Path -LiteralPath $PackageRoot -PathType Container)) { throw "Package directory not found: $PackageRoot" }
+}
 try {
-    Expand-Archive -LiteralPath $PackageArchive -DestinationPath $packageWork
-    $topLevel = @(Get-ChildItem -LiteralPath $packageWork -Force)
-    $packageDirectories = @($topLevel | Where-Object { $_.PSIsContainer })
-    if ($packageDirectories.Count -ne 1 -or $topLevel.Count -ne 1) { throw 'Install ZIP must contain exactly one release directory.' }
-    $PackageRoot = $packageDirectories[0].FullName
+    if ($packageIsArchive) {
+        Expand-Archive -LiteralPath $PackageArchive -DestinationPath $packageWork
+        $topLevel = @(Get-ChildItem -LiteralPath $packageWork -Force)
+        $packageDirectories = @($topLevel | Where-Object { $_.PSIsContainer })
+        if ($packageDirectories.Count -ne 1 -or $topLevel.Count -ne 1) { throw 'Install ZIP must contain exactly one release directory.' }
+        $PackageRoot = $packageDirectories[0].FullName
+    }
     . (Join-Path $PackageRoot 'deploy\lib.ps1')
-    Assert-Sha256 $PackageArchive $PackageSha256
+    if ($packageIsArchive) { Assert-Sha256 $PackageArchive $PackageSha256 }
 
 function Assert-FreeSpace([string] $Path, [int64] $MinimumBytes = 4294967296) {
     $drive = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))
@@ -143,5 +154,5 @@ if (-not (Test-Path -LiteralPath $secretFile)) {
     if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after install.' }
 }
 } finally {
-    if (Test-Path -LiteralPath $packageWork) { Remove-Item -LiteralPath $packageWork -Recurse -Force }
+    if ($packageWork -and (Test-Path -LiteralPath $packageWork)) { Remove-Item -LiteralPath $packageWork -Recurse -Force }
 }

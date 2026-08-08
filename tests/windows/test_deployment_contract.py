@@ -14,6 +14,7 @@ class WindowsDeploymentContractTest(unittest.TestCase):
     def test_release_contains_one_command_install_surface(self) -> None:
         required = {
             "install.ps1",
+            "install-from-source.ps1",
             "configure.ps1",
             "update.ps1",
             "diagnose.ps1",
@@ -84,7 +85,8 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         update = self._read_required("update.ps1")
         library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
 
-        self.assertIn("[Parameter(Mandatory = $true)][string] $PackageSha256", update)
+        self.assertIn("ParameterSetName = 'Archive'", update)
+        self.assertIn("[string] $PackageSha256", update)
         self.assertIn("Assert-Sha256 $PackagePath $PackageSha256", update)
         self.assertIn("Version must be a safe semantic version", library)
         self.assertIn("Checksum path escapes the release root", library)
@@ -192,7 +194,8 @@ class WindowsDeploymentContractTest(unittest.TestCase):
     def test_first_install_requires_an_external_package_digest(self) -> None:
         install = self._read_required("install.ps1")
 
-        self.assertIn("[Parameter(Mandatory = $true)][string] $PackageSha256", install)
+        self.assertIn("ParameterSetName = 'Archive'", install)
+        self.assertIn("[string] $PackageSha256", install)
         self.assertIn("Assert-Sha256 $PackageArchive $PackageSha256", install)
         self.assertIn("Expand-Archive -LiteralPath $PackageArchive", install)
 
@@ -298,6 +301,56 @@ class WindowsDeploymentContractTest(unittest.TestCase):
 
         tunnel_start = install.rindex("Start-Service -Name StockMcpTunnel")
         self.assertIn("Wait-TunnelReady", install[tunnel_start:])
+
+    def test_source_checkout_can_install_without_a_release_zip(self) -> None:
+        install = self._read_required("install.ps1")
+        source_install = self._read_required("install-from-source.ps1")
+
+        self.assertIn("ParameterSetName = 'Directory'", install)
+        self.assertIn("[string] $PackageDirectory", install)
+        self.assertIn("$PackageRoot = [IO.Path]::GetFullPath($PackageDirectory)", install)
+        self.assertIn("Assert-ReleaseContents $PackageRoot", install)
+        self.assertIn("$dirty = Get-GitText @('status', '--porcelain')", source_install)
+        self.assertIn("& git -C $SourceRoot @Arguments", source_install)
+        self.assertIn("fetch-tools.ps1", source_install)
+        self.assertIn("-PackageDirectory $releaseRoot", source_install)
+        self.assertNotIn("Compress-Archive", source_install)
+
+    def test_source_checkout_uses_the_rollback_capable_updater_after_first_install(self) -> None:
+        update = self._read_required("update.ps1")
+        source_install = self._read_required("install-from-source.ps1")
+
+        self.assertIn("ParameterSetName = 'Directory'", update)
+        self.assertIn("[string] $PackageDirectory", update)
+        self.assertIn("$PackageRoot = [IO.Path]::GetFullPath($PackageDirectory)", update)
+        self.assertIn(
+            "if (Test-Path -LiteralPath (Join-Path $InstallRoot 'current'))", source_install
+        )
+        self.assertIn("update.ps1') -PackageDirectory $releaseRoot", source_install)
+
+    def test_source_checkout_uses_its_commit_in_the_installed_release_version(self) -> None:
+        source_install = self._read_required("install-from-source.ps1")
+
+        self.assertIn("$releaseVersion =", source_install)
+        self.assertIn("+git.", source_install)
+        self.assertIn("version = $releaseVersion", source_install)
+
+    def test_source_checkout_must_match_the_trusted_remote_main_commit(self) -> None:
+        source_install = self._read_required("install-from-source.ps1")
+
+        self.assertIn("git -C $SourceRoot fetch origin main", source_install)
+        self.assertIn("rev-parse', 'origin/main'", source_install)
+        self.assertIn("does not match origin/main", source_install)
+
+    def test_windows_service_root_defaults_to_e_drive(self) -> None:
+        for name in (
+            "install.ps1",
+            "configure.ps1",
+            "update.ps1",
+            "diagnose.ps1",
+            "uninstall.ps1",
+        ):
+            self.assertIn("'E:\\StockMcp'", self._read_required(name))
 
 
 if __name__ == "__main__":

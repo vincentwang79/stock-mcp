@@ -1,6 +1,6 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
-    [string] $InstallRoot = 'C:\ProgramData\StockMcp',
+    [string] $InstallRoot = 'E:\StockMcp',
     [switch] $PurgeData
 )
 

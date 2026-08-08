@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string] $InstallRoot = 'C:\ProgramData\StockMcp')
+param([string] $InstallRoot = 'E:\StockMcp')
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

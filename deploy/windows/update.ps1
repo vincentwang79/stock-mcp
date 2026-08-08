@@ -1,8 +1,9 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Archive')]
 param(
-    [Parameter(Mandatory = $true)][string] $PackagePath,
-    [Parameter(Mandatory = $true)][string] $PackageSha256,
-    [string] $InstallRoot = 'C:\ProgramData\StockMcp'
+    [Parameter(Mandatory = $true, ParameterSetName = 'Archive')][string] $PackagePath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Archive')][string] $PackageSha256,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Directory')][string] $PackageDirectory,
+    [string] $InstallRoot = 'E:\StockMcp'
 )
 
 Set-StrictMode -Version Latest
@@ -47,10 +48,19 @@ Test-Administrator
 Assert-WindowsX64
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot 'current'))) { throw 'Stock MCP is not installed.' }
-if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) { throw "Package not found: $PackagePath" }
-Assert-Sha256 $PackagePath $PackageSha256
+$PackageRoot = $null
+$work = $null
+$packageIsArchive = $PSCmdlet.ParameterSetName -eq 'Archive'
+if ($packageIsArchive) {
+    $PackagePath = [IO.Path]::GetFullPath($PackagePath)
+    if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) { throw "Package not found: $PackagePath" }
+    Assert-Sha256 $PackagePath $PackageSha256
+    $work = Join-Path ([IO.Path]::GetTempPath()) ("stock-mcp-update-" + [guid]::NewGuid().ToString('N'))
+} else {
+    $PackageRoot = [IO.Path]::GetFullPath($PackageDirectory)
+    if (-not (Test-Path -LiteralPath $PackageRoot -PathType Container)) { throw "Package directory not found: $PackageRoot" }
+}
 
-$work = Join-Path ([IO.Path]::GetTempPath()) ("stock-mcp-update-" + [guid]::NewGuid().ToString('N'))
 $backupRoot = Join-Path $InstallRoot ('backups\update-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 $oldTarget = (Get-Item -LiteralPath (Join-Path $InstallRoot 'current')).Target
 $newRelease = $null
@@ -70,13 +80,18 @@ $servicesBackup = $null
 $servicesAcl = $null
 $servicesStaging = $null
 $servicesReplaced = $false
-New-Item -ItemType Directory -Path $work, $backupRoot -Force | Out-Null
+if ($work) { New-Item -ItemType Directory -Path $work -Force | Out-Null }
+New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 try {
-    Expand-Archive -LiteralPath $PackagePath -DestinationPath $work -Force
-    $topLevel = @(Get-ChildItem -LiteralPath $work -Force)
-    $directories = @($topLevel | Where-Object { $_.PSIsContainer })
-    if ($directories.Count -ne 1 -or $topLevel.Count -ne 1) { throw 'Update ZIP must contain exactly one release directory.' }
-    $extracted = $directories[0]
+    if ($packageIsArchive) {
+        Expand-Archive -LiteralPath $PackagePath -DestinationPath $work -Force
+        $topLevel = @(Get-ChildItem -LiteralPath $work -Force)
+        $directories = @($topLevel | Where-Object { $_.PSIsContainer })
+        if ($directories.Count -ne 1 -or $topLevel.Count -ne 1) { throw 'Update ZIP must contain exactly one release directory.' }
+        $extracted = $directories[0]
+    } else {
+        $extracted = Get-Item -LiteralPath $PackageRoot
+    }
     Assert-ReleaseContents $extracted.FullName
     $version = Get-ReleaseVersion $extracted.FullName
     $manifest = Get-ToolManifest (Join-Path $extracted.FullName 'tools-manifest.json')
@@ -212,5 +227,5 @@ try {
     }
     throw $failure
 } finally {
-    if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+    if ($work -and (Test-Path -LiteralPath $work)) { Remove-Item -LiteralPath $work -Recurse -Force }
 }

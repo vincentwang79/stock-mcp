@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string] $InstallRoot = 'C:\ProgramData\StockMcp',
+    [string] $InstallRoot = 'E:\StockMcp',
     [string] $OutputDirectory = (Get-Location).Path
 )
 
