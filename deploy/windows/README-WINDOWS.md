@@ -7,6 +7,15 @@
 > **重要：源码仓库不包含 `stock-mcp-windows-x64.zip`。**
 > 该文件是发布构建产物，需要从可信发布渠道取得；如果当前没有发布包，必须先在可联网的 Windows 发布机上完成“构建发布包”一节，再把 `deploy/windows/dist/stock-mcp-windows-x64.zip` 及其 `.sha256` 文件复制到目标服务器。不要把源码目录直接当作安装包使用。
 
+## Windows 路径约定
+
+Windows Server 上的源码固定检出到 `E:\code\stock-mcp`。该目录只用于源码、构建脚本和发布材料；服务程序、配置、运行数据、日志和备份仍由安装器分别放在 `C:\ProgramData\StockMcp` 下，不要手工把运行数据写入源码目录。
+
+```powershell
+git clone https://github.com/vincentwang79/stock-mcp.git E:\code\stock-mcp
+cd E:\code\stock-mcp
+```
+
 ## 安装与配置
 
 1. 从可信发布渠道获取 `stock-mcp-windows-x64.zip`，并通过独立渠道获取对应的 `.sha256` 摘要。**在解压 ZIP 或执行任何脚本之前**，先运行以下命令，并将结果与发布摘要逐字符比较：
