@@ -257,6 +257,24 @@ class TushareDailyBackfillContractTest(unittest.TestCase):
                 (START, END),
             )
 
+    def test_reports_the_first_incomplete_day_and_safe_validation_reason(self) -> None:
+        reported: list[tuple[date, str]] = []
+        provider = RecordedTushareDailyProvider({START: [_snapshot(START, complete=False)]})
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "research.sqlite3")
+            database.initialize()
+
+            result = self._service(
+                database=database,
+                calendar=RecordedTradingCalendar((START,)),
+                provider=provider,
+                on_incomplete=lambda target, error: reported.append((target, str(error))),
+            ).backfill(START, START)
+
+        self.assertEqual(result.incomplete_dates, (START,))
+        self.assertEqual(reported, [(START, "snapshot has incomplete target-day bars")])
+
     def test_rejects_future_bars_instead_of_publishing_a_look_ahead_snapshot(self) -> None:
         calendar = RecordedTradingCalendar((START,))
         future_bar = replace(_snapshot(START).bars[0], trade_date=START + timedelta(days=1))
@@ -630,6 +648,33 @@ class ProductionBackfillCompositionContractTest(unittest.TestCase):
             self._run(database=database, tushare=tushare, baostock=baostock)
 
         self.assertEqual(tushare.daily_requests, ["20230808"])
+
+    def test_reconnects_baostock_after_a_transient_daily_universe_failure(self) -> None:
+        class FlakyBaoStockClient(_RecordedBaoStockClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.all_stock_attempts = 0
+
+            def query_all_stock(self, *, day: str) -> _BaoStockRows:
+                self.all_stock_attempts += 1
+                if self.all_stock_attempts == 1:
+                    raise TimeoutError("simulated BaoStock socket timeout")
+                return super().query_all_stock(day=day)
+
+        tushare = _RecordedTushareProductionClient(
+            {day.strftime("%Y%m%d"): _production_tushare_rows(day) for day in PRODUCTION_DAYS}
+        )
+        baostock = FlakyBaoStockClient()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "data" / "research.sqlite3")
+            database.initialize()
+
+            result = self._run(database=database, tushare=tushare, baostock=baostock)
+
+        self.assertEqual(result.published_dates, PRODUCTION_DAYS)
+        self.assertEqual(baostock.login_calls, 2)
+        self.assertEqual(baostock.logout_calls, 2)
 
 
 if __name__ == "__main__":

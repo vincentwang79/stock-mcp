@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -19,6 +20,8 @@ MINIMUM_MAIN_BOARD_COUNT = 2_000
 MINIMUM_TUSHARE_REQUEST_INTERVAL_SECONDS = 1.34
 MAX_TUSHARE_FETCH_ATTEMPTS = 5
 MAX_RETRY_BACKOFF_SECONDS = 30.0
+BAOSTOCK_SOCKET_TIMEOUT_SECONDS = 30.0
+MAX_BAOSTOCK_UNIVERSE_ATTEMPTS = 3
 
 
 class TradingCalendar(Protocol):
@@ -51,6 +54,7 @@ class TushareDailyBackfillService:
         sleep: Callable[[float], None] = sleep,
         minimum_request_interval_seconds: float = MINIMUM_TUSHARE_REQUEST_INTERVAL_SECONDS,
         max_fetch_attempts: int = MAX_TUSHARE_FETCH_ATTEMPTS,
+        on_incomplete: Callable[[date, Exception], None] | None = None,
     ) -> None:
         if provider.source != TUSHARE_SOURCE:
             raise ValueError("historical backfill requires the Tushare daily provider")
@@ -68,6 +72,7 @@ class TushareDailyBackfillService:
         self._sleep = sleep
         self._minimum_request_interval_seconds = minimum_request_interval_seconds
         self._max_fetch_attempts = max_fetch_attempts
+        self._on_incomplete = on_incomplete
         self._last_request_started_at: float | None = None
 
     def backfill(self, start: date, end: date) -> BackfillResult:
@@ -86,8 +91,10 @@ class TushareDailyBackfillService:
             try:
                 snapshot = self._fetch_snapshot(target)
                 self._validate_snapshot(snapshot, target)
-            except Exception:
+            except Exception as error:
                 incomplete.append(target)
+                if self._on_incomplete is not None:
+                    self._on_incomplete(target, error)
             else:
                 # Persistence errors are intentionally outside the provider exception
                 # boundary: an operator must see a failed database write rather than
@@ -245,6 +252,7 @@ def run_production_backfill(
     baostock_client: object | None = None,
     clock: Callable[[], datetime] | None = None,
     minimum_main_board_count: int = MINIMUM_MAIN_BOARD_COUNT,
+    on_incomplete: Callable[[date, Exception], None] | None = None,
 ) -> BackfillResult:
     """Backfill point-in-time Tushare snapshots with a dated BaoStock universe."""
 
@@ -264,9 +272,9 @@ def run_production_backfill(
     logout = getattr(baostock_client, "logout", None)
     if not callable(login) or not callable(logout):
         raise ValueError("BaoStock client does not provide login/logout")
-    login_result = login()
-    if str(getattr(login_result, "error_code", "0")) != "0":
-        raise RuntimeError("BaoStock login failed")
+    original_socket_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(BAOSTOCK_SOCKET_TIMEOUT_SECONDS)
+    _login_baostock(login)
     try:
         calendar_rows = _baostock_rows(
             _call_baostock(
@@ -280,12 +288,11 @@ def run_production_backfill(
         industry_rows = _baostock_rows(_call_baostock(baostock_client, "query_stock_industry"))
 
         def securities_for_date(target: date) -> tuple[Security, ...]:
-            status_rows = _baostock_rows(
-                _call_baostock(
-                    baostock_client,
-                    "query_all_stock",
-                    day=target.isoformat(),
-                )
+            status_rows = _query_baostock_universe_with_reconnect(
+                baostock_client,
+                target,
+                login=login,
+                logout=logout,
             )
             return _historical_securities(
                 basic_rows,
@@ -306,9 +313,40 @@ def run_production_backfill(
             calendar=calendar,
             provider=provider,
             expected_main_board_count=minimum_main_board_count,
+            on_incomplete=on_incomplete,
         ).backfill(start, end)
     finally:
-        logout()
+        try:
+            logout()
+        finally:
+            socket.setdefaulttimeout(original_socket_timeout)
+
+
+def _login_baostock(login: Callable[[], object]) -> None:
+    login_result = login()
+    if str(getattr(login_result, "error_code", "0")) != "0":
+        raise RuntimeError("BaoStock login failed")
+
+
+def _query_baostock_universe_with_reconnect(
+    client: object,
+    target: date,
+    *,
+    login: Callable[[], object],
+    logout: Callable[[], object],
+) -> tuple[dict[str, object], ...]:
+    for attempt in range(MAX_BAOSTOCK_UNIVERSE_ATTEMPTS):
+        try:
+            return _baostock_rows(
+                _call_baostock(client, "query_all_stock", day=target.isoformat())
+            )
+        except Exception:
+            if attempt == MAX_BAOSTOCK_UNIVERSE_ATTEMPTS - 1:
+                raise
+            logout()
+            _login_baostock(login)
+            sleep(min(2.0**attempt, MAX_RETRY_BACKOFF_SECONDS))
+    raise AssertionError("bounded BaoStock reconnect loop must return or raise")
 
 
 def _call_baostock(client: object, name: str, **kwargs: object) -> object:

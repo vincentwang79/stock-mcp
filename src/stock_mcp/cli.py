@@ -111,7 +111,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("backfill requires --start and --end")
         database = Database(settings.database_path)
         database.initialize()
-        result = run_production_backfill(settings, database, args.start, args.end)
+        reported_failures = 0
+
+        def report_incomplete(trade_date: date, error: Exception) -> None:
+            nonlocal reported_failures
+            reported_failures += 1
+            if reported_failures > 3:
+                if reported_failures == 4:
+                    print("stock-mcp: further incomplete-day reasons omitted")
+                return
+            reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+            print(f"stock-mcp: backfill incomplete trade_date={trade_date} reason={reason}")
+
+        result = run_production_backfill(
+            settings, database, args.start, args.end, on_incomplete=report_incomplete
+        )
         print(
             "stock-mcp: backfill "
             f"published={len(result.published_dates)} incomplete={len(result.incomplete_dates)}"

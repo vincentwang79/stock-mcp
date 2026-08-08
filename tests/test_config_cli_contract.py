@@ -98,6 +98,37 @@ class ConfigAndCliContractTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[2:], (date(2023, 8, 7), date(2023, 8, 8)))
         self.assertIn("published=1 incomplete=1", output.getvalue())
 
+    def test_cli_reports_a_safe_reason_for_the_first_backfill_failure(self) -> None:
+        config = self.root / "config"
+        config.mkdir(parents=True)
+        (config / "secrets.env").write_text("TUSHARE_TOKEN=fixture\n", encoding="utf-8")
+        output = StringIO()
+
+        def report_first_failure(*_args: object, **kwargs: object) -> BackfillResult:
+            callback = kwargs["on_incomplete"]
+            callback(date(2023, 8, 7), ValueError("fixture validation failed"))
+            return BackfillResult((), (date(2023, 8, 7),))
+
+        with (
+            patch("stock_mcp.backfill.run_production_backfill", side_effect=report_first_failure),
+            redirect_stdout(output),
+        ):
+            exit_code = main(
+                [
+                    "backfill",
+                    "--root",
+                    str(self.root),
+                    "--start",
+                    "2023-08-07",
+                    "--end",
+                    "2023-08-07",
+                ]
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("trade_date=2023-08-07", output.getvalue())
+        self.assertIn("reason=fixture validation failed", output.getvalue())
+
     def test_project_console_script_points_to_the_real_cli_entrypoint(self) -> None:
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
             encoding="utf-8"
