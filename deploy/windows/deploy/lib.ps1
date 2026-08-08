@@ -157,6 +157,11 @@ function Set-PrivateFileAcl {
     if ($LASTEXITCODE -ne 0) { throw "Could not protect $Path." }
 }
 
+function Set-AdministratorOnlyFileAcl([Parameter(Mandatory = $true)][string] $Path) {
+    & icacls $Path /inheritance:r /grant:r "BUILTIN\Administrators:F" "NT AUTHORITY\SYSTEM:F" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not protect administrator input file $Path." }
+}
+
 function New-CurrentJunction([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $Target) {
     $current = Join-Path $Root 'current'
     if (Test-Path -LiteralPath $current) {

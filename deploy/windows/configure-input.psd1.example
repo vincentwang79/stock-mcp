@@ -1,0 +1,9 @@
+@{
+    # Fill each value, save this file, then run configure.ps1 with -ConfigurationFile.
+    # This temporary input file is deleted only after successful configuration.
+    TushareToken = ''
+    TunnelId = ''
+    TunnelRuntimeApiKey = ''
+    HttpsProxy = ''
+    CustomCaFilePath = ''
+}

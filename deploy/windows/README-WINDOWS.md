@@ -51,6 +51,28 @@ git pull --ff-only
 
 脚本仍会安全提示输入 Tushare Token、Tunnel ID、代理和可选 CA 路径，但不会再次提示输入 Tunnel runtime API key。
 
+### 使用单个配置文件（推荐）
+
+如果不希望逐项交互输入，可由脚本在受 ACL 保护的位置生成模板：
+
+```powershell
+.\deploy\windows\configure.ps1 `
+  -InstallRoot E:\StockMcp `
+  -WriteConfigurationTemplate
+
+notepad E:\StockMcp\config\configure-input.psd1
+```
+
+在记事本中填写 `TushareToken`、`TunnelId`、`TunnelRuntimeApiKey`、`HttpsProxy` 和可选的 `CustomCaFilePath`；字符串必须保留单引号。此服务器的 `HttpsProxy` 填写 `http://127.0.0.1:7897`。保存后执行：
+
+```powershell
+.\deploy\windows\configure.ps1 `
+  -InstallRoot E:\StockMcp `
+  -ConfigurationFile E:\StockMcp\config\configure-input.psd1
+```
+
+脚本会先将输入文件限制为 Administrators 和 SYSTEM 可读，再读取它。只有配置、三年回填、本地 MCP 与 Tunnel 验证全部成功后，才删除该临时输入文件；失败时会保留文件供修正后重试。运行时密钥仍只会写入专用的受限密钥文件，不会出现在服务命令行或日志中。
+
 `install-from-source.ps1` 不生成或解压发布 ZIP。它要求 Git 工作区没有已修改或未跟踪的文件，记录当前提交和远程地址，下载并验证固定版本的 `uv`、WinSW 与 `tunnel-client`，然后建立可回滚的 `E:\StockMcp\releases\<版本+提交>` 运行副本。每次 `git pull` 到新提交后，再次运行同一安装命令即可升级；失败时仍保留旧版本和数据库备份。
 
 如果 `Get-ExecutionPolicy -List` 显示 `MachinePolicy` 或 `UserPolicy` 已由组策略强制，当前窗口的设置也会被拒绝；此时应由 Windows Server 管理员为该受控仓库配置相应的脚本执行策略。不要将机器级策略设为 `Unrestricted`，也不要对不可信目录使用绕过命令。

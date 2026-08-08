@@ -45,7 +45,7 @@ $work = Join-Path ([IO.Path]::GetTempPath()) ('stock-mcp-source-release-' + [gui
 $releaseRoot = Join-Path $work 'stock-mcp-windows-x64'
 try {
     New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
-    foreach ($name in @('install.ps1', 'configure.ps1', 'update.ps1', 'diagnose.ps1', 'uninstall.ps1', 'README-WINDOWS.md')) {
+    foreach ($name in @('install.ps1', 'configure.ps1', 'configure-input.psd1.example', 'update.ps1', 'diagnose.ps1', 'uninstall.ps1', 'README-WINDOWS.md')) {
         Copy-Item -LiteralPath (Join-Path $sourceWindows $name) -Destination (Join-Path $releaseRoot $name) -Force
     }
     Copy-Item -LiteralPath (Join-Path $sourceWindows 'deploy') -Destination (Join-Path $releaseRoot 'deploy') -Recurse -Force

@@ -102,6 +102,36 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("ConvertTo-SecureString", configure)
         self.assertIn("-TunnelRuntimeKeyFromClipboard", readme)
 
+    def test_configuration_can_use_one_acl_protected_input_file(self) -> None:
+        configure = self._read_required("configure.ps1")
+        example = self._read_required("configure-input.psd1.example")
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
+        readme = self._read_required("README-WINDOWS.md")
+
+        for key in (
+            "TushareToken",
+            "TunnelId",
+            "TunnelRuntimeApiKey",
+            "HttpsProxy",
+            "CustomCaFilePath",
+        ):
+            self.assertIn(key, example)
+        self.assertIn("[string] $ConfigurationFile", configure)
+        self.assertIn("[switch] $WriteConfigurationTemplate", configure)
+        self.assertIn("Import-PowerShellDataFile", configure)
+        self.assertIn("Set-AdministratorOnlyFileAcl", configure)
+        self.assertIn("Remove-Item -LiteralPath $configurationInputFile", configure)
+        self.assertIn("function Set-AdministratorOnlyFileAcl", library)
+        self.assertIn("-WriteConfigurationTemplate", readme)
+        self.assertIn("-ConfigurationFile", readme)
+
+    def test_release_builders_include_the_configuration_template(self) -> None:
+        build = self._read_required("build-release.ps1")
+        source_install = self._read_required("install-from-source.ps1")
+
+        self.assertIn("'configure-input.psd1.example'", build)
+        self.assertIn("'configure-input.psd1.example'", source_install)
+
     def test_update_has_health_checked_rollback_and_uninstall_preserves_data(self) -> None:
         update = self._read_required("update.ps1")
         uninstall = self._read_required("uninstall.ps1")

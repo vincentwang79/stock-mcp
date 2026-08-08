@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [string] $InstallRoot = 'E:\StockMcp',
-    [switch] $TunnelRuntimeKeyFromClipboard
+    [switch] $TunnelRuntimeKeyFromClipboard,
+    [string] $ConfigurationFile,
+    [switch] $WriteConfigurationTemplate
 )
 
 Set-StrictMode -Version Latest
@@ -12,29 +14,84 @@ function Get-Plaintext([Security.SecureString] $Value) {
     return (New-Object System.Net.NetworkCredential('', $Value)).Password
 }
 
+function Get-ConfigurationText {
+    param(
+        [Parameter(Mandatory = $true)][hashtable] $Configuration,
+        [Parameter(Mandatory = $true)][string] $Name,
+        [switch] $Optional
+    )
+    if (-not $Configuration.ContainsKey($Name) -or $Configuration[$Name] -isnot [string]) {
+        throw "Configuration file must contain string '$Name'."
+    }
+    $value = [string] $Configuration[$Name]
+    if (-not $Optional -and [string]::IsNullOrWhiteSpace($value)) {
+        throw "Configuration file value '$Name' cannot be blank."
+    }
+    return $value
+}
+
 Test-Administrator
 Assert-WindowsX64
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $configDirectory = Join-Path $InstallRoot 'config'
 if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot 'current'))) { throw 'Stock MCP is not installed.' }
-
-$tushare = Read-Host 'Tushare token' -AsSecureString
-$tunnelId = Read-Host 'Platform Tunnel ID' -AsSecureString
-if ($TunnelRuntimeKeyFromClipboard) {
-    if ($null -eq (Get-Command Get-Clipboard -ErrorAction SilentlyContinue)) {
-        throw 'Clipboard input is unavailable in this PowerShell host. Run without -TunnelRuntimeKeyFromClipboard.'
-    }
-    $clipboardKey = Get-Clipboard -Raw
-    if ([string]::IsNullOrWhiteSpace($clipboardKey)) {
-        throw 'Clipboard does not contain a Tunnel runtime API key.'
-    }
-    $tunnelKey = ConvertTo-SecureString $clipboardKey.Trim() -AsPlainText -Force
-    $clipboardKey = $null
-} else {
-    $tunnelKey = Read-Host 'Tunnel runtime API key' -AsSecureString
+if ($WriteConfigurationTemplate -and $TunnelRuntimeKeyFromClipboard) {
+    throw '-WriteConfigurationTemplate cannot be combined with -TunnelRuntimeKeyFromClipboard.'
 }
-$proxy = Read-Host 'Optional HTTPS proxy (leave blank)' -AsSecureString
-$customCa = Read-Host 'Optional custom CA file path (leave blank)' -AsSecureString
+if ($WriteConfigurationTemplate) {
+    if ([string]::IsNullOrWhiteSpace($ConfigurationFile)) {
+        $ConfigurationFile = Join-Path $configDirectory 'configure-input.psd1'
+    }
+    $ConfigurationFile = [IO.Path]::GetFullPath($ConfigurationFile)
+    if (Test-Path -LiteralPath $ConfigurationFile) {
+        throw "Configuration template already exists: $ConfigurationFile"
+    }
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'configure-input.psd1.example') `
+        -Destination $ConfigurationFile -Force
+    Set-AdministratorOnlyFileAcl $ConfigurationFile
+    Write-Host "Created protected configuration template: $ConfigurationFile"
+    return
+}
+if ($ConfigurationFile -and $TunnelRuntimeKeyFromClipboard) {
+    throw '-ConfigurationFile cannot be combined with -TunnelRuntimeKeyFromClipboard.'
+}
+
+$configurationInputFile = $null
+if ($ConfigurationFile) {
+    $configurationInputFile = [IO.Path]::GetFullPath($ConfigurationFile)
+    if (-not (Test-Path -LiteralPath $configurationInputFile -PathType Leaf)) {
+        throw "Configuration file not found: $configurationInputFile"
+    }
+    Set-AdministratorOnlyFileAcl $configurationInputFile
+    $configuration = Import-PowerShellDataFile -Path $configurationInputFile
+    $expectedNames = @('TushareToken', 'TunnelId', 'TunnelRuntimeApiKey', 'HttpsProxy', 'CustomCaFilePath')
+    foreach ($name in $configuration.Keys) {
+        if ($name -notin $expectedNames) { throw "Configuration file has unsupported key '$name'." }
+    }
+    $tushare = ConvertTo-SecureString (Get-ConfigurationText $configuration 'TushareToken') -AsPlainText -Force
+    $tunnelId = ConvertTo-SecureString (Get-ConfigurationText $configuration 'TunnelId') -AsPlainText -Force
+    $tunnelKey = ConvertTo-SecureString (Get-ConfigurationText $configuration 'TunnelRuntimeApiKey') -AsPlainText -Force
+    $proxy = ConvertTo-SecureString (Get-ConfigurationText $configuration 'HttpsProxy' -Optional) -AsPlainText -Force
+    $customCa = ConvertTo-SecureString (Get-ConfigurationText $configuration 'CustomCaFilePath' -Optional) -AsPlainText -Force
+} else {
+    $tushare = Read-Host 'Tushare token' -AsSecureString
+    $tunnelId = Read-Host 'Platform Tunnel ID' -AsSecureString
+    if ($TunnelRuntimeKeyFromClipboard) {
+        if ($null -eq (Get-Command Get-Clipboard -ErrorAction SilentlyContinue)) {
+            throw 'Clipboard input is unavailable in this PowerShell host. Run without -TunnelRuntimeKeyFromClipboard.'
+        }
+        $clipboardKey = Get-Clipboard -Raw
+        if ([string]::IsNullOrWhiteSpace($clipboardKey)) {
+            throw 'Clipboard does not contain a Tunnel runtime API key.'
+        }
+        $tunnelKey = ConvertTo-SecureString $clipboardKey.Trim() -AsPlainText -Force
+        $clipboardKey = $null
+    } else {
+        $tunnelKey = Read-Host 'Tunnel runtime API key' -AsSecureString
+    }
+    $proxy = Read-Host 'Optional HTTPS proxy (leave blank)' -AsSecureString
+    $customCa = Read-Host 'Optional custom CA file path (leave blank)' -AsSecureString
+}
 
 $customCaValue = Get-Plaintext $customCa
 $managedCa = ''
@@ -118,4 +175,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Tunnel doctor failed.' }
 Start-Service -Name StockMcpTunnel
 if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after service startup.' }
 'ready' | Set-Content -LiteralPath (Join-Path $InstallRoot 'state\service-status') -Encoding ASCII
+if ($configurationInputFile) { Remove-Item -LiteralPath $configurationInputFile -Force }
 Write-Host 'Configuration validated. Secrets were not printed.'
