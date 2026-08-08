@@ -123,8 +123,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             reason = str(error) if isinstance(error, ValueError) else type(error).__name__
             print(f"stock-mcp: backfill incomplete trade_date={trade_date} reason={reason}")
 
+        def report_tushare_probe(trade_date: date, row_count: int) -> None:
+            print(f"stock-mcp: Tushare latest-day probe trade_date={trade_date} rows={row_count}")
+
         result = run_production_backfill(
-            settings, database, args.start, args.end, on_incomplete=report_incomplete
+            settings,
+            database,
+            args.start,
+            args.end,
+            on_incomplete=report_incomplete,
+            on_tushare_probe=report_tushare_probe,
         )
         print(
             "stock-mcp: backfill "

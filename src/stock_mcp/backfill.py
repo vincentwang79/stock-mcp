@@ -253,6 +253,7 @@ def run_production_backfill(
     clock: Callable[[], datetime] | None = None,
     minimum_main_board_count: int = MINIMUM_MAIN_BOARD_COUNT,
     on_incomplete: Callable[[date, Exception], None] | None = None,
+    on_tushare_probe: Callable[[date, int], None] | None = None,
 ) -> BackfillResult:
     """Backfill point-in-time Tushare snapshots with a dated BaoStock universe."""
 
@@ -267,6 +268,8 @@ def run_production_backfill(
 
         baostock_client = baostock
     resolved_clock = clock or (lambda: datetime.now().astimezone())
+    if on_tushare_probe is not None:
+        on_tushare_probe(end, _tushare_daily_row_count(tushare_client, end))
 
     login = getattr(baostock_client, "login", None)
     logout = getattr(baostock_client, "logout", None)
@@ -326,6 +329,20 @@ def _login_baostock(login: Callable[[], object]) -> None:
     login_result = login()
     if str(getattr(login_result, "error_code", "0")) != "0":
         raise RuntimeError("BaoStock login failed")
+
+
+def _tushare_daily_row_count(client: object, target: date) -> int:
+    daily = getattr(client, "daily", None)
+    if not callable(daily):
+        raise ValueError("Tushare client does not provide daily()")
+    frame = daily(trade_date=target.strftime("%Y%m%d"))
+    to_dict = getattr(frame, "to_dict", None)
+    if not callable(to_dict):
+        raise ValueError("Tushare daily() response is not tabular")
+    rows = to_dict(orient="records")
+    if not isinstance(rows, list):
+        raise ValueError("Tushare daily() response cannot be read as records")
+    return len(rows)
 
 
 def _query_baostock_universe_with_reconnect(

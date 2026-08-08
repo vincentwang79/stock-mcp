@@ -649,6 +649,30 @@ class ProductionBackfillCompositionContractTest(unittest.TestCase):
 
         self.assertEqual(tushare.daily_requests, ["20230808"])
 
+    def test_probes_the_latest_tushare_day_before_opening_baostock(self) -> None:
+        tushare, baostock = self._clients()
+        probes: list[tuple[date, int]] = []
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "data" / "research.sqlite3")
+            database.initialize()
+            result = run_production_backfill(
+                settings=Settings(root=database.path.parent.parent, tushare_token="fixture"),
+                database=database,
+                start=PRODUCTION_START,
+                end=PRODUCTION_END,
+                tushare_client=tushare,
+                baostock_client=baostock,
+                clock=lambda: PRODUCTION_TIMESTAMP,
+                minimum_main_board_count=2,
+                on_tushare_probe=lambda target, count: probes.append((target, count)),
+            )
+
+        self.assertEqual(result.published_dates, PRODUCTION_DAYS)
+        self.assertEqual(probes, [(PRODUCTION_END, 5)])
+        self.assertEqual(tushare.daily_requests, ["20230808", "20230807", "20230808"])
+        self.assertEqual(baostock.login_calls, 1)
+
     def test_reconnects_baostock_after_a_transient_daily_universe_failure(self) -> None:
         class FlakyBaoStockClient(_RecordedBaoStockClient):
             def __init__(self) -> None:

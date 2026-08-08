@@ -106,6 +106,7 @@ class ConfigAndCliContractTest(unittest.TestCase):
 
         def report_first_failure(*_args: object, **kwargs: object) -> BackfillResult:
             callback = kwargs["on_incomplete"]
+            kwargs["on_tushare_probe"](date(2023, 8, 7), 4_321)
             callback(date(2023, 8, 7), ValueError("fixture validation failed"))
             return BackfillResult((), (date(2023, 8, 7),))
 
@@ -126,6 +127,7 @@ class ConfigAndCliContractTest(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 2)
+        self.assertIn("Tushare latest-day probe trade_date=2023-08-07 rows=4321", output.getvalue())
         self.assertIn("trade_date=2023-08-07", output.getvalue())
         self.assertIn("reason=fixture validation failed", output.getvalue())
 
