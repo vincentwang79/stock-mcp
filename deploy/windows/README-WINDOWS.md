@@ -23,11 +23,17 @@ cd E:\code\stock-mcp
 ```powershell
 cd E:\code\stock-mcp
 git pull --ff-only
+
+# 仅对当前 PowerShell 窗口生效；关闭窗口后自动恢复。
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+
 .\deploy\windows\install-from-source.ps1 -InstallRoot E:\StockMcp
 .\deploy\windows\configure.ps1 -InstallRoot E:\StockMcp
 ```
 
 `install-from-source.ps1` 不生成或解压发布 ZIP。它要求 Git 工作区没有已修改或未跟踪的文件，记录当前提交和远程地址，下载并验证固定版本的 `uv`、WinSW 与 `tunnel-client`，然后建立可回滚的 `E:\StockMcp\releases\<版本+提交>` 运行副本。每次 `git pull` 到新提交后，再次运行同一安装命令即可升级；失败时仍保留旧版本和数据库备份。
+
+如果 `Get-ExecutionPolicy -List` 显示 `MachinePolicy` 或 `UserPolicy` 已由组策略强制，当前窗口的设置也会被拒绝；此时应由 Windows Server 管理员为该受控仓库配置相应的脚本执行策略。不要将机器级策略设为 `Unrestricted`，也不要对不可信目录使用绕过命令。
 
 配置脚本通过安全交互提示采集生产密钥，并只将其保存到 ACL 保护的主机配置文件。它完成数据权限检查、三年历史回填、Tunnel 自检、MCP 本地就绪检查和 Tunnel 服务身份就绪检查后，才启动 `StockMcpService` 与 `StockMcpTunnel`。
 
