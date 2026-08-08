@@ -71,6 +71,7 @@ def _strategy(*, version: str = "v0.1-proposed") -> StrategyVersion:
         version=version,
         status="proposed",
         parameters={
+            "rule_engine_version": 1,
             "offensive_min_bps": 5_500,
             "defensive_max_bps": 4_000,
             "neutral_limit": 2,
@@ -214,6 +215,14 @@ class StrategyScreeningContractTest(unittest.TestCase):
 
         self.assertEqual(setup_by_symbol[pullback.symbol], SetupType.STRONG_PULLBACK)
         self.assertEqual(setup_by_symbol[breakout.symbol], SetupType.VOLUME_BREAKOUT)
+        evidence_by_symbol = {
+            candidate.symbol: {evidence.metric for evidence in candidate.evidence}
+            for candidate in review.candidates
+        }
+        self.assertTrue({"prior_gain_bps", "pullback_bps"} <= evidence_by_symbol[pullback.symbol])
+        self.assertTrue(
+            {"volume_ratio_bps", "breakout_prior_high_1e4"} <= evidence_by_symbol[breakout.symbol]
+        )
 
     def test_candidate_contains_structured_industry_context_evidence(self) -> None:
         security = _security("600021.SH", industry="电力设备")
@@ -235,6 +244,79 @@ class StrategyScreeningContractTest(unittest.TestCase):
         candidate = next(item for item in review.candidates if item.symbol == security.symbol)
 
         self.assertIn("industry_strength_bps", {evidence.metric for evidence in candidate.evidence})
+
+    def test_missing_industry_is_not_scored_as_one_fictitious_peer_group(self) -> None:
+        first = _security("600023.SH", industry="")
+        second = _security("600024.SH", industry="")
+        bars = (
+            _bar(first.symbol, TRADE_DATE - timedelta(days=2), close=98_000, volume=500_000),
+            _bar(first.symbol, TRADE_DATE - timedelta(days=1), close=100_000, volume=500_000),
+            _bar(first.symbol, TRADE_DATE, close=105_000, pre_close=100_000),
+            _bar(second.symbol, TRADE_DATE - timedelta(days=2), close=98_000, volume=500_000),
+            _bar(second.symbol, TRADE_DATE - timedelta(days=1), close=100_000, volume=500_000),
+            _bar(second.symbol, TRADE_DATE, close=102_000, pre_close=100_000),
+        )
+
+        review = generate_daily_review(_snapshot((first, second), bars), _strategy())
+
+        for candidate in review.candidates:
+            industry = next(
+                item for item in candidate.evidence if item.metric == "industry_strength_bps"
+            )
+            self.assertEqual("unavailable", industry.value)
+            self.assertFalse(industry.passed)
+            self.assertEqual(0, industry.score_contribution)
+
+    def test_st_peer_does_not_change_industry_strength_or_candidate_score(self) -> None:
+        eligible = _security("600025.SH", industry="银行")
+        st_peer = _security("600026.SH", industry="银行", is_st=True)
+        bars = (
+            _bar(eligible.symbol, TRADE_DATE - timedelta(days=2), close=98_000, volume=500_000),
+            _bar(eligible.symbol, TRADE_DATE - timedelta(days=1), close=100_000, volume=500_000),
+            _bar(eligible.symbol, TRADE_DATE, close=105_000, pre_close=100_000),
+            _bar(st_peer.symbol, TRADE_DATE, close=200_000, pre_close=100_000),
+        )
+
+        candidate = generate_daily_review(
+            _snapshot((eligible, st_peer), bars), _strategy()
+        ).candidates[0]
+        industry = next(
+            item for item in candidate.evidence if item.metric == "industry_strength_bps"
+        )
+
+        self.assertEqual(500, industry.value)
+
+    def test_candidate_score_is_fully_explained_by_evidence_contributions(self) -> None:
+        security = _security("600031.SH", industry="电力设备")
+        bars = (
+            _bar(security.symbol, TRADE_DATE - timedelta(days=2), close=98_000, volume=500_000),
+            _bar(security.symbol, TRADE_DATE - timedelta(days=1), close=100_000, volume=500_000),
+            _bar(security.symbol, TRADE_DATE, close=105_000, pre_close=100_000),
+        )
+
+        candidate = generate_daily_review(_snapshot((security,), bars), _strategy()).candidates[0]
+
+        self.assertEqual(
+            candidate.score,
+            sum(evidence.score_contribution for evidence in candidate.evidence),
+        )
+
+    def test_candidate_contains_structured_setup_inclusion_evidence(self) -> None:
+        security = _security("600032.SH", industry="电力设备")
+        bars = (
+            _bar(security.symbol, TRADE_DATE - timedelta(days=2), close=98_000, volume=500_000),
+            _bar(security.symbol, TRADE_DATE - timedelta(days=1), close=100_000, volume=500_000),
+            _bar(security.symbol, TRADE_DATE, close=105_000, pre_close=100_000),
+        )
+
+        candidate = generate_daily_review(_snapshot((security,), bars), _strategy()).candidates[0]
+        setup_evidence = [
+            evidence for evidence in candidate.evidence if evidence.metric == "setup_inclusion"
+        ]
+
+        self.assertEqual(1, len(setup_evidence))
+        self.assertEqual(candidate.setup_type, setup_evidence[0].value)
+        self.assertTrue(setup_evidence[0].passed)
 
     def test_defensive_market_is_ready_with_zero_candidates(self) -> None:
         security = _security("600001.SH")

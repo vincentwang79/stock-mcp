@@ -26,9 +26,10 @@ uv build
 
 发布材料位于 `deploy/windows`。发布工程先运行 `fetch-tools.ps1` 获取并验证
 固定版本的 uv、WinSW 和 OpenAI tunnel-client，再用 `build-release.ps1` 生成
-`stock-mcp-windows-x64.zip` 及其外部 SHA-256。服务器侧只需解压后依次运行
-`install.ps1` 与 `configure.ps1`；具体升级、诊断、回滚和卸载流程见
+`stock-mcp-windows-x64.zip` 及其外部 SHA-256。服务器侧先核对外部摘要，再从解压目录运行
+`install.ps1 -PackageArchive <zip> -PackageSha256 <digest>` 与 `configure.ps1`；配置阶段会
+幂等回填三年 Tushare 日线，此后的前 20 个成功交易日保持 observation-only。具体升级、诊断、回滚和卸载流程见
 `deploy/windows/README-WINDOWS.md`。
 
-策略版本由 MCP 创建和比较，但激活还需要 Windows 主机上的一次性本地批准；
+策略版本由 MCP 创建，并需完成完整三年交易日历的 walk-forward 比较（前 20 个交易日只作预热）；激活还需要 Windows 主机上的一次性本地批准；
 这使模型无法仅靠传入 `confirmed=true` 绕过人的最终确认。

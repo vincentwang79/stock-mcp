@@ -75,7 +75,7 @@ class FakeRepository:
         self.reviews = {review.trade_date: review}
         self.candidates = {candidate.candidate_id: candidate for candidate in review.candidates}
         self.watchlists: dict[str, set[str]] = {}
-        self.candidate_events: list[dict[str, str]] = []
+        self.candidate_events: list[dict[str, object]] = []
         self.review_notes: list[dict[str, str]] = []
         self._idempotent_writes: dict[tuple[str, str], object] = {}
         self.write_counts: dict[str, int] = {}
@@ -120,12 +120,19 @@ class FakeRepository:
         )
 
     def record_candidate_event(
-        self, *, candidate_id: str, event_type: str, detail: str, idempotency_key: str
-    ) -> dict[str, str] | None:
+        self,
+        *,
+        candidate_id: str,
+        status: str,
+        event_date: date,
+        price_1e4: int | None,
+        reason: str,
+        idempotency_key: str,
+    ) -> dict[str, object] | None:
         return self._write(
             "record_candidate_event",
             idempotency_key,
-            lambda: self._candidate_event(candidate_id, event_type, detail),
+            lambda: self._candidate_event(candidate_id, status, event_date, price_1e4, reason),
         )
 
     def record_review_note(
@@ -166,11 +173,22 @@ class FakeRepository:
         return tuple(sorted(self.watchlists[name]))
 
     def _candidate_event(
-        self, candidate_id: str, event_type: str, detail: str
-    ) -> dict[str, str] | None:
+        self,
+        candidate_id: str,
+        status: str,
+        event_date: date,
+        price_1e4: int | None,
+        reason: str,
+    ) -> dict[str, object] | None:
         if candidate_id not in self.candidates:
             return None
-        event = {"candidate_id": candidate_id, "event_type": event_type, "detail": detail}
+        event = {
+            "candidate_id": candidate_id,
+            "status": status,
+            "event_date": event_date.isoformat(),
+            "price_1e4": price_1e4,
+            "reason": reason,
+        }
         self.candidate_events.append(event)
         return event
 
@@ -349,14 +367,18 @@ class StockMcpApplicationContractTests(unittest.TestCase):
     def test_events_and_notes_append_once_and_are_available_in_review_history(self) -> None:
         event = self.application.record_candidate_event(
             candidate_id="candidate-1",
-            event_type="observed",
-            detail="close held above confirmation",
+            status="watched",
+            event_date=TRADE_DATE,
+            price_1e4=120_000,
+            reason="close held above confirmation",
             idempotency_key="event-1",
         )
         same_event = self.application.record_candidate_event(
             candidate_id="candidate-1",
-            event_type="observed",
-            detail="close held above confirmation",
+            status="watched",
+            event_date=TRADE_DATE,
+            price_1e4=120_000,
+            reason="close held above confirmation",
             idempotency_key="event-1",
         )
         self.assertEqual(event, same_event)

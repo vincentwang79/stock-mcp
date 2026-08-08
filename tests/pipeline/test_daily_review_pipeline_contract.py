@@ -63,10 +63,16 @@ def _strategy() -> StrategyVersion:
         version="strategy-v0.1",
         status="active",
         parameters={
+            "rule_engine_version": 1,
             "offensive_min_bps": 5_500,
             "defensive_max_bps": 4_000,
             "neutral_limit": 2,
             "offensive_limit": 3,
+            "min_liquidity_amount_fen": 0,
+            "max_consecutive_limit_up_days": 2,
+            "strong_pullback_min_prior_gain_bps": 1_000,
+            "strong_pullback_max_pullback_bps": 800,
+            "volume_breakout_min_volume_ratio_bps": 15_000,
         },
     )
 
@@ -132,6 +138,7 @@ def _pipeline(
         strategy=_strategy(),
         pipeline_version=PIPELINE_VERSION,
         expected_main_board_count=2,
+        required_prior_sessions=0,
         max_attempts=max_attempts,
     )
 
@@ -402,6 +409,49 @@ class DailyReviewPipelineContractTest(unittest.TestCase):
 
         self.assertEqual(result.status, "ready")
         self.assertEqual(result.review.candidates, ())
+
+    def test_new_history_is_observation_only_until_twenty_prior_sessions_exist(self) -> None:
+        """A fresh database must not turn an under-warmed snapshot into a formal review."""
+        primary = FakeProvider(source="primary", outcomes=[_snapshot(source="primary")])
+        backup = FakeProvider(source="backup", outcomes=[_snapshot(source="backup")])
+        repository = FakeRepository()
+
+        result = DailyReviewPipeline(
+            calendar=FakeCalendar({TRADE_DATE}),
+            primary_provider=primary,
+            backup_provider=backup,
+            repository=repository,
+            strategy=_strategy(),
+            pipeline_version=PIPELINE_VERSION,
+            expected_main_board_count=2,
+            required_prior_sessions=20,
+        ).run(TRADE_DATE)
+
+        self.assertEqual("degraded_observation", result.status)
+        self.assertIsNone(result.review)
+        self.assertIn("20", result.error or "")
+        self.assertEqual(1, repository.save_calls)
+
+    def test_live_observation_mode_keeps_an_auditable_review_without_publishing_ready(
+        self,
+    ) -> None:
+        repository = FakeRepository()
+        result = DailyReviewPipeline(
+            calendar=FakeCalendar({TRADE_DATE}),
+            primary_provider=FakeProvider(source="primary", outcomes=[_snapshot(source="primary")]),
+            backup_provider=FakeProvider(source="backup", outcomes=[_snapshot(source="backup")]),
+            repository=repository,
+            strategy=_strategy(),
+            pipeline_version=PIPELINE_VERSION,
+            expected_main_board_count=2,
+            required_prior_sessions=0,
+            observation_only=True,
+        ).run(TRADE_DATE)
+
+        self.assertEqual("degraded_observation", result.status)
+        self.assertIsNotNone(result.review)
+        self.assertIn("live observation", result.error or "")
+        self.assertEqual(1, repository.save_calls)
 
     def test_retry_deadline_returns_failed_when_no_complete_source_can_be_fetched(self) -> None:
         primary = FakeProvider(source="primary", outcomes=[RuntimeError("primary unavailable")])

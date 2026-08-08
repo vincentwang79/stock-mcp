@@ -75,10 +75,16 @@ def _strategy() -> StrategyVersion:
         version="v0.1-proposed",
         status="proposed",
         parameters={
+            "rule_engine_version": 1,
             "offensive_min_bps": 5_500,
             "defensive_max_bps": 4_000,
             "neutral_limit": 2,
             "offensive_limit": 3,
+            "min_liquidity_amount_fen": 0,
+            "max_consecutive_limit_up_days": 2,
+            "strong_pullback_min_prior_gain_bps": 1_000,
+            "strong_pullback_max_pullback_bps": 800,
+            "volume_breakout_min_volume_ratio_bps": 15_000,
         },
     )
 

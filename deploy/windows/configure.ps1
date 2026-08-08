@@ -80,11 +80,27 @@ if (-not (Test-Path -LiteralPath $servicePython)) { throw 'Isolated application 
 & $servicePython -m stock_mcp.cli doctor --root $InstallRoot
 if ($LASTEXITCODE -ne 0) { throw 'Data permissions/configuration probe failed.' }
 
+# Build the replay baseline before the scheduler can publish a normal daily review.
+# Yesterday is used so configuration never mistakes an in-progress trading day for
+# an incomplete historical source response. The command is idempotent and resumes
+# only missing dates after an interruption.
+$chinaTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
+$chinaNow = [TimeZoneInfo]::ConvertTime([DateTimeOffset]::UtcNow, $chinaTimeZone)
+$backfillEnd = $chinaNow.Date.AddDays(-1)
+$backfillStart = $backfillEnd.AddYears(-3)
+& $servicePython -m stock_mcp.cli backfill --root $InstallRoot `
+    --start $backfillStart.ToString('yyyy-MM-dd') --end $backfillEnd.ToString('yyyy-MM-dd')
+if ($LASTEXITCODE -ne 0) { throw 'Three-year historical backfill is incomplete; rerun configure.ps1.' }
+
 $tunnelClient = Join-Path $InstallRoot 'runtime\tools\tunnel-client.exe'
+# Always restart both services so readiness proves the configured virtual service
+# identities can read their respective protected files, rather than an old process.
+Stop-StockServices
 Start-Service -Name StockMcpService
 if (-not (Wait-LocalReady)) { throw 'MCP local readiness check failed.' }
 & $tunnelClient doctor --config $profilePath --explain
 if ($LASTEXITCODE -ne 0) { throw 'Tunnel doctor failed.' }
 Start-Service -Name StockMcpTunnel
+if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after service startup.' }
 'ready' | Set-Content -LiteralPath (Join-Path $InstallRoot 'state\service-status') -Encoding ASCII
 Write-Host 'Configuration validated. Secrets were not printed.'

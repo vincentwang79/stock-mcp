@@ -134,7 +134,7 @@ class DatabaseContractTest(unittest.TestCase):
         with sqlite3.connect(legacy_path) as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(idempotent_writes)")}
             self.assertIn("request_hash", columns)
-            self.assertEqual(4, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(8, connection.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 "[]",
                 connection.execute(

@@ -6,6 +6,7 @@ import json
 from argparse import ArgumentParser
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 
 from .config import Settings
@@ -37,13 +38,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = ArgumentParser(prog="stock-mcp")
     parser.add_argument(
         "command",
-        choices=("doctor", "migrate", "backup", "restore", "approve-strategy", "serve"),
+        choices=(
+            "doctor",
+            "migrate",
+            "backup",
+            "restore",
+            "backfill",
+            "approve-strategy",
+            "serve",
+        ),
     )
     parser.add_argument("--root", type=Path)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--version")
+    parser.add_argument("--start", type=date.fromisoformat)
+    parser.add_argument("--end", type=date.fromisoformat)
     args = parser.parse_args(argv)
     settings = Settings.load(root=args.root)
 
@@ -91,6 +102,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         BackupManager(args.source.parent, retention=14).restore(args.source, settings.database_path)
         print("stock-mcp: database restored")
         return 0
+
+    if args.command == "backfill":
+        from .backfill import run_production_backfill
+        from .storage import Database
+
+        if args.start is None or args.end is None:
+            parser.error("backfill requires --start and --end")
+        database = Database(settings.database_path)
+        database.initialize()
+        result = run_production_backfill(settings, database, args.start, args.end)
+        print(
+            "stock-mcp: backfill "
+            f"published={len(result.published_dates)} incomplete={len(result.incomplete_dates)}"
+        )
+        return 0 if not result.incomplete_dates else 2
 
     if args.command == "approve-strategy":
         from .storage import Database

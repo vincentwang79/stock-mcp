@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from stock_mcp.application import StockMcpApplication
 from stock_mcp.domain import (
     Candidate,
     DailyReview,
@@ -168,6 +169,18 @@ class ApplicationRepositoryContractTest(unittest.TestCase):
                 idempotency_key="add-focus",
             )
 
+    def test_application_does_not_cache_away_watchlist_idempotency_conflicts(self) -> None:
+        application = StockMcpApplication(self.database, object(), object())
+        application.create_watchlist(name="focus", idempotency_key="create-focus")
+        application.add_watchlist_items(
+            name="focus", symbols=("600000.SH",), idempotency_key="same-key"
+        )
+
+        with self.assertRaises(IdempotencyKeyReuseError):
+            application.add_watchlist_items(
+                name="focus", symbols=("000001.SZ",), idempotency_key="same-key"
+            )
+
     def test_candidate_and_review_history_are_durable_and_unknown_records_are_none(self) -> None:
         review = self._save_active_review()
         reopened = self.reopen()
@@ -223,8 +236,10 @@ class ApplicationRepositoryContractTest(unittest.TestCase):
         candidate = review.candidates[0]
         event = self.database.record_candidate_event(
             candidate_id=candidate.candidate_id,
-            event_type="observed",
-            detail="close held above confirmation",
+            status="watched",
+            event_date=TRADE_DATE,
+            price_1e4=120_000,
+            reason="close held above confirmation",
             idempotency_key="event-1",
         )
         note = self.database.record_review_note(
@@ -238,8 +253,10 @@ class ApplicationRepositoryContractTest(unittest.TestCase):
             event,
             reopened.record_candidate_event(
                 candidate_id=candidate.candidate_id,
-                event_type="observed",
-                detail="close held above confirmation",
+                status="watched",
+                event_date=TRADE_DATE,
+                price_1e4=120_000,
+                reason="close held above confirmation",
                 idempotency_key="event-1",
             ),
         )
@@ -250,11 +267,14 @@ class ApplicationRepositoryContractTest(unittest.TestCase):
             ),
         )
         self.assertEqual((note,), reopened.list_review_notes(TRADE_DATE))
+        self.assertEqual((event,), reopened.list_candidate_review_events(candidate.candidate_id))
         self.assertIsNone(
             reopened.record_candidate_event(
                 candidate_id="missing",
-                event_type="observed",
-                detail="ignored",
+                status="skipped",
+                event_date=TRADE_DATE,
+                price_1e4=None,
+                reason="ignored",
                 idempotency_key="missing-event",
             )
         )

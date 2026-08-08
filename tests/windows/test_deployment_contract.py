@@ -128,11 +128,21 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertLess(health_check, tunnel_doctor)
         self.assertLess(tunnel_doctor, tunnel_start)
 
+    def test_configuration_completes_three_year_backfill_before_starting_services(self) -> None:
+        configure = self._read_required("configure.ps1")
+
+        self.assertIn("AddYears(-3)", configure)
+        self.assertIn("stock_mcp.cli backfill --root $InstallRoot", configure)
+        self.assertLess(
+            configure.index("stock_mcp.cli backfill"),
+            configure.index("Start-Service -Name StockMcpService"),
+        )
+
     def test_install_uses_the_release_manifest_and_checksums_not_a_user_version(self) -> None:
         install = self._read_required("install.ps1")
 
-        self.assertIn("Assert-ReleaseContents $PSScriptRoot", install)
-        self.assertIn("Get-ReleaseVersion $PSScriptRoot", install)
+        self.assertIn("Assert-ReleaseContents $PackageRoot", install)
+        self.assertIn("Get-ReleaseVersion $PackageRoot", install)
         self.assertNotIn("[string] $Version", install)
 
     def test_custom_ca_is_copied_into_protected_host_configuration(self) -> None:
@@ -171,6 +181,123 @@ class WindowsDeploymentContractTest(unittest.TestCase):
 
         self.assertIn(".staging-", update)
         self.assertIn("Move-Item -LiteralPath $newReleaseStaging -Destination $newRelease", update)
+
+    def test_diagnostics_redact_json_secrets_and_complete_bearer_values(self) -> None:
+        diagnose = self._read_required("diagnose.ps1")
+
+        self.assertIn('"(?:api_key|token)"\\s*:\\s*"[^"]+"', diagnose)
+        self.assertIn("Authorization\\s*[:=]\\s*Bearer\\s+[^\\s]+", diagnose)
+        self.assertIn("[REDACTED]", diagnose)
+
+    def test_first_install_requires_an_external_package_digest(self) -> None:
+        install = self._read_required("install.ps1")
+
+        self.assertIn("[Parameter(Mandatory = $true)][string] $PackageSha256", install)
+        self.assertIn("Assert-Sha256 $PackageArchive $PackageSha256", install)
+        self.assertIn("Expand-Archive -LiteralPath $PackageArchive", install)
+
+    def test_install_and_update_keep_release_manifest_with_versioned_code(self) -> None:
+        install = self._read_required("install.ps1")
+        update = self._read_required("update.ps1")
+
+        for script in (install, update):
+            self.assertIn("release-manifest.json", script)
+            self.assertIn("Copy-Item -LiteralPath", script)
+
+    def test_custom_root_and_empty_log_diagnostics_are_safe(self) -> None:
+        install = self._read_required("install.ps1")
+        diagnose = self._read_required("diagnose.ps1")
+
+        self.assertIn("$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)", install)
+        self.assertIn("$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)", diagnose)
+        self.assertIn("New-Item -ItemType Directory -Path $logDestination -Force", diagnose)
+
+    def test_backfill_uses_china_standard_time_for_its_complete_day_boundary(self) -> None:
+        configure = self._read_required("configure.ps1")
+
+        self.assertIn("FindSystemTimeZoneById('China Standard Time')", configure)
+        self.assertIn("ConvertTime([DateTimeOffset]::UtcNow, $chinaTimeZone)", configure)
+        self.assertNotIn("$backfillEnd = (Get-Date).Date.AddDays(-1)", configure)
+
+    def test_tunnel_readiness_is_checked_after_each_service_startup_path(self) -> None:
+        configure = self._read_required("configure.ps1")
+        update = self._read_required("update.ps1")
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("function Wait-TunnelReady", library)
+        self.assertIn("127.0.0.1:8766", library)
+        self.assertIn("Stop-StockServices", configure)
+        self.assertIn("Wait-TunnelReady", configure)
+        self.assertIn("Wait-TunnelReady", update)
+        self.assertIn("update_failed", update)
+        self.assertIn("rollback_failed", update)
+
+    def test_update_stages_verified_tools_and_refreshes_service_xml_without_acl_drift(self) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("tools.staging-", update)
+        self.assertIn("services.staging-", update)
+        self.assertIn("Get-VerifiedTool $manifest.tools.uv", update)
+        self.assertIn('"deploy\\services\\{0}.xml.tmpl" -f $name', update)
+        self.assertIn("'StockMcpService', 'StockMcpTunnel'", update)
+        self.assertIn("Get-Acl -LiteralPath $toolsDestination", update)
+        self.assertIn("Set-Acl -LiteralPath $toolsDestination", update)
+        self.assertIn("refresh $xml", update)
+
+    def test_diagnostics_redact_every_external_command_and_scan_staging_before_archiving(
+        self,
+    ) -> None:
+        diagnose = self._read_required("diagnose.ps1")
+
+        self.assertIn("Write-RedactedCommandOutput", diagnose)
+        self.assertIn("doctor --root $InstallRoot 2>&1 |", diagnose)
+        self.assertIn("tunnel doctor --config $tunnelConfig --explain 2>&1 |", diagnose)
+        self.assertIn("Assert-DiagnosticStageHasNoSecrets", diagnose)
+        self.assertIn("secret-pattern", diagnose)
+
+    def test_readme_requires_manual_hash_verification_before_untrusted_bootstrap_runs(self) -> None:
+        readme = self._read_required("README-WINDOWS.md")
+
+        self.assertIn("before extracting the zip or running any script", readme.lower())
+        self.assertIn("Get-FileHash", readme)
+        self.assertIn("not Authenticode-signed", readme)
+
+    def test_update_rollback_refreshes_restored_services_using_the_old_winsw(self) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("$oldWinSw", update)
+        self.assertIn("Refresh-WinSWServiceDefinitions $servicesDirectory $oldWinSw", update)
+        self.assertLess(
+            update.index("Copy-Item -LiteralPath $servicesBackup"),
+            update.index("Refresh-WinSWServiceDefinitions $servicesDirectory $oldWinSw"),
+        )
+
+    def test_update_marks_tool_replacement_before_removing_current_tools(self) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("$toolsReplacementStarted = $true", update)
+        self.assertLess(
+            update.index("$toolsReplacementStarted = $true"),
+            update.index("Remove-Item -LiteralPath $toolsDestination -Recurse -Force"),
+        )
+        self.assertIn("if ($toolsReplacementStarted -and $toolsBackup", update)
+
+    def test_diagnostics_redact_and_sentinel_scan_bare_keys_url_userinfo_and_query_secrets(
+        self,
+    ) -> None:
+        diagnose = self._read_required("diagnose.ps1")
+
+        self.assertIn("sk-[A-Za-z0-9_-]{16,}", diagnose)
+        self.assertIn("https?://", diagnose)
+        self.assertIn("(?:api_key|token|access_token|key)", diagnose)
+        self.assertIn("URL userinfo", diagnose)
+        self.assertIn("query secret", diagnose)
+
+    def test_install_existing_configuration_waits_for_tunnel_readiness(self) -> None:
+        install = self._read_required("install.ps1")
+
+        tunnel_start = install.rindex("Start-Service -Name StockMcpTunnel")
+        self.assertIn("Wait-TunnelReady", install[tunnel_start:])
 
 
 if __name__ == "__main__":

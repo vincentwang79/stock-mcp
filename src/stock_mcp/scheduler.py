@@ -47,7 +47,7 @@ class PostMarketCoordinator:
     _START_HOUR = 16
     _START_MINUTE = 30
     _DEADLINE_HOUR = 18
-    _TERMINAL = frozenset({"ready", "degraded_no_screen", "failed"})
+    _TERMINAL = frozenset({"ready", "degraded_no_screen", "degraded_observation", "failed"})
 
     def __init__(
         self,
@@ -106,7 +106,7 @@ class PostMarketCoordinator:
 
     def _attempt(self, trade_date: date, now: datetime) -> ScheduleOutcome:
         run = self._run_attempt(trade_date)
-        if run.status == "ready":
+        if run.status in {"ready", "degraded_observation"}:
             try:
                 self._backup(run)
             except Exception as error:
@@ -117,10 +117,15 @@ class PostMarketCoordinator:
                     error=str(error),
                 )
             else:
-                outcome = ScheduleOutcome(trade_date=trade_date, status="ready", run=run)
+                outcome = ScheduleOutcome(
+                    trade_date=trade_date,
+                    status=run.status,
+                    run=run,
+                    error=run.error,
+                )
         elif run.status == "degraded_no_screen":
             outcome = ScheduleOutcome(
-                trade_date=trade_date, status="degraded_no_screen", run=run, error=run.error
+                trade_date=trade_date, status=run.status, run=run, error=run.error
             )
         else:
             outcome = ScheduleOutcome(

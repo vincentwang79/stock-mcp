@@ -176,6 +176,35 @@ class TushareRuntimeAdapterContractTest(RuntimeAdapterContractTestCase):
                 clock=lambda: NOW,
             ).fetch_snapshot(TRADE_DATE)
 
+    def test_st_securities_do_not_change_breadth_or_ma20_metrics(self) -> None:
+        st_security = Security("600099.SH", "ST样本", "SSE", "MAIN", date(2020, 1, 2), "测试", True)
+        rows = _tushare_rows() + [
+            {
+                "ts_code": st_security.symbol,
+                "trade_date": "20260807",
+                "open": "10.00",
+                "high": "20.00",
+                "low": "10.00",
+                "close": "20.00",
+                "pre_close": "10.00",
+                "vol": "100",
+                "amount": "2000",
+            }
+        ]
+
+        snapshot = self.TushareDailyProvider(
+            client=_TushareClient(rows),
+            securities=(*SECURITIES, st_security),
+            history_loader=lambda symbol, _until: tuple(
+                _history_bar(symbol, TRADE_DATE - timedelta(days=20 - index), 100_000)
+                for index in range(1, 20)
+            ),
+            clock=lambda: NOW,
+        ).fetch_snapshot(TRADE_DATE)
+
+        self.assertEqual(5_000, snapshot.advance_ratio_bps)
+        self.assertEqual(5_000, snapshot.above_ma20_ratio_bps)
+
 
 class BaoStockTradingCalendarContractTest(RuntimeAdapterContractTestCase):
     def test_constructs_trading_day_lookup_from_baostock_rows(self) -> None:

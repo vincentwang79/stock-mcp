@@ -9,6 +9,40 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'deploy\lib.ps1')
 
+function Set-UpdateState([Parameter(Mandatory = $true)][string] $State) {
+    $stateDirectory = Join-Path $InstallRoot 'state'
+    New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+    $State | Set-Content -LiteralPath (Join-Path $stateDirectory 'service-status') -Encoding ASCII
+}
+
+function New-WinSWServiceDefinitions {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Release,
+        [Parameter(Mandatory = $true)][string] $Destination
+    )
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($name in @('StockMcpService', 'StockMcpTunnel')) {
+        $template = Join-Path $Release ("deploy\services\{0}.xml.tmpl" -f $name)
+        if (-not (Test-Path -LiteralPath $template -PathType Leaf)) { throw "Missing service template: $template" }
+        $xml = Join-Path $Destination ("{0}.xml" -f $name)
+        (Get-Content -LiteralPath $template -Raw).Replace('__INSTALL_ROOT__', $Root) |
+            Set-Content -LiteralPath $xml -Encoding UTF8
+    }
+}
+
+function Refresh-WinSWServiceDefinitions {
+    param(
+        [Parameter(Mandatory = $true)][string] $ServiceDirectory,
+        [Parameter(Mandatory = $true)][string] $WinSw
+    )
+    foreach ($name in @('StockMcpService', 'StockMcpTunnel')) {
+        $xml = Join-Path $ServiceDirectory ("{0}.xml" -f $name)
+        & $WinSw refresh $xml
+        if ($LASTEXITCODE -ne 0) { throw "WinSW could not refresh $name." }
+    }
+}
+
 Test-Administrator
 Assert-WindowsX64
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
@@ -25,6 +59,17 @@ $newReleaseCreated = $false
 $oldPython = $null
 $databaseBackup = $null
 $servicesStopped = $false
+$toolsDestination = Join-Path $InstallRoot 'runtime\tools'
+$toolsStaging = $null
+$toolsBackup = $null
+$toolsReplaced = $false
+$toolsReplacementStarted = $false
+$toolsAcl = $null
+$servicesDirectory = Join-Path $InstallRoot 'runtime\services'
+$servicesBackup = $null
+$servicesAcl = $null
+$servicesStaging = $null
+$servicesReplaced = $false
 New-Item -ItemType Directory -Path $work, $backupRoot -Force | Out-Null
 try {
     Expand-Archive -LiteralPath $PackagePath -DestinationPath $work -Force
@@ -34,6 +79,8 @@ try {
     $extracted = $directories[0]
     Assert-ReleaseContents $extracted.FullName
     $version = Get-ReleaseVersion $extracted.FullName
+    $manifest = Get-ToolManifest (Join-Path $extracted.FullName 'tools-manifest.json')
+    $packageTools = Join-Path $extracted.FullName 'tools'
     $newRelease = Join-Path $InstallRoot ("releases\" + $version)
     if (Test-Path -LiteralPath $newRelease) { throw "Release is already installed: $version" }
     $newReleaseStaging = Join-Path $InstallRoot ("releases\.staging-" + $version + '-' + [guid]::NewGuid().ToString('N'))
@@ -45,11 +92,39 @@ try {
     $servicesStopped = $true
     Stop-StockServices
     Copy-Item -LiteralPath $oldTarget -Destination (Join-Path $backupRoot 'previous-release') -Recurse -Force
+    if (Test-Path -LiteralPath $toolsDestination) {
+        $toolsAcl = Get-Acl -LiteralPath $toolsDestination
+        $toolsBackup = Join-Path $backupRoot 'tools'
+        Copy-Item -LiteralPath $toolsDestination -Destination $toolsBackup -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $servicesDirectory) {
+        $servicesAcl = Get-Acl -LiteralPath $servicesDirectory
+        $servicesBackup = Join-Path $backupRoot 'services'
+        Copy-Item -LiteralPath $servicesDirectory -Destination $servicesBackup -Recurse -Force
+    }
+
+    $toolsStaging = Join-Path $InstallRoot ('runtime\tools.staging-' + [guid]::NewGuid().ToString('N'))
+    $stagedUv = Get-VerifiedTool $manifest.tools.uv $packageTools $toolsStaging
+    [void](Get-VerifiedTool $manifest.tools.winsw $packageTools $toolsStaging)
+    [void](Get-VerifiedTool $manifest.tools.'tunnel-client' $packageTools $toolsStaging)
+    if (Test-Path -LiteralPath $toolsDestination) {
+        # From this point rollback must restore the backup even if Move-Item fails.
+        $toolsReplacementStarted = $true
+        Remove-Item -LiteralPath $toolsDestination -Recurse -Force
+    }
+    Move-Item -LiteralPath $toolsStaging -Destination $toolsDestination
+    $toolsStaging = $null
+    $toolsReplaced = $true
+    if ($null -ne $toolsAcl) { Set-Acl -LiteralPath $toolsDestination -AclObject $toolsAcl }
+
     New-Item -ItemType Directory -Path $newReleaseStaging -Force | Out-Null
     Copy-Item -Path (Join-Path $extracted.FullName 'app\*') -Destination $newReleaseStaging -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $extracted.FullName 'deploy') -Destination (Join-Path $newReleaseStaging 'deploy') -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $extracted.FullName 'release-manifest.json') -Destination (Join-Path $newReleaseStaging 'release-manifest.json') -Force
+    $servicesStaging = Join-Path $InstallRoot ('runtime\services.staging-' + [guid]::NewGuid().ToString('N'))
+    New-WinSWServiceDefinitions $InstallRoot $newReleaseStaging $servicesStaging
 
-    $uv = Join-Path $InstallRoot 'runtime\tools\uv.exe'
+    $uv = Join-Path $toolsDestination ([IO.Path]::GetFileName($manifest.tools.uv.path))
     $env:UV_PYTHON_INSTALL_DIR = Join-Path $InstallRoot 'runtime\python'
     $env:UV_CACHE_DIR = Join-Path $InstallRoot 'runtime\uv-cache'
     & $uv venv (Join-Path $newReleaseStaging '.venv') --python 3.12
@@ -69,12 +144,22 @@ try {
     $newReleaseCreated = $true
     $newReleaseStaging = $null
     New-CurrentJunction $InstallRoot $newRelease
+    $winSw = Join-Path $toolsDestination ([IO.Path]::GetFileName($manifest.tools.winsw.path))
+    if (Test-Path -LiteralPath $servicesDirectory) { Remove-Item -LiteralPath $servicesDirectory -Recurse -Force }
+    Move-Item -LiteralPath $servicesStaging -Destination $servicesDirectory
+    $servicesStaging = $null
+    $servicesReplaced = $true
+    if ($null -ne $servicesAcl) { Set-Acl -LiteralPath $servicesDirectory -AclObject $servicesAcl }
+    Refresh-WinSWServiceDefinitions $servicesDirectory $winSw
     Start-Service -Name StockMcpService
     if (-not (Wait-LocalReady)) { throw 'Readiness check failed after update.' }
     Start-Service -Name StockMcpTunnel
+    if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after update.' }
+    Set-UpdateState 'ready'
     Write-Host "Updated to $version. Backup: $backupRoot"
 } catch {
     $failure = $_
+    Set-UpdateState 'update_failed'
     Write-Warning "Update failed; Rollback is starting: $($failure.Exception.Message)"
     if ($servicesStopped) {
         try {
@@ -84,9 +169,29 @@ try {
                 & $oldPython -m stock_mcp.cli restore --root $InstallRoot --source $databaseBackup
                 if ($LASTEXITCODE -ne 0) { throw 'Database restore failed during Rollback.' }
             }
-            Start-Service -Name StockMcpService -ErrorAction SilentlyContinue
-            Start-Service -Name StockMcpTunnel -ErrorAction SilentlyContinue
-        } catch { Write-Warning "Rollback encountered an error: $($_.Exception.Message)" }
+            if ($toolsReplacementStarted -and $toolsBackup -and (Test-Path -LiteralPath $toolsBackup)) {
+                if (Test-Path -LiteralPath $toolsDestination) { Remove-Item -LiteralPath $toolsDestination -Recurse -Force }
+                Copy-Item -LiteralPath $toolsBackup -Destination (Join-Path $InstallRoot 'runtime') -Recurse -Force
+                if ($null -ne $toolsAcl) { Set-Acl -LiteralPath $toolsDestination -AclObject $toolsAcl }
+            }
+            if ($servicesBackup -and (Test-Path -LiteralPath $servicesBackup)) {
+                if (Test-Path -LiteralPath $servicesDirectory) { Remove-Item -LiteralPath $servicesDirectory -Recurse -Force }
+                Copy-Item -LiteralPath $servicesBackup -Destination (Join-Path $InstallRoot 'runtime') -Recurse -Force
+                if ($null -ne $servicesAcl) { Set-Acl -LiteralPath $servicesDirectory -AclObject $servicesAcl }
+            }
+            $oldWinSw = Join-Path $toolsDestination 'WinSW.exe'
+            if (-not (Test-Path -LiteralPath $oldWinSw -PathType Leaf)) { throw 'Rollback WinSW executable is missing.' }
+            Refresh-WinSWServiceDefinitions $servicesDirectory $oldWinSw
+            Start-Service -Name StockMcpService
+            if (-not (Wait-LocalReady)) { throw 'Rollback MCP readiness check failed.' }
+            Start-Service -Name StockMcpTunnel
+            if (-not (Wait-TunnelReady)) { throw 'Rollback Tunnel readiness check failed.' }
+            Set-UpdateState 'rollback_ready'
+            Write-Warning 'Rollback succeeded; the previous release is ready.'
+        } catch {
+            Set-UpdateState 'rollback_failed'
+            Write-Warning "Rollback encountered an error: $($_.Exception.Message)"
+        }
     }
     if ($newReleaseCreated -and $newRelease -and (Test-Path -LiteralPath $newRelease) -and
         $newRelease -ne (Get-Item -LiteralPath (Join-Path $InstallRoot 'current')).Target) {
@@ -96,6 +201,14 @@ try {
     if ($newReleaseStaging -and (Test-Path -LiteralPath $newReleaseStaging)) {
         try { Remove-Item -LiteralPath $newReleaseStaging -Recurse -Force }
         catch { Write-Warning "Could not remove failed staging release: $newReleaseStaging" }
+    }
+    if ($toolsStaging -and (Test-Path -LiteralPath $toolsStaging)) {
+        try { Remove-Item -LiteralPath $toolsStaging -Recurse -Force }
+        catch { Write-Warning "Could not remove failed staging tools: $toolsStaging" }
+    }
+    if ($servicesStaging -and (Test-Path -LiteralPath $servicesStaging)) {
+        try { Remove-Item -LiteralPath $servicesStaging -Recurse -Force }
+        catch { Write-Warning "Could not remove failed staging service definitions: $servicesStaging" }
     }
     throw $failure
 } finally {

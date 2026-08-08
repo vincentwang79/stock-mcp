@@ -209,6 +209,24 @@ class ToolCatalogContractTests(unittest.TestCase):
         server = create_server(self.service)
         self.assertIsNotNone(server)
 
+    def test_idempotency_key_conflicts_are_structured_business_errors(self) -> None:
+        from stock_mcp.mcp_tools import build_tool_catalog
+        from stock_mcp.storage import IdempotencyKeyReuseError
+
+        class ConflictService:
+            def record_review_note(self, **_arguments: Any) -> dict[str, Any]:
+                raise IdempotencyKeyReuseError("key belongs to another request")
+
+        tools = {tool.name: tool for tool in build_tool_catalog(ConflictService())}
+        result = tools["record_review_note"].handler(
+            trade_date="2026-08-07",
+            note="fixture",
+            idempotency_key="conflicting-key",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("idempotency_key_conflict", result["error"]["code"])
+
     def test_real_sdk_registration_preserves_strict_input_schema(self) -> None:
         from stock_mcp.mcp_server import create_server
 

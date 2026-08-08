@@ -8,7 +8,7 @@ provider snapshot or records an explicit non-screening/failed outcome.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Protocol
 
 from .domain import DailyReview, MarketSnapshot, StrategyVersion
@@ -67,12 +67,16 @@ class DailyReviewPipeline:
         strategy: StrategyVersion,
         pipeline_version: str,
         expected_main_board_count: int,
+        required_prior_sessions: int = 20,
+        observation_only: bool = False,
         max_attempts: int = 1,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
         if expected_main_board_count < 1:
             raise ValueError("expected_main_board_count must be positive")
+        if required_prior_sessions < 0:
+            raise ValueError("required_prior_sessions cannot be negative")
         if strategy.status != "active":
             raise ValueError("daily publication requires an active strategy version")
         validate_strategy_parameters(strategy.parameters, require_complete=True)
@@ -83,6 +87,8 @@ class DailyReviewPipeline:
         self._strategy = strategy
         self._pipeline_version = pipeline_version
         self._expected_main_board_count = expected_main_board_count
+        self._required_prior_sessions = required_prior_sessions
+        self._observation_only = observation_only
         self._max_attempts = max_attempts
 
     def run(self, trade_date: date) -> PipelineRun:
@@ -142,6 +148,22 @@ class DailyReviewPipeline:
             return None
 
     def _publish_ready(self, snapshot: MarketSnapshot, attempts: int) -> PipelineRun:
+        insufficient = self._symbols_without_required_history(snapshot)
+        if insufficient:
+            observation = PipelineRun(
+                trade_date=snapshot.trade_date,
+                pipeline_version=self._pipeline_version,
+                status="degraded_observation",
+                attempts=attempts,
+                snapshot=snapshot,
+                review=None,
+                error=(
+                    f"observation requires {self._required_prior_sessions} prior sessions; "
+                    f"insufficient history for {len(insufficient)} securities"
+                ),
+            )
+            self._repository.save_run(observation)
+            return observation
         try:
             review = generate_daily_review(snapshot, self._strategy)
         except (MixedSourceSnapshotError, ValueError) as error:
@@ -159,6 +181,18 @@ class DailyReviewPipeline:
             )
             self._repository.save_run(failed)
             return failed
+        if self._observation_only:
+            observation = PipelineRun(
+                trade_date=snapshot.trade_date,
+                pipeline_version=self._pipeline_version,
+                status="degraded_observation",
+                attempts=attempts,
+                snapshot=snapshot,
+                review=review,
+                error="live observation period is not yet complete",
+            )
+            self._repository.save_run(observation)
+            return observation
         ready = PipelineRun(
             trade_date=snapshot.trade_date,
             pipeline_version=self._pipeline_version,
@@ -182,6 +216,31 @@ class DailyReviewPipeline:
         )
         self._repository.save_run(degraded)
         return degraded
+
+    def _symbols_without_required_history(self, snapshot: MarketSnapshot) -> tuple[str, ...]:
+        if self._required_prior_sessions == 0:
+            return ()
+        eligible_symbols = {
+            security.symbol
+            for security in snapshot.securities
+            if security.board == "MAIN"
+            and not security.is_st
+            and security.list_date <= snapshot.trade_date - timedelta(days=180)
+        }
+        target_symbols = {
+            bar.symbol
+            for bar in snapshot.bars
+            if bar.trade_date == snapshot.trade_date and bar.symbol in eligible_symbols
+        }
+        prior_dates: dict[str, set[date]] = {symbol: set() for symbol in target_symbols}
+        for bar in snapshot.bars:
+            if bar.symbol in prior_dates and bar.trade_date < snapshot.trade_date:
+                prior_dates[bar.symbol].add(bar.trade_date)
+        return tuple(
+            symbol
+            for symbol in sorted(target_symbols)
+            if len(prior_dates[symbol]) < self._required_prior_sessions
+        )
 
     def _validate_snapshot(self, snapshot: MarketSnapshot, requested_date: date) -> None:
         if snapshot.trade_date != requested_date:

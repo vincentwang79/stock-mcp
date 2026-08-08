@@ -53,7 +53,7 @@ class TushareDailyProvider:
             )
         except ProviderNormalizationError as error:
             raise ProviderRuntimeError(str(error)) from error
-        bars = _universe_bars(normalized, self._securities)
+        bars = _research_universe_bars(normalized, self._securities)
         if not bars:
             raise ProviderRuntimeError("Tushare returned no bars for the configured universe")
         histories: dict[str, tuple[DailyBar, ...]] = {}
@@ -133,7 +133,7 @@ class AKShareSnapshotProvider:
             )
         except ProviderNormalizationError as error:
             raise ProviderRuntimeError(str(error)) from error
-        bars = _universe_bars(normalized, self._securities)
+        bars = _research_universe_bars(normalized, self._securities)
         if not bars:
             raise ProviderRuntimeError("AKShare returned no bars for the configured universe")
         return MarketSnapshot(
@@ -210,6 +210,15 @@ def _universe_bars(
     if len(symbols) != len(set(symbols)):
         raise ProviderRuntimeError("provider returned duplicate daily bars")
     return selected
+
+
+def _research_universe_bars(
+    bars: tuple[DailyBar, ...], securities: Sequence[Security]
+) -> tuple[DailyBar, ...]:
+    eligible = tuple(
+        security for security in securities if security.board == "MAIN" and not security.is_st
+    )
+    return _universe_bars(bars, eligible)
 
 
 def _advance_ratio(bars: Sequence[DailyBar]) -> int:

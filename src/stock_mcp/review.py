@@ -12,6 +12,7 @@ from .domain import (
     SetupType,
     StrategyVersion,
 )
+from .strategy import validate_strategy_parameters
 
 
 class MixedSourceSnapshotError(ValueError):
@@ -22,7 +23,20 @@ def generate_daily_review(
     snapshot: MarketSnapshot,
     strategy: StrategyVersion,
 ) -> DailyReview:
-    """Generate the externally visible daily review contract."""
+    """Dispatch to the immutable engine named by the stored strategy version."""
+    parameters = validate_strategy_parameters(strategy.parameters, require_complete=True)
+    engine_version = parameters["rule_engine_version"]
+    if engine_version == 1:
+        return _generate_daily_review_v1(snapshot, strategy)
+    raise ValueError("unsupported rule_engine_version")
+
+
+def _generate_daily_review_v1(
+    snapshot: MarketSnapshot,
+    strategy: StrategyVersion,
+) -> DailyReview:
+    """Frozen v1 screening/scoring semantics; changes require a new engine number."""
+
     _validate_single_source(snapshot)
     regime = _classify_regime(snapshot, strategy)
     quota = _candidate_quota(regime, strategy)
@@ -49,26 +63,45 @@ def generate_daily_review(
             continue
         if security.list_date > snapshot.trade_date - timedelta(days=180):
             continue
-        minimum_liquidity = int(strategy.parameters.get("min_liquidity_amount_fen", 0))
+        minimum_liquidity = int(strategy.parameters["min_liquidity_amount_fen"])
         if bar.amount_fen < minimum_liquidity:
             continue
 
         history = bars_by_symbol[bar.symbol]
-        maximum_limit_up_days = int(strategy.parameters.get("max_consecutive_limit_up_days", 2))
+        maximum_limit_up_days = int(strategy.parameters["max_consecutive_limit_up_days"])
         if _consecutive_limit_up_days(history) > maximum_limit_up_days:
             continue
 
-        setup_type = _classify_setup(history, strategy)
-        if setup_type is None:
+        setup = _classify_setup(history, strategy)
+        if setup is None:
             continue
+        setup_type, setup_evidence = setup
 
         return_bps = ((bar.close_1e4 - bar.pre_close_1e4) * 10_000) // bar.pre_close_1e4
         liquidity_points = min(30, bar.amount_fen // 400_000_000)
         momentum_points = max(0, min(50, return_bps // 10))
-        industry_strength_bps = industry_returns.get(security.industry, 0)
-        industry_points = max(-10, min(20, industry_strength_bps // 100))
+        has_industry = bool(security.industry.strip())
+        industry_strength_bps = industry_returns.get(security.industry) if has_industry else None
+        industry_points = (
+            0 if industry_strength_bps is None else max(-10, min(20, industry_strength_bps // 100))
+        )
         score = int(20 + liquidity_points + momentum_points + industry_points)
         evidence = (
+            Evidence(
+                metric="base_score",
+                value=20,
+                threshold=20,
+                passed=True,
+                score_contribution=20,
+            ),
+            Evidence(
+                metric="setup_inclusion",
+                value=setup_type,
+                threshold="eligible_setup",
+                passed=True,
+                score_contribution=0,
+            ),
+            *setup_evidence,
             Evidence(
                 metric="daily_return_bps",
                 value=return_bps,
@@ -85,9 +118,9 @@ def generate_daily_review(
             ),
             Evidence(
                 metric="industry_strength_bps",
-                value=industry_strength_bps,
+                value="unavailable" if industry_strength_bps is None else industry_strength_bps,
                 threshold=0,
-                passed=industry_strength_bps > 0,
+                passed=industry_strength_bps is not None and industry_strength_bps > 0,
                 score_contribution=int(industry_points),
             ),
         )
@@ -162,7 +195,9 @@ def _consecutive_limit_up_days(bars: list[DailyBar]) -> int:
     return count
 
 
-def _classify_setup(bars: list[DailyBar], strategy: StrategyVersion) -> SetupType | None:
+def _classify_setup(
+    bars: list[DailyBar], strategy: StrategyVersion
+) -> tuple[SetupType, tuple[Evidence, ...]] | None:
     target = bars[-1]
     prior = bars[:-1]
     target_return_bps = _return_bps(target.close_1e4, target.pre_close_1e4)
@@ -170,27 +205,59 @@ def _classify_setup(bars: list[DailyBar], strategy: StrategyVersion) -> SetupTyp
     if prior:
         prior_gain_bps = _return_bps(prior[-1].close_1e4, prior[0].close_1e4)
         pullback_bps = _return_bps(target.close_1e4, target.pre_close_1e4)
-        minimum_prior_gain = int(
-            strategy.parameters.get("strong_pullback_min_prior_gain_bps", 1_000)
-        )
-        maximum_pullback = int(strategy.parameters.get("strong_pullback_max_pullback_bps", 800))
+        minimum_prior_gain = int(strategy.parameters["strong_pullback_min_prior_gain_bps"])
+        maximum_pullback = int(strategy.parameters["strong_pullback_max_pullback_bps"])
         if prior_gain_bps >= minimum_prior_gain and -maximum_pullback <= pullback_bps <= 0:
-            return SetupType.STRONG_PULLBACK
+            return (
+                SetupType.STRONG_PULLBACK,
+                (
+                    Evidence(
+                        metric="prior_gain_bps",
+                        value=prior_gain_bps,
+                        threshold=minimum_prior_gain,
+                        passed=True,
+                        score_contribution=0,
+                    ),
+                    Evidence(
+                        metric="pullback_bps",
+                        value=pullback_bps,
+                        threshold=f"-{maximum_pullback}..0",
+                        passed=True,
+                        score_contribution=0,
+                    ),
+                ),
+            )
 
         average_volume = sum(bar.volume_shares for bar in prior) // len(prior)
         volume_ratio_bps = (
             (target.volume_shares * 10_000) // average_volume if average_volume > 0 else 0
         )
-        minimum_volume_ratio = int(
-            strategy.parameters.get("volume_breakout_min_volume_ratio_bps", 15_000)
-        )
+        minimum_volume_ratio = int(strategy.parameters["volume_breakout_min_volume_ratio_bps"])
         prior_high = max(bar.high_1e4 for bar in prior)
         if (
             target.close_1e4 > prior_high
             and target_return_bps > 0
             and volume_ratio_bps >= minimum_volume_ratio
         ):
-            return SetupType.VOLUME_BREAKOUT
+            return (
+                SetupType.VOLUME_BREAKOUT,
+                (
+                    Evidence(
+                        metric="volume_ratio_bps",
+                        value=volume_ratio_bps,
+                        threshold=minimum_volume_ratio,
+                        passed=True,
+                        score_contribution=0,
+                    ),
+                    Evidence(
+                        metric="breakout_prior_high_1e4",
+                        value=target.close_1e4,
+                        threshold=prior_high,
+                        passed=True,
+                        score_contribution=0,
+                    ),
+                ),
+            )
 
     return None
 
@@ -201,7 +268,12 @@ def _industry_returns(
     values: dict[str, list[int]] = defaultdict(list)
     for symbol, bar in target_bars.items():
         security = securities.get(symbol)
-        if security is not None:
+        if (
+            security is not None
+            and security.board == "MAIN"
+            and not security.is_st
+            and security.industry.strip()
+        ):
             values[security.industry].append(_return_bps(bar.close_1e4, bar.pre_close_1e4))
     return {industry: sum(returns) // len(returns) for industry, returns in values.items()}
 

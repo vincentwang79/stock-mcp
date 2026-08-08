@@ -141,6 +141,16 @@ function Wait-LocalReady([string] $Url = 'http://127.0.0.1:8765/readyz', [int] $
     return $false
 }
 
+function Wait-TunnelReady([string] $Url = 'http://127.0.0.1:8766/readyz', [int] $Attempts = 12) {
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) { return $true }
+        } catch { Start-Sleep -Seconds 2 }
+    }
+    return $false
+}
+
 function Stop-StockServices {
     foreach ($name in @('StockMcpTunnel', 'StockMcpService')) {
         $service = Get-Service -Name $name -ErrorAction SilentlyContinue

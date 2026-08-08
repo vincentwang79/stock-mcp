@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date
-from typing import Any
+from datetime import date, datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .storage import IdempotencyKeyReuseError
 
 
 class _Dto(BaseModel):
@@ -71,8 +73,10 @@ class RemoveWatchlistItemsInput(_IdempotentWrite):
 
 class RecordCandidateEventInput(_IdempotentWrite):
     candidate_id: str = Field(min_length=1, max_length=200)
-    event_type: str = Field(min_length=1, max_length=80)
-    detail: str = Field(min_length=1, max_length=2_000)
+    status: Literal["watched", "bought", "skipped", "exited"]
+    event_date: date
+    price_1e4: int | None = Field(default=None, gt=0)
+    reason: str = Field(min_length=1, max_length=2_000)
 
 
 class RecordReviewNoteInput(_IdempotentWrite):
@@ -117,6 +121,193 @@ class ToolResult(_Dto):
 
     ok: bool
     data: dict[str, Any] | None = None
+    error: ToolError | None = None
+
+
+class EvidenceOutput(_Dto):
+    metric: str
+    value: int | str
+    threshold: int | str
+    passed: bool
+    score_contribution: int
+
+
+class IndustryContextOutput(_Dto):
+    industry: str
+    industry_strength_bps: int | None
+    eligible_peer_count: int
+
+
+class CandidateOutput(_Dto):
+    candidate_id: str
+    symbol: str
+    name: str
+    rank: int
+    score: int
+    setup_type: str
+    strategy_version: str
+    evidence: list[EvidenceOutput]
+    confirmation_condition: str
+    invalidation_condition: str
+    source: str | None = None
+    source_timestamp: datetime | None = None
+    market_regime: str | None = None
+    industry_context: IndustryContextOutput | None = None
+
+
+class ReviewNoteOutput(_Dto):
+    trade_date: date
+    note: str
+    occurred_at: datetime | None = None
+
+
+class CandidateEventOutput(_Dto):
+    candidate_id: str
+    status: Literal["watched", "bought", "skipped", "exited"]
+    event_date: date
+    price_1e4: int | None = None
+    reason: str
+
+
+class DailyReviewData(_Dto):
+    status: str
+    trade_date: date
+    source: str | None = None
+    source_timestamp: datetime | None = None
+    strategy_version: str | None = None
+    market_regime: str | None = None
+    candidates: list[CandidateOutput] = Field(default_factory=list)
+    notes: list[ReviewNoteOutput] = Field(default_factory=list)
+    next_at: datetime | None = None
+    pipeline_version: str | None = None
+    error: str | None = None
+
+
+class GetDailyReviewResult(_Dto):
+    ok: bool
+    data: DailyReviewData | None = None
+    error: ToolError | None = None
+
+
+class GetCandidateResult(_Dto):
+    ok: bool
+    data: CandidateOutput | None = None
+    error: ToolError | None = None
+
+
+class ReviewHistoryData(_Dto):
+    reviews: list[DailyReviewData]
+    events: list[CandidateEventOutput] = Field(default_factory=list)
+
+
+class GetReviewHistoryResult(_Dto):
+    ok: bool
+    data: ReviewHistoryData | None = None
+    error: ToolError | None = None
+
+
+class StrategyVersionOutput(_Dto):
+    version: str
+    status: str
+    parameters: dict[str, int]
+
+
+class StrategyVersionsData(_Dto):
+    versions: list[StrategyVersionOutput]
+
+
+class ListStrategyVersionsResult(_Dto):
+    ok: bool
+    data: StrategyVersionsData | None = None
+    error: ToolError | None = None
+
+
+class NextDayData(_Dto):
+    candidate_id: str
+    symbol: str
+    close_1e4: int
+    source: str
+    as_of: datetime
+    status: Literal["confirmed", "invalidated", "pending"]
+
+
+class CheckNextDayResult(_Dto):
+    ok: bool
+    data: NextDayData | None = None
+    error: ToolError | None = None
+
+
+class WatchlistNamesData(_Dto):
+    names: list[str]
+
+
+class WatchlistNamesResult(_Dto):
+    ok: bool
+    data: WatchlistNamesData | None = None
+    error: ToolError | None = None
+
+
+class WatchlistData(_Dto):
+    name: str
+    symbols: list[str]
+
+
+class WatchlistResult(_Dto):
+    ok: bool
+    data: WatchlistData | None = None
+    error: ToolError | None = None
+
+
+class CandidateEventResult(_Dto):
+    ok: bool
+    data: CandidateEventOutput | None = None
+    error: ToolError | None = None
+
+
+class ReviewNoteResult(_Dto):
+    ok: bool
+    data: ReviewNoteOutput | None = None
+    error: ToolError | None = None
+
+
+class ReplayCandidateOutput(_Dto):
+    candidate_id: str
+    symbol: str
+    score: int
+    evidence: list[EvidenceOutput]
+
+
+class ReplayReviewOutput(_Dto):
+    market_regime: str
+    candidates: list[ReplayCandidateOutput]
+
+
+class ReplayDayOutput(_Dto):
+    trade_date: date
+    left: ReplayReviewOutput
+    right: ReplayReviewOutput
+
+
+class StrategyComparisonData(_Dto):
+    left_version: str
+    right_version: str
+    start: date
+    end: date
+    days_compared: int
+    left_candidate_count: int
+    right_candidate_count: int
+    daily: list[ReplayDayOutput]
+
+
+class StrategyComparisonResult(_Dto):
+    ok: bool
+    data: StrategyComparisonData | None = None
+    error: ToolError | None = None
+
+
+class StrategyVersionResult(_Dto):
+    ok: bool
+    data: StrategyVersionOutput | None = None
     error: ToolError | None = None
 
 
@@ -182,9 +373,20 @@ def _handler(service: Any, method_name: str, input_model: type[_Dto]) -> ToolHan
                     "message": error.errors(include_url=False)[0]["msg"],
                 },
             }
-        result = getattr(service, method_name)(
-            **validated.model_dump(mode="python", exclude_none=True)
-        )
+        try:
+            result = getattr(service, method_name)(
+                **validated.model_dump(mode="python", exclude_none=True)
+            )
+        except IdempotencyKeyReuseError:
+            # Storage owns durable idempotency.  A key reused for a different
+            # request is an expected caller conflict, not a transport crash.
+            return {
+                "ok": False,
+                "error": {
+                    "code": "idempotency_key_conflict",
+                    "message": "idempotency key was already used for another request",
+                },
+            }
         return _result_mapping(result)
 
     return dispatch
@@ -210,11 +412,28 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         ("create_strategy_proposal", CreateStrategyProposalInput, False, False, False),
         ("activate_strategy_version", ActivateStrategyVersionInput, False, True, False),
     )
+    output_models: dict[str, type[_Dto]] = {
+        "get_daily_review": GetDailyReviewResult,
+        "get_candidate": GetCandidateResult,
+        "check_next_day": CheckNextDayResult,
+        "list_watchlists": WatchlistNamesResult,
+        "get_watchlist": WatchlistResult,
+        "create_watchlist": WatchlistResult,
+        "add_watchlist_items": WatchlistResult,
+        "remove_watchlist_items": WatchlistResult,
+        "record_candidate_event": CandidateEventResult,
+        "record_review_note": ReviewNoteResult,
+        "get_review_history": GetReviewHistoryResult,
+        "list_strategy_versions": ListStrategyVersionsResult,
+        "compare_strategy_versions": StrategyComparisonResult,
+        "create_strategy_proposal": StrategyVersionResult,
+        "activate_strategy_version": StrategyVersionResult,
+    }
     return tuple(
         ToolDefinition(
             name=name,
             input_model=input_model,
-            output_model=ToolResult,
+            output_model=output_models[name],
             handler=_handler(service, name, input_model),
             annotations=_annotations(
                 read_only=read_only,

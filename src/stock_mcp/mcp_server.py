@@ -125,4 +125,4 @@ def _signature_for(definition: ToolDefinition) -> Signature:
                 annotation=model_field.annotation,
             )
         )
-    return Signature(parameters=parameters, return_annotation=ToolResult)
+    return Signature(parameters=parameters, return_annotation=definition.output_model)

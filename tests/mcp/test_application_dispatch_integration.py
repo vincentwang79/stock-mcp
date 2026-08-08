@@ -41,8 +41,10 @@ class McpApplicationDispatchIntegrationTest(unittest.TestCase):
         fetched = self.tools["get_watchlist"].handler(name="focus")
         event = self.tools["record_candidate_event"].handler(
             candidate_id="candidate-1",
-            event_type="observed",
-            detail="held above confirmation",
+            status="watched",
+            event_date=TRADE_DATE.isoformat(),
+            price_1e4=120_000,
+            reason="held above confirmation",
             idempotency_key="event-1",
         )
 

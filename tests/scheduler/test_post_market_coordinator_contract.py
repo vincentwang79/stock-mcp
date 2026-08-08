@@ -147,7 +147,11 @@ class PostMarketCoordinatorContractTest(unittest.TestCase):
         self.assertIn("deadline", deadline.error)
 
     def test_ready_and_degraded_runs_are_terminal_and_never_duplicate(self) -> None:
-        for terminal_status, expected_backup_calls in (("ready", 1), ("degraded_no_screen", 0)):
+        for terminal_status, expected_backup_calls in (
+            ("ready", 1),
+            ("degraded_observation", 1),
+            ("degraded_no_screen", 0),
+        ):
             with self.subTest(status=terminal_status):
                 attempt = FakeRunAttempt([pipeline_run(terminal_status)])
                 backup = FakeBackup()

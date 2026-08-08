@@ -3,9 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import date
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
+from stock_mcp.backfill import BackfillResult
 from stock_mcp.cli import doctor, main
 from stock_mcp.config import Settings
 
@@ -61,6 +64,39 @@ class ConfigAndCliContractTest(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertTrue(destination.is_file())
         self.assertTrue(destination.with_suffix(".sqlite3.sha256").is_file())
+
+    def test_cli_runs_a_bounded_resumable_historical_backfill(self) -> None:
+        config = self.root / "config"
+        config.mkdir(parents=True)
+        (config / "secrets.env").write_text("TUSHARE_TOKEN=fixture\n", encoding="utf-8")
+        output = StringIO()
+        expected = BackfillResult(
+            published_dates=(date(2023, 8, 7),),
+            incomplete_dates=(date(2023, 8, 8),),
+        )
+
+        with (
+            patch("stock_mcp.backfill.run_production_backfill", return_value=expected) as run,
+            redirect_stdout(output),
+        ):
+            try:
+                exit_code = main(
+                    [
+                        "backfill",
+                        "--root",
+                        str(self.root),
+                        "--start",
+                        "2023-08-07",
+                        "--end",
+                        "2023-08-08",
+                    ]
+                )
+            except SystemExit:
+                self.fail("stock-mcp CLI does not expose the historical backfill command")
+
+        self.assertEqual(exit_code, 2, "an incomplete source day requires a resumable rerun")
+        self.assertEqual(run.call_args.args[2:], (date(2023, 8, 7), date(2023, 8, 8)))
+        self.assertIn("published=1 incomplete=1", output.getvalue())
 
     def test_project_console_script_points_to_the_real_cli_entrypoint(self) -> None:
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(

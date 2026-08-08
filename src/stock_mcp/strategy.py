@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
@@ -9,6 +11,7 @@ from typing import Any
 from .domain import StrategyVersion
 
 _PARAMETER_RANGES: dict[str, tuple[int, int]] = {
+    "rule_engine_version": (1, 1),
     "offensive_min_bps": (0, 10_000),
     "defensive_max_bps": (0, 10_000),
     "neutral_limit": (0, 50),
@@ -19,9 +22,15 @@ _PARAMETER_RANGES: dict[str, tuple[int, int]] = {
     "strong_pullback_max_pullback_bps": (0, 10_000),
     "volume_breakout_min_volume_ratio_bps": (10_000, 100_000),
 }
-_REQUIRED_PARAMETERS = frozenset(
-    {"offensive_min_bps", "defensive_max_bps", "neutral_limit", "offensive_limit"}
-)
+_REQUIRED_PARAMETERS = frozenset(_PARAMETER_RANGES)
+
+
+def canonical_strategy_parameters_hash(parameters: Mapping[str, Any]) -> str:
+    """Bind approvals and replay evidence to one canonical immutable rule map."""
+
+    validated = validate_strategy_parameters(parameters, require_complete=True)
+    encoded = json.dumps(validated, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def validate_strategy_parameters(
@@ -126,9 +135,33 @@ class DatabaseStrategyRegistry:
                 status="active",
                 parameters=_freeze_mapping(proposal.parameters),
             )
-        consume_approval = getattr(self._database, "consume_strategy_approval", None)
-        if not callable(consume_approval) or not consume_approval(version):
-            raise ValueError("operator approval is required for strategy activation")
+        parameters_hash = canonical_strategy_parameters_hash(proposal.parameters)
+        atomic_activate = getattr(self._database, "activate_strategy_version_with_grants", None)
+        if callable(atomic_activate):
+            authorization = atomic_activate(version, parameters_hash)
+            if authorization == "replay_attestation_required":
+                raise ValueError("replay attestation is required for strategy activation")
+            if authorization != "ok":
+                raise ValueError("operator approval is required for strategy activation")
+            return replace(
+                proposal,
+                status="active",
+                parameters=_freeze_mapping(proposal.parameters),
+            )
+        consume_grants = getattr(self._database, "consume_strategy_activation_grants", None)
+        if callable(consume_grants):
+            authorization = consume_grants(version, parameters_hash)
+            if authorization == "replay_attestation_required":
+                raise ValueError("replay attestation is required for strategy activation")
+            if authorization != "ok":
+                raise ValueError("operator approval is required for strategy activation")
+        else:
+            consume_replay = getattr(self._database, "consume_replay_attestation", None)
+            if not callable(consume_replay) or not consume_replay(version, parameters_hash):
+                raise ValueError("replay attestation is required for strategy activation")
+            consume_approval = getattr(self._database, "consume_strategy_approval", None)
+            if not callable(consume_approval) or not consume_approval(version):
+                raise ValueError("operator approval is required for strategy activation")
         self._database.set_active_strategy_version(version)
         return replace(proposal, status="active", parameters=_freeze_mapping(proposal.parameters))
 

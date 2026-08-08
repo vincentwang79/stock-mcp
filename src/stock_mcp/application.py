@@ -40,8 +40,8 @@ def _evidence(evidence: Evidence) -> dict[str, Any]:
     }
 
 
-def _candidate(candidate: Candidate) -> dict[str, Any]:
-    return {
+def _candidate(candidate: Candidate, *, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    data = {
         "candidate_id": candidate.candidate_id,
         "symbol": candidate.symbol,
         "name": candidate.name,
@@ -53,9 +53,29 @@ def _candidate(candidate: Candidate) -> dict[str, Any]:
         "confirmation_condition": candidate.confirmation_condition,
         "invalidation_condition": candidate.invalidation_condition,
     }
+    if context is not None:
+        review = context.get("review")
+        if isinstance(review, DailyReview):
+            data.update(
+                {
+                    "source": review.source,
+                    "source_timestamp": review.source_timestamp,
+                    "market_regime": str(review.market_regime),
+                }
+            )
+        industry_context = context.get("industry_context")
+        if isinstance(industry_context, Mapping):
+            data["industry_context"] = dict(industry_context)
+    return data
 
 
-def _review(review: DailyReview, *, notes: tuple[Mapping[str, Any], ...] = ()) -> dict[str, Any]:
+def _review(
+    review: DailyReview,
+    *,
+    notes: tuple[Mapping[str, Any], ...] = (),
+    candidate_contexts: Mapping[str, Mapping[str, Any]] | None = None,
+    pipeline_version: str | None = None,
+) -> dict[str, Any]:
     return {
         "status": review.status,
         "trade_date": review.trade_date.isoformat(),
@@ -63,7 +83,16 @@ def _review(review: DailyReview, *, notes: tuple[Mapping[str, Any], ...] = ()) -
         "source_timestamp": review.source_timestamp,
         "strategy_version": review.strategy_version,
         "market_regime": str(review.market_regime),
-        "candidates": [_candidate(candidate) for candidate in review.candidates],
+        "pipeline_version": pipeline_version,
+        "candidates": [
+            _candidate(
+                candidate,
+                context=None
+                if candidate_contexts is None
+                else candidate_contexts.get(candidate.candidate_id),
+            )
+            for candidate in review.candidates
+        ],
         "notes": [dict(note) for note in notes],
     }
 
@@ -128,20 +157,35 @@ class StockMcpApplication:
         # Preserve the user's explicit order in this process while the durable
         # repository remains responsible for membership and idempotency.
         self._watchlist_order: dict[str, list[str]] = {}
-        self._watchlist_write_results: dict[tuple[str, str], Result] = {}
 
     def get_daily_review(self, *, trade_date: date) -> Result:
+        get_status = getattr(self._repository, "get_publication_status", None)
+        publication = get_status(trade_date) if callable(get_status) else None
+        if publication is not None and publication.get("status") != "ready":
+            data = dict(publication)
+            recorded_date = data.get("trade_date")
+            if isinstance(recorded_date, date):
+                data["trade_date"] = recorded_date.isoformat()
+            return _ok(data)
         review = self._repository.get_daily_review(trade_date)
         if review is None or review.status not in {"published", "ready"}:
+            if publication is not None:
+                data = dict(publication)
+                recorded_date = data.get("trade_date")
+                if isinstance(recorded_date, date):
+                    data["trade_date"] = recorded_date.isoformat()
+                return _ok(data)
             return _error("daily_review_not_found", "no published review")
         notes = self._repository.list_review_notes(trade_date)
-        return _ok(_review(review, notes=notes))
+        return _ok(self._review_with_context(review, notes=notes))
 
     def get_candidate(self, *, candidate_id: str) -> Result:
         candidate = self._repository.get_candidate(candidate_id)
         if candidate is None:
             return _error("candidate_not_found", "candidate does not exist")
-        return _ok(_candidate(candidate))
+        get_context = getattr(self._repository, "get_candidate_context", None)
+        context = get_context(candidate_id) if callable(get_context) else None
+        return _ok(_candidate(candidate, context=context))
 
     def check_next_day(self, *, candidate_id: str) -> Result:
         """Fetch exactly one current quote; reads never call this provider."""
@@ -220,9 +264,6 @@ class StockMcpApplication:
     def add_watchlist_items(
         self, *, name: str, symbols: tuple[str, ...], idempotency_key: str
     ) -> Result:
-        cache_key = ("add_watchlist_items", idempotency_key)
-        if cache_key in self._watchlist_write_results:
-            return self._watchlist_write_results[cache_key]
         persisted = self._repository.add_watchlist_items(
             name=name, symbols=tuple(symbols), idempotency_key=idempotency_key
         )
@@ -240,15 +281,11 @@ class StockMcpApplication:
             if symbol not in ordered:
                 ordered.append(symbol)
         result = _ok({"name": name, "symbols": list(ordered)})
-        self._watchlist_write_results[cache_key] = result
         return result
 
     def remove_watchlist_items(
         self, *, name: str, symbols: tuple[str, ...], idempotency_key: str
     ) -> Result:
-        cache_key = ("remove_watchlist_items", idempotency_key)
-        if cache_key in self._watchlist_write_results:
-            return self._watchlist_write_results[cache_key]
         persisted = self._repository.remove_watchlist_items(
             name=name, symbols=tuple(symbols), idempotency_key=idempotency_key
         )
@@ -258,21 +295,24 @@ class StockMcpApplication:
         removed = set(symbols)
         ordered[:] = [symbol for symbol in ordered if symbol not in removed]
         result = _ok({"name": name, "symbols": list(ordered)})
-        self._watchlist_write_results[cache_key] = result
         return result
 
     def record_candidate_event(
         self,
         *,
         candidate_id: str,
-        event_type: str,
-        detail: str,
+        status: str,
+        event_date: date,
+        price_1e4: int | None,
+        reason: str,
         idempotency_key: str,
     ) -> Result:
         event = self._repository.record_candidate_event(
             candidate_id=candidate_id,
-            event_type=event_type,
-            detail=detail,
+            status=status,
+            event_date=event_date,
+            price_1e4=price_1e4,
+            reason=reason,
             idempotency_key=idempotency_key,
         )
         if event is None:
@@ -296,14 +336,53 @@ class StockMcpApplication:
                 if any(candidate.candidate_id == candidate_id for candidate in review.candidates)
             )
         reviews = reviews[:limit]
+        events: tuple[object, ...] = ()
+        if candidate_id is not None:
+            list_events = getattr(self._repository, "list_candidate_review_events", None)
+            if not callable(list_events):
+                list_events = getattr(self._repository, "list_candidate_events", None)
+            if callable(list_events):
+                events = tuple(list_events(candidate_id))
         return _ok(
             {
                 "reviews": [
-                    _review(review, notes=self._repository.list_review_notes(review.trade_date))
+                    self._review_with_context(
+                        review,
+                        notes=self._repository.list_review_notes(review.trade_date),
+                    )
                     for review in reviews
                     if review.status == "published"
-                ]
+                ],
+                "events": [dict(event) for event in events if isinstance(event, Mapping)],
             }
+        )
+
+    def _review_with_context(
+        self,
+        review: DailyReview,
+        *,
+        notes: tuple[Mapping[str, Any], ...] = (),
+    ) -> dict[str, Any]:
+        get_context = getattr(self._repository, "get_candidate_context", None)
+        contexts: dict[str, Mapping[str, Any]] = {}
+        if callable(get_context):
+            for candidate in review.candidates:
+                context = get_context(candidate.candidate_id)
+                if isinstance(context, Mapping):
+                    contexts[candidate.candidate_id] = context
+        pipeline_version = None
+        get_status = getattr(self._repository, "get_publication_status", None)
+        if callable(get_status):
+            publication = get_status(review.trade_date)
+            if isinstance(publication, Mapping):
+                value = publication.get("pipeline_version")
+                if isinstance(value, str):
+                    pipeline_version = value
+        return _review(
+            review,
+            notes=notes,
+            candidate_contexts=contexts,
+            pipeline_version=pipeline_version,
         )
 
     def list_strategy_versions(self) -> Result:

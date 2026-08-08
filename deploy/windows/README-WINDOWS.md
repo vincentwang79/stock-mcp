@@ -7,9 +7,16 @@ inbound firewall rule is created.
 
 ## Install and configure
 
-1. Obtain the signed/verified `stock-mcp-windows-x64.zip` from the release channel and
-   extract it to a local folder.
-2. In an elevated PowerShell console, run `./install.ps1`. The installer checks x64,
+1. Obtain `stock-mcp-windows-x64.zip` and its separately published `.sha256` value from
+   the release channel. **Before extracting the ZIP or running any script**, compare the
+   published digest with `Get-FileHash C:\path\stock-mcp-windows-x64.zip -Algorithm SHA256`.
+   The bootstrap scripts are not Authenticode-signed and therefore cannot establish their
+   own trust; only run a freshly extracted package after this external comparison.
+   Then extract the ZIP to a local folder.
+2. In an elevated PowerShell console, run
+   `./install.ps1 -PackageArchive C:\path\stock-mcp-windows-x64.zip -PackageSha256 <published-64-hex-digest>`.
+   The installer first accepts the original archive against that external trust root,
+   then checks x64,
    free disk space, outbound HTTPS, all package checksums, and the pinned SHA-256 of
    `uv`, WinSW, and `tunnel-client`. It installs to `C:\ProgramData\StockMcp` by default.
 3. Run `./configure.ps1`. Each production secret is requested securely and kept only in
@@ -23,7 +30,8 @@ uses `--explain`, and the tunnel health/UI remain on loopback port 8766.
 Until step 3, both services are registered but deliberately stopped and
 `state/service-status` reads `configuration_required`; this avoids a crash loop.
 
-Strategy activation has a host-side approval gate. After comparing a proposed version,
+Strategy activation has a host-side approval gate. After comparing a proposed version
+over the complete three-year recorded trading calendar (the first 20 sessions are warm-up),
 an administrator runs `stock-mcp approve-strategy --root C:\ProgramData\StockMcp
 --version <version>` and types the version at the prompt. The approval is bound to the
 stored parameter hash, consumed once, and cannot be created through MCP; the user can

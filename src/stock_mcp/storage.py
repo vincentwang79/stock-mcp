@@ -12,7 +12,8 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from stock_mcp.domain import (
@@ -27,7 +28,7 @@ from stock_mcp.domain import (
     StrategyVersion,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 8
 
 
 class IdempotencyKeyReuseError(ValueError):
@@ -155,7 +156,11 @@ class Database:
                     event_type TEXT NOT NULL,
                     occurred_at TEXT NOT NULL,
                     detail TEXT NOT NULL,
-                    idempotency_key TEXT UNIQUE
+                    idempotency_key TEXT UNIQUE,
+                    status TEXT,
+                    event_date TEXT,
+                    price_1e4 INTEGER,
+                    reason TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS active_strategy (
@@ -169,6 +174,32 @@ class Database:
                     parameters_hash TEXT NOT NULL,
                     approved_at TEXT NOT NULL,
                     FOREIGN KEY (version) REFERENCES strategy_versions(version)
+                );
+
+                CREATE TABLE IF NOT EXISTS replay_attestations (
+                    version TEXT PRIMARY KEY,
+                    parameters_hash TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    FOREIGN KEY (version) REFERENCES strategy_versions(version)
+                );
+
+                CREATE TABLE IF NOT EXISTS pipeline_runs (
+                    trade_date TEXT NOT NULL,
+                    pipeline_version TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    strategy_version TEXT,
+                    error TEXT,
+                    PRIMARY KEY (trade_date, pipeline_version),
+                    FOREIGN KEY (strategy_version) REFERENCES strategy_versions(version)
+                );
+
+                CREATE TABLE IF NOT EXISTS schedule_outcomes (
+                    trade_date TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    next_at TEXT,
+                    pipeline_version TEXT,
+                    error TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS watchlists (
@@ -209,24 +240,7 @@ class Database:
         if not records:
             return
         with self.connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO daily_bars (
-                    symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4,
-                    pre_close_1e4, volume_shares, amount_fen, source, source_timestamp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol, trade_date, source) DO UPDATE SET
-                    open_1e4=excluded.open_1e4,
-                    high_1e4=excluded.high_1e4,
-                    low_1e4=excluded.low_1e4,
-                    close_1e4=excluded.close_1e4,
-                    pre_close_1e4=excluded.pre_close_1e4,
-                    volume_shares=excluded.volume_shares,
-                    amount_fen=excluded.amount_fen,
-                    source_timestamp=excluded.source_timestamp
-                """,
-                [self._daily_bar_values(bar) for bar in records],
-            )
+            self._save_daily_bars(connection, records)
 
     def load_daily_bars(self, trade_date: date, source: str) -> tuple[DailyBar, ...]:
         with self.connect() as connection:
@@ -266,52 +280,122 @@ class Database:
         return tuple(self._daily_bar_from_row(row) for row in reversed(rows))
 
     def save_market_snapshot(self, snapshot: MarketSnapshot) -> None:
-        self.save_daily_bars(snapshot.bars)
         with self.connect() as connection:
-            key = (snapshot.trade_date.isoformat(), snapshot.source)
-            values = (
-                snapshot.source_timestamp.isoformat(),
-                snapshot.advance_ratio_bps,
-                snapshot.above_ma20_ratio_bps,
+            self._save_market_snapshot(connection, snapshot)
+
+    def _save_market_snapshot(
+        self, connection: sqlite3.Connection, snapshot: MarketSnapshot
+    ) -> None:
+        self._save_daily_bars(connection, snapshot.bars)
+        key = (snapshot.trade_date.isoformat(), snapshot.source)
+        values = (
+            snapshot.source_timestamp.isoformat(),
+            snapshot.advance_ratio_bps,
+            snapshot.above_ma20_ratio_bps,
+        )
+        existing = connection.execute(
+            """
+            SELECT source_timestamp, advance_ratio_bps, above_ma20_ratio_bps
+            FROM market_snapshots WHERE trade_date = ? AND source = ?
+            """,
+            key,
+        ).fetchone()
+        if existing is not None and existing != values:
+            raise ValueError("market snapshot metadata is immutable")
+        security_values = {
+            security.symbol: (
+                security.name,
+                security.exchange,
+                security.board,
+                security.list_date.isoformat(),
+                security.industry,
+                int(security.is_st),
             )
-            existing = connection.execute(
+            for security in snapshot.securities
+        }
+        if len(security_values) != len(snapshot.securities):
+            raise ValueError("market snapshot securities must be unique")
+        existing_securities = {
+            str(row[0]): tuple(row[1:])
+            for row in connection.execute(
                 """
-                SELECT source_timestamp, advance_ratio_bps, above_ma20_ratio_bps
-                FROM market_snapshots WHERE trade_date = ? AND source = ?
+                SELECT symbol, name, exchange, board, list_date, industry, is_st
+                FROM snapshot_securities
+                WHERE trade_date = ? AND source = ?
                 """,
                 key,
-            ).fetchone()
-            if existing is not None and existing != values:
-                raise ValueError("market snapshot metadata is immutable")
+            ).fetchall()
+        }
+        if existing is not None and existing_securities != security_values:
+            raise ValueError("market snapshot securities are immutable")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO market_snapshots(
+                trade_date, source, source_timestamp,
+                advance_ratio_bps, above_ma20_ratio_bps
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (*key, *values),
+        )
+        for security in snapshot.securities:
+            row = (
+                *key,
+                security.symbol,
+                security.name,
+                security.exchange,
+                security.board,
+                security.list_date.isoformat(),
+                security.industry,
+                int(security.is_st),
+            )
             connection.execute(
                 """
-                INSERT OR IGNORE INTO market_snapshots(
-                    trade_date, source, source_timestamp,
-                    advance_ratio_bps, above_ma20_ratio_bps
-                ) VALUES (?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO snapshot_securities(
+                    trade_date, source, symbol, name, exchange, board,
+                    list_date, industry, is_st
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (*key, *values),
+                row,
             )
-            for security in snapshot.securities:
-                row = (
-                    *key,
-                    security.symbol,
-                    security.name,
-                    security.exchange,
-                    security.board,
-                    security.list_date.isoformat(),
-                    security.industry,
-                    int(security.is_st),
-                )
-                connection.execute(
+
+    def _save_daily_bars(self, connection: sqlite3.Connection, bars: Iterable[DailyBar]) -> None:
+        records = tuple(bars)
+        incoming: dict[tuple[str, str, str], tuple[str | int, ...]] = {}
+        groups: dict[tuple[str, str], set[str]] = {}
+        for bar in records:
+            values = self._daily_bar_values(bar)
+            key = (str(values[0]), str(values[1]), str(values[9]))
+            previous = incoming.get(key)
+            if previous is not None and previous != values:
+                raise ValueError("daily market bar is immutable")
+            incoming[key] = values
+            groups.setdefault((key[1], key[2]), set()).add(key[0])
+
+        for (trade_date_value, source), symbols in groups.items():
+            stored = {
+                (str(row[0]), str(row[1]), str(row[9])): tuple(row)
+                for row in connection.execute(
                     """
-                    INSERT OR IGNORE INTO snapshot_securities(
-                        trade_date, source, symbol, name, exchange, board,
-                        list_date, industry, is_st
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    SELECT symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4,
+                           pre_close_1e4, volume_shares, amount_fen, source, source_timestamp
+                    FROM daily_bars WHERE trade_date = ? AND source = ?
                     """,
-                    row,
-                )
+                    (trade_date_value, source),
+                ).fetchall()
+                if str(row[0]) in symbols
+            }
+            if any(stored[key] != incoming[key] for key in stored):
+                raise ValueError("daily market bar is immutable")
+
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO daily_bars (
+                symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4,
+                pre_close_1e4, volume_shares, amount_fen, source, source_timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            incoming.values(),
+        )
 
     def prune_market_data_before(self, cutoff: date) -> None:
         """Apply the three-year market-data retention without touching reviews."""
@@ -386,6 +470,37 @@ class Database:
                     )
                 )
         return tuple(snapshots)
+
+    def save_expected_trading_days(self, source: str, days: Iterable[date]) -> None:
+        """Persist the provider calendar used to judge historical coverage."""
+
+        normalized = tuple(sorted(set(days)))
+        if not source or not normalized:
+            raise ValueError("expected trading-day coverage requires a source and dates")
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO expected_trading_days(source, trade_date)
+                VALUES (?, ?)
+                """,
+                [(source, day.isoformat()) for day in normalized],
+            )
+
+    def load_expected_trading_days(
+        self, start: date, end: date, *, source: str
+    ) -> tuple[date, ...]:
+        if end < start:
+            raise ValueError("trading-day coverage range is invalid")
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_date FROM expected_trading_days
+                WHERE source = ? AND trade_date BETWEEN ? AND ?
+                ORDER BY trade_date
+                """,
+                (source, start.isoformat(), end.isoformat()),
+            ).fetchall()
+        return tuple(date.fromisoformat(str(row[0])) for row in rows)
 
     def save_strategy_version(self, strategy: StrategyVersion) -> None:
         parameters_json = self._json(strategy.parameters)
@@ -469,6 +584,143 @@ class Database:
             connection.execute("DELETE FROM strategy_approvals WHERE version = ?", (version,))
             return True
 
+    def record_replay_attestation(self, version: str, parameters_hash: str) -> None:
+        """Record a legacy non-governance replay marker.
+
+        Activation deliberately rejects this two-field form.  Production uses
+        :meth:`record_governance_replay_attestation`, which binds the proof to
+        one complete immutable dataset.
+        """
+        if self.load_strategy_version(version) is None:
+            raise ValueError(f"unknown strategy version: {version}")
+        if len(parameters_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in parameters_hash
+        ):
+            raise ValueError("replay attestation requires a lowercase SHA-256 hash")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO replay_attestations(version, parameters_hash, recorded_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(version) DO UPDATE SET
+                    parameters_hash=excluded.parameters_hash,
+                    recorded_at=excluded.recorded_at
+                """,
+                (version, parameters_hash, datetime.now(UTC).isoformat()),
+            )
+
+    def record_governance_replay_attestation(
+        self,
+        version: str,
+        parameters_hash: str,
+        dataset_hash: str,
+        start: date,
+        end: date,
+        session_count: int,
+    ) -> None:
+        if self.load_strategy_version(version) is None:
+            raise ValueError(f"unknown strategy version: {version}")
+        for label, value in (("parameters", parameters_hash), ("dataset", dataset_hash)):
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ValueError(f"replay attestation requires a lowercase {label} SHA-256 hash")
+        if end < start or session_count < 400:
+            raise ValueError("governance replay coverage is insufficient")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO replay_attestations(
+                    version, parameters_hash, recorded_at, dataset_hash,
+                    start_date, end_date, session_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(version) DO UPDATE SET
+                    parameters_hash=excluded.parameters_hash,
+                    recorded_at=excluded.recorded_at,
+                    dataset_hash=excluded.dataset_hash,
+                    start_date=excluded.start_date,
+                    end_date=excluded.end_date,
+                    session_count=excluded.session_count
+                """,
+                (
+                    version,
+                    parameters_hash,
+                    datetime.now(UTC).isoformat(),
+                    dataset_hash,
+                    start.isoformat(),
+                    end.isoformat(),
+                    session_count,
+                ),
+            )
+
+    def consume_replay_attestation(self, version: str, parameters_hash: str) -> bool:
+        with self._idempotent_write_connection() as connection:
+            row = connection.execute(
+                "SELECT parameters_hash, dataset_hash FROM replay_attestations WHERE version = ?",
+                (version,),
+            ).fetchone()
+            if row is None or row[0] != parameters_hash or row[1] is None:
+                return False
+            connection.execute("DELETE FROM replay_attestations WHERE version = ?", (version,))
+            return True
+
+    def consume_strategy_activation_grants(self, version: str, parameters_hash: str) -> str:
+        """Atomically consume the replay proof and operator approval."""
+
+        with self._idempotent_write_connection() as connection:
+            approval = connection.execute(
+                "SELECT parameters_hash FROM strategy_approvals WHERE version = ?",
+                (version,),
+            ).fetchone()
+            if approval is None or approval[0] != parameters_hash:
+                return "operator_approval_required"
+            replay = connection.execute(
+                "SELECT parameters_hash, dataset_hash FROM replay_attestations WHERE version = ?",
+                (version,),
+            ).fetchone()
+            if replay is None or replay[0] != parameters_hash or replay[1] is None:
+                return "replay_attestation_required"
+            connection.execute("DELETE FROM replay_attestations WHERE version = ?", (version,))
+            connection.execute("DELETE FROM strategy_approvals WHERE version = ?", (version,))
+            return "ok"
+
+    def activate_strategy_version_with_grants(self, version: str, parameters_hash: str) -> str:
+        """Consume both grants and update the active pointer in one transaction."""
+
+        with self._idempotent_write_connection() as connection:
+            strategy = connection.execute(
+                "SELECT parameters_json FROM strategy_versions WHERE version = ?",
+                (version,),
+            ).fetchone()
+            if strategy is None:
+                return "strategy_version_not_found"
+            stored_hash = hashlib.sha256(str(strategy[0]).encode("utf-8")).hexdigest()
+            if stored_hash != parameters_hash:
+                return "strategy_parameters_changed"
+            approval = connection.execute(
+                "SELECT parameters_hash FROM strategy_approvals WHERE version = ?",
+                (version,),
+            ).fetchone()
+            if approval is None or approval[0] != parameters_hash:
+                return "operator_approval_required"
+            replay = connection.execute(
+                """
+                SELECT parameters_hash, dataset_hash FROM replay_attestations
+                WHERE version = ?
+                """,
+                (version,),
+            ).fetchone()
+            if replay is None or replay[0] != parameters_hash or replay[1] is None:
+                return "replay_attestation_required"
+            connection.execute(
+                """
+                INSERT INTO active_strategy(singleton, version) VALUES (1, ?)
+                ON CONFLICT(singleton) DO UPDATE SET version=excluded.version
+                """,
+                (version,),
+            )
+            connection.execute("DELETE FROM replay_attestations WHERE version = ?", (version,))
+            connection.execute("DELETE FROM strategy_approvals WHERE version = ?", (version,))
+            return "ok"
+
     def get_active_strategy_version(self) -> StrategyVersion | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -478,71 +730,72 @@ class Database:
 
     def save_daily_review(self, review: DailyReview) -> None:
         with self.connect() as connection:
-            existing = self._load_daily_review(
-                connection, review.trade_date, review.strategy_version
-            )
-            if existing is not None:
-                if existing != review:
-                    raise ValueError("daily reviews are immutable once published")
-                return
+            self._save_daily_review(connection, review)
+
+    def _save_daily_review(self, connection: sqlite3.Connection, review: DailyReview) -> None:
+        existing = self._load_daily_review(connection, review.trade_date, review.strategy_version)
+        if existing is not None:
+            if existing != review:
+                raise ValueError("daily reviews are immutable once published")
+            return
+        connection.execute(
+            """
+            INSERT INTO daily_reviews(
+                trade_date, strategy_version, status, source, source_timestamp, market_regime
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                review.trade_date.isoformat(),
+                review.strategy_version,
+                review.status,
+                review.source,
+                review.source_timestamp.isoformat(),
+                review.market_regime.value,
+            ),
+        )
+        for candidate in review.candidates:
+            if candidate.strategy_version != review.strategy_version:
+                raise ValueError("candidate strategy version must match its daily review")
             connection.execute(
                 """
-                INSERT INTO daily_reviews(
-                    trade_date, strategy_version, status, source, source_timestamp, market_regime
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO candidates(
+                    candidate_id, trade_date, strategy_version, symbol, name, rank, score,
+                    setup_type, confirmation_condition, invalidation_condition
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    candidate.candidate_id,
                     review.trade_date.isoformat(),
                     review.strategy_version,
-                    review.status,
-                    review.source,
-                    review.source_timestamp.isoformat(),
-                    review.market_regime.value,
+                    candidate.symbol,
+                    candidate.name,
+                    candidate.rank,
+                    candidate.score,
+                    candidate.setup_type.value,
+                    candidate.confirmation_condition,
+                    candidate.invalidation_condition,
                 ),
             )
-            for candidate in review.candidates:
-                if candidate.strategy_version != review.strategy_version:
-                    raise ValueError("candidate strategy version must match its daily review")
-                connection.execute(
-                    """
-                    INSERT INTO candidates(
-                        candidate_id, trade_date, strategy_version, symbol, name, rank, score,
-                        setup_type, confirmation_condition, invalidation_condition
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+            connection.executemany(
+                """
+                INSERT INTO candidate_evidence(
+                    candidate_id, ordinal, metric, value_json, threshold_json, passed,
+                    score_contribution
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
                     (
                         candidate.candidate_id,
-                        review.trade_date.isoformat(),
-                        review.strategy_version,
-                        candidate.symbol,
-                        candidate.name,
-                        candidate.rank,
-                        candidate.score,
-                        candidate.setup_type.value,
-                        candidate.confirmation_condition,
-                        candidate.invalidation_condition,
-                    ),
-                )
-                connection.executemany(
-                    """
-                    INSERT INTO candidate_evidence(
-                        candidate_id, ordinal, metric, value_json, threshold_json, passed,
-                        score_contribution
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            candidate.candidate_id,
-                            ordinal,
-                            evidence.metric,
-                            self._json(evidence.value),
-                            self._json(evidence.threshold),
-                            int(evidence.passed),
-                            evidence.score_contribution,
-                        )
-                        for ordinal, evidence in enumerate(candidate.evidence)
-                    ],
-                )
+                        ordinal,
+                        evidence.metric,
+                        self._json(evidence.value),
+                        self._json(evidence.threshold),
+                        int(evidence.passed),
+                        evidence.score_contribution,
+                    )
+                    for ordinal, evidence in enumerate(candidate.evidence)
+                ],
+            )
 
     def load_daily_review(self, trade_date: date, strategy_version: str) -> DailyReview | None:
         with self.connect() as connection:
@@ -565,13 +818,199 @@ class Database:
                 return None
             return self._load_daily_review(connection, trade_date, row[0])
 
+    def save_pipeline_run(self, run: object) -> None:
+        """Atomically persist market facts, a published review and run metadata."""
+
+        from .pipeline import PipelineRun
+
+        if not isinstance(run, PipelineRun):
+            raise TypeError("run must be a PipelineRun")
+        if run.status == "ready" and run.review is None:
+            raise ValueError("a ready pipeline run requires a review")
+        if run.snapshot is not None and run.snapshot.trade_date != run.trade_date:
+            raise ValueError("pipeline snapshot date must match the run")
+        if run.review is not None and run.review.trade_date != run.trade_date:
+            raise ValueError("pipeline review date must match the run")
+        stored_review = None
+        if run.review is not None:
+            visibility = "published" if run.status == "ready" else "observation"
+            stored_review = replace(run.review, status=visibility)
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT status, attempts, strategy_version, error
+                FROM pipeline_runs WHERE trade_date = ? AND pipeline_version = ?
+                """,
+                (run.trade_date.isoformat(), run.pipeline_version),
+            ).fetchone()
+            strategy_version = None if stored_review is None else stored_review.strategy_version
+            values = (run.status, run.attempts, strategy_version, run.error)
+            if existing is not None and existing[0] != "failed" and existing != values:
+                raise ValueError("terminal pipeline runs are immutable")
+            if run.snapshot is not None:
+                self._save_market_snapshot(connection, run.snapshot)
+                cutoff = (run.trade_date - timedelta(days=3 * 366)).isoformat()
+                connection.execute(
+                    "DELETE FROM snapshot_securities WHERE trade_date < ?", (cutoff,)
+                )
+                connection.execute("DELETE FROM market_snapshots WHERE trade_date < ?", (cutoff,))
+                connection.execute("DELETE FROM daily_bars WHERE trade_date < ?", (cutoff,))
+            if stored_review is not None:
+                self._save_daily_review(connection, stored_review)
+            connection.execute(
+                """
+                INSERT INTO pipeline_runs(
+                    trade_date, pipeline_version, status, attempts, strategy_version, error
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, pipeline_version) DO UPDATE SET
+                    status=excluded.status,
+                    attempts=excluded.attempts,
+                    strategy_version=excluded.strategy_version,
+                    error=excluded.error
+                """,
+                (
+                    run.trade_date.isoformat(),
+                    run.pipeline_version,
+                    *values,
+                ),
+            )
+
+    def load_pipeline_run(self, trade_date: date, pipeline_version: str) -> object | None:
+        from .pipeline import PipelineRun
+
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT status, attempts, strategy_version, error
+                FROM pipeline_runs WHERE trade_date = ? AND pipeline_version = ?
+                """,
+                (trade_date.isoformat(), pipeline_version),
+            ).fetchone()
+            if row is None:
+                if pipeline_version != "pipeline-v0.1":
+                    return None
+                review = self.get_daily_review(trade_date)
+                if review is None:
+                    return None
+                return PipelineRun(
+                    trade_date=trade_date,
+                    pipeline_version=pipeline_version,
+                    status="ready",
+                    attempts=0,
+                    snapshot=None,
+                    review=review,
+                )
+            review = (
+                None
+                if row[2] is None
+                else self._load_daily_review(connection, trade_date, str(row[2]))
+            )
+        if row[0] == "ready" and review is None:
+            raise ValueError("ready pipeline run has no persisted review")
+        return PipelineRun(
+            trade_date=trade_date,
+            pipeline_version=pipeline_version,
+            status=str(row[0]),
+            attempts=int(row[1]),
+            snapshot=None,
+            review=review,
+            error=None if row[3] is None else str(row[3]),
+        )
+
+    def save_schedule_outcome_record(
+        self,
+        *,
+        trade_date: date,
+        status: str,
+        next_at: datetime | None,
+        pipeline_version: str | None,
+        error: str | None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO schedule_outcomes(
+                    trade_date, status, next_at, pipeline_version, error
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date) DO UPDATE SET
+                    status=excluded.status,
+                    next_at=excluded.next_at,
+                    pipeline_version=excluded.pipeline_version,
+                    error=excluded.error
+                """,
+                (
+                    trade_date.isoformat(),
+                    status,
+                    None if next_at is None else next_at.isoformat(),
+                    pipeline_version,
+                    error,
+                ),
+            )
+
+    def load_schedule_outcome_record(self, trade_date: date) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT status, next_at, pipeline_version, error
+                FROM schedule_outcomes WHERE trade_date = ?
+                """,
+                (trade_date.isoformat(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "status": str(row[0]),
+            "next_at": None if row[1] is None else datetime.fromisoformat(str(row[1])),
+            "pipeline_version": None if row[2] is None else str(row[2]),
+            "error": None if row[3] is None else str(row[3]),
+        }
+
+    def get_publication_status(self, trade_date: date) -> dict[str, object] | None:
+        record = self.load_schedule_outcome_record(trade_date)
+        if record is None:
+            with self.connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT status, error FROM pipeline_runs
+                    WHERE trade_date = ? ORDER BY pipeline_version DESC LIMIT 1
+                    """,
+                    (trade_date.isoformat(),),
+                ).fetchone()
+            if row is None:
+                return None
+            record = {
+                "status": str(row[0]),
+                "next_at": None,
+                "pipeline_version": None,
+                "error": None if row[1] is None else str(row[1]),
+            }
+        return {"trade_date": trade_date, **record}
+
+    def count_live_observation_sessions(self, pipeline_version: str) -> int:
+        with self.connect() as connection:
+            return int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM pipeline_runs
+                    WHERE pipeline_version = ?
+                      AND status = 'degraded_observation'
+                      AND strategy_version IS NOT NULL
+                    """,
+                    (pipeline_version,),
+                ).fetchone()[0]
+            )
+
     def get_candidate(self, candidate_id: str) -> Candidate | None:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT candidate_id, symbol, name, rank, score, setup_type, strategy_version,
-                       confirmation_condition, invalidation_condition
-                FROM candidates WHERE candidate_id = ?
+                SELECT c.candidate_id, c.symbol, c.name, c.rank, c.score, c.setup_type,
+                       c.strategy_version, c.confirmation_condition, c.invalidation_condition
+                FROM candidates c
+                JOIN daily_reviews r
+                  ON r.trade_date = c.trade_date
+                 AND r.strategy_version = c.strategy_version
+                WHERE c.candidate_id = ? AND r.status IN ('published', 'ready')
                 """,
                 (candidate_id,),
             ).fetchone()
@@ -579,11 +1018,73 @@ class Database:
                 return None
             return self._candidate_from_row(connection, row)
 
+    def get_candidate_context(self, candidate_id: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT c.trade_date, c.strategy_version, c.symbol, r.source
+                FROM candidates c
+                JOIN daily_reviews r
+                  ON r.trade_date = c.trade_date
+                 AND r.strategy_version = c.strategy_version
+                WHERE c.candidate_id = ? AND r.status IN ('published', 'ready')
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            trade_date_value = date.fromisoformat(str(row[0]))
+            review = self._load_daily_review(connection, trade_date_value, str(row[1]))
+            security = connection.execute(
+                """
+                SELECT industry FROM snapshot_securities
+                WHERE trade_date = ? AND source = ? AND symbol = ?
+                """,
+                (row[0], row[3], row[2]),
+            ).fetchone()
+            industry = "" if security is None else str(security[0])
+            peer_count = (
+                0
+                if not industry
+                else int(
+                    connection.execute(
+                        """
+                    SELECT COUNT(*) FROM snapshot_securities
+                    WHERE trade_date = ? AND source = ? AND industry = ?
+                      AND board = 'MAIN' AND is_st = 0
+                    """,
+                        (row[0], row[3], industry),
+                    ).fetchone()[0]
+                )
+            )
+            evidence = connection.execute(
+                """
+                SELECT value_json FROM candidate_evidence
+                WHERE candidate_id = ? AND metric = 'industry_strength_bps'
+                ORDER BY ordinal LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+        if review is None:
+            return None
+        strength = None if evidence is None else json.loads(evidence[0])
+        if not isinstance(strength, int) or isinstance(strength, bool):
+            strength = None
+        return {
+            "review": review,
+            "industry_context": {
+                "industry": industry,
+                "industry_strength_bps": strength,
+                "eligible_peer_count": peer_count,
+            },
+        }
+
     def list_review_history(self) -> tuple[DailyReview, ...]:
         with self.connect() as connection:
             rows = connection.execute(
                 """
                 SELECT trade_date, strategy_version FROM daily_reviews
+                WHERE status IN ('published', 'ready')
                 ORDER BY trade_date DESC, strategy_version DESC
                 """
             ).fetchall()
@@ -716,22 +1217,46 @@ class Database:
         self,
         *,
         candidate_id: str,
-        event_type: str,
-        detail: str,
+        status: str | None = None,
+        event_date: date | None = None,
+        price_1e4: int | None = None,
+        reason: str | None = None,
+        event_type: str | None = None,
+        detail: str | None = None,
         idempotency_key: str,
-    ) -> dict[str, str] | None:
+    ) -> dict[str, object] | None:
+        status = status or event_type
+        reason = reason or detail
+        event_date = event_date or datetime.now(UTC).date()
+        if status not in {"watched", "bought", "skipped", "exited", "observed"}:
+            raise ValueError("candidate event status is unsupported")
+        if not reason:
+            raise ValueError("candidate event reason is required")
+        if price_1e4 is not None and price_1e4 <= 0:
+            raise ValueError("candidate event price must be positive")
         operation = "record_candidate_event"
-        request_hash = self._request_hash(
-            operation,
-            {"candidate_id": candidate_id, "event_type": event_type, "detail": detail},
-        )
+        request = {
+            "candidate_id": candidate_id,
+            "status": status,
+            "event_date": event_date.isoformat(),
+            "price_1e4": price_1e4,
+            "reason": reason,
+        }
+        request_hash = self._request_hash(operation, request)
         with self._idempotent_write_connection() as connection:
             cached = self._idempotent_result(connection, operation, idempotency_key, request_hash)
             if cached is not None:
                 return dict(cached)
             if (
                 connection.execute(
-                    "SELECT 1 FROM candidates WHERE candidate_id = ?", (candidate_id,)
+                    """
+                    SELECT 1 FROM candidates c
+                    JOIN daily_reviews r
+                      ON r.trade_date = c.trade_date
+                     AND r.strategy_version = c.strategy_version
+                    WHERE c.candidate_id = ? AND r.status IN ('published', 'ready')
+                    """,
+                    (candidate_id,),
                 ).fetchone()
                 is None
             ):
@@ -739,17 +1264,29 @@ class Database:
             occurred_at = datetime.now(UTC).isoformat()
             result = {
                 "candidate_id": candidate_id,
-                "event_type": event_type,
-                "detail": detail,
-                "occurred_at": occurred_at,
+                "status": status,
+                "event_date": event_date.isoformat(),
+                "price_1e4": price_1e4,
+                "reason": reason,
             }
             connection.execute(
                 """
                 INSERT INTO candidate_events(
-                    candidate_id, event_type, occurred_at, detail, idempotency_key
-                ) VALUES (?, ?, ?, ?, ?)
+                    candidate_id, event_type, occurred_at, detail, idempotency_key,
+                    status, event_date, price_1e4, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (candidate_id, event_type, occurred_at, detail, idempotency_key),
+                (
+                    candidate_id,
+                    status,
+                    occurred_at,
+                    reason,
+                    idempotency_key,
+                    status,
+                    event_date.isoformat(),
+                    price_1e4,
+                    reason,
+                ),
             )
             self._save_idempotent_result(
                 connection, operation, idempotency_key, request_hash, result
@@ -770,7 +1307,10 @@ class Database:
                 return dict(cached)
             if (
                 connection.execute(
-                    "SELECT 1 FROM daily_reviews WHERE trade_date = ? LIMIT 1",
+                    """
+                    SELECT 1 FROM daily_reviews
+                    WHERE trade_date = ? AND status IN ('published', 'ready') LIMIT 1
+                    """,
                     (trade_date.isoformat(),),
                 ).fetchone()
                 is None
@@ -822,6 +1362,28 @@ class Database:
 
     def list_candidate_events(self, candidate_id: str) -> tuple[tuple[str, datetime, str], ...]:
         return self._list_events("candidate_events", "candidate_id", candidate_id)
+
+    def list_candidate_review_events(self, candidate_id: str) -> tuple[dict[str, object], ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, event_date, price_1e4, reason
+                FROM candidate_events
+                WHERE candidate_id = ? AND status IS NOT NULL
+                ORDER BY event_id
+                """,
+                (candidate_id,),
+            ).fetchall()
+        return tuple(
+            {
+                "candidate_id": candidate_id,
+                "status": str(row[0]),
+                "event_date": str(row[1]),
+                "price_1e4": None if row[2] is None else int(row[2]),
+                "reason": str(row[3]),
+            }
+            for row in rows
+        )
 
     def backup_to(self, destination: str | Path) -> None:
         destination_path = Path(destination)
@@ -921,6 +1483,62 @@ class Database:
                         REFERENCES market_snapshots(trade_date, source)
                 );
                 PRAGMA user_version = 4;
+                """
+            )
+        if version < 5:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS replay_attestations (
+                    version TEXT PRIMARY KEY,
+                    parameters_hash TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    FOREIGN KEY (version) REFERENCES strategy_versions(version)
+                );
+                PRAGMA user_version = 5;
+                """
+            )
+        if version < 6:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS pipeline_runs (
+                    trade_date TEXT NOT NULL,
+                    pipeline_version TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    strategy_version TEXT,
+                    error TEXT,
+                    PRIMARY KEY (trade_date, pipeline_version),
+                    FOREIGN KEY (strategy_version) REFERENCES strategy_versions(version)
+                );
+                CREATE TABLE IF NOT EXISTS schedule_outcomes (
+                    trade_date TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    next_at TEXT,
+                    pipeline_version TEXT,
+                    error TEXT
+                );
+                PRAGMA user_version = 6;
+                """
+            )
+        if version < 7:
+            self._ensure_column(connection, "candidate_events", "status", "TEXT")
+            self._ensure_column(connection, "candidate_events", "event_date", "TEXT")
+            self._ensure_column(connection, "candidate_events", "price_1e4", "INTEGER")
+            self._ensure_column(connection, "candidate_events", "reason", "TEXT")
+            connection.execute("PRAGMA user_version = 7")
+        if version < 8:
+            self._ensure_column(connection, "replay_attestations", "dataset_hash", "TEXT")
+            self._ensure_column(connection, "replay_attestations", "start_date", "TEXT")
+            self._ensure_column(connection, "replay_attestations", "end_date", "TEXT")
+            self._ensure_column(connection, "replay_attestations", "session_count", "INTEGER")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS expected_trading_days (
+                    source TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    PRIMARY KEY (source, trade_date)
+                );
+                PRAGMA user_version = 8;
                 """
             )
 

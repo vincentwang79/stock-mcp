@@ -11,10 +11,16 @@ def _proposal(*, version: str = "v0.1-proposed", minimum: int = 5_500) -> Strate
         version=version,
         status="proposed",
         parameters={
+            "rule_engine_version": 1,
             "offensive_min_bps": minimum,
             "defensive_max_bps": 4_000,
             "neutral_limit": 2,
             "offensive_limit": 3,
+            "min_liquidity_amount_fen": 2_000_000_000,
+            "max_consecutive_limit_up_days": 2,
+            "strong_pullback_min_prior_gain_bps": 1_000,
+            "strong_pullback_max_pullback_bps": 800,
+            "volume_breakout_min_volume_ratio_bps": 15_000,
         },
     )
 
@@ -98,3 +104,29 @@ class StrategyRegistryContractTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             registry.activate("incomplete", confirmed=True)
+
+    def test_activation_rejects_each_missing_screening_threshold(self) -> None:
+        required_screening_thresholds = (
+            "rule_engine_version",
+            "min_liquidity_amount_fen",
+            "max_consecutive_limit_up_days",
+            "strong_pullback_min_prior_gain_bps",
+            "strong_pullback_max_pullback_bps",
+            "volume_breakout_min_volume_ratio_bps",
+        )
+
+        for missing in required_screening_thresholds:
+            with self.subTest(missing=missing):
+                registry = StrategyRegistry()
+                parameters = dict(_proposal().parameters)
+                del parameters[missing]
+                registry.propose(
+                    StrategyVersion(
+                        version=f"missing-{missing}",
+                        status="proposed",
+                        parameters=parameters,
+                    )
+                )
+
+                with self.assertRaisesRegex(ValueError, missing):
+                    registry.activate(f"missing-{missing}", confirmed=True)
