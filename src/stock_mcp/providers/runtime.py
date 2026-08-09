@@ -45,9 +45,19 @@ class TushareDailyProvider:
     def fetch_snapshot(self, trade_date: date) -> MarketSnapshot:
         source_timestamp = _timestamp(self._clock())
         response = _call_daily(self._client, trade_date)
+        eligible_symbols = {
+            security.symbol
+            for security in self._securities
+            if security.board == "MAIN" and not security.is_st
+        }
+        records = tuple(
+            row
+            for row in _records(response)
+            if str(row.get("ts_code", "")).strip().upper() in eligible_symbols
+        )
         try:
             normalized = normalize_tushare_daily(
-                _records(response),
+                records,
                 trade_date=trade_date,
                 source_timestamp=source_timestamp,
             )

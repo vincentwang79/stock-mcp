@@ -108,6 +108,33 @@ class RuntimeAdapterContractTestCase(unittest.TestCase):
 
 
 class TushareRuntimeAdapterContractTest(RuntimeAdapterContractTestCase):
+    def test_ignores_non_research_exchange_rows_before_normalization(self) -> None:
+        rows = _tushare_rows() + [
+            {
+                "ts_code": "920001.BJ",
+                "trade_date": "20260807",
+                "open": "10.00",
+                "high": "10.50",
+                "low": "9.90",
+                "close": "10.20",
+                "pre_close": "10.00",
+                "vol": "100",
+                "amount": "1000",
+            }
+        ]
+
+        snapshot = self.TushareDailyProvider(
+            client=_TushareClient(rows),
+            securities=SECURITIES,
+            history_loader=lambda _symbol, _until: (),
+            clock=lambda: NOW,
+        ).fetch_snapshot(TRADE_DATE)
+
+        target_symbols = tuple(
+            bar.symbol for bar in snapshot.bars if bar.trade_date == TRADE_DATE
+        )
+        self.assertEqual(target_symbols, ("600001.SH", "000001.SZ"))
+
     def test_fetches_day_dataframe_normalizes_and_calculates_snapshot_breadth(self) -> None:
         client = _TushareClient(_tushare_rows())
         requested_until: list[date] = []

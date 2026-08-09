@@ -673,6 +673,38 @@ class ProductionBackfillCompositionContractTest(unittest.TestCase):
         self.assertEqual(tushare.daily_requests, ["20230808", "20230807", "20230808"])
         self.assertEqual(baostock.login_calls, 1)
 
+    def test_latest_probe_walks_back_to_the_nearest_day_with_tushare_rows(self) -> None:
+        friday = date(2023, 8, 11)
+        saturday = date(2023, 8, 12)
+        tushare = _RecordedTushareProductionClient(
+            {
+                saturday.strftime("%Y%m%d"): [],
+                friday.strftime("%Y%m%d"): _production_tushare_rows(friday),
+            }
+        )
+        probes: list[tuple[date, int]] = []
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "data" / "research.sqlite3")
+            database.initialize()
+            database.save_market_snapshot(_snapshot(PRODUCTION_START))
+            database.save_market_snapshot(_snapshot(PRODUCTION_END))
+            result = run_production_backfill(
+                settings=Settings(root=database.path.parent.parent, tushare_token="fixture"),
+                database=database,
+                start=PRODUCTION_START,
+                end=saturday,
+                tushare_client=tushare,
+                baostock_client=_RecordedBaoStockClient(),
+                clock=lambda: PRODUCTION_TIMESTAMP,
+                minimum_main_board_count=2,
+                on_tushare_probe=lambda target, count: probes.append((target, count)),
+            )
+
+        self.assertEqual(result.incomplete_dates, ())
+        self.assertEqual(probes, [(friday, 5)])
+        self.assertEqual(tushare.daily_requests[:2], ["20230812", "20230811"])
+
     def test_reconnects_baostock_after_a_transient_daily_universe_failure(self) -> None:
         class FlakyBaoStockClient(_RecordedBaoStockClient):
             def __init__(self) -> None:

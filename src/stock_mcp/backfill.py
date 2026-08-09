@@ -22,6 +22,7 @@ MAX_TUSHARE_FETCH_ATTEMPTS = 5
 MAX_RETRY_BACKOFF_SECONDS = 30.0
 BAOSTOCK_SOCKET_TIMEOUT_SECONDS = 30.0
 MAX_BAOSTOCK_UNIVERSE_ATTEMPTS = 3
+MAX_TUSHARE_RECENT_PROBE_LOOKBACK_DAYS = 10
 
 
 class TradingCalendar(Protocol):
@@ -269,7 +270,8 @@ def run_production_backfill(
         baostock_client = baostock
     resolved_clock = clock or (lambda: datetime.now().astimezone())
     if on_tushare_probe is not None:
-        on_tushare_probe(end, _tushare_daily_row_count(tushare_client, end))
+        probe_date, probe_rows = _latest_tushare_daily_row_count(tushare_client, end)
+        on_tushare_probe(probe_date, probe_rows)
 
     login = getattr(baostock_client, "login", None)
     logout = getattr(baostock_client, "logout", None)
@@ -343,6 +345,19 @@ def _tushare_daily_row_count(client: object, target: date) -> int:
     if not isinstance(rows, list):
         raise ValueError("Tushare daily() response cannot be read as records")
     return len(rows)
+
+
+def _latest_tushare_daily_row_count(client: object, end: date) -> tuple[date, int]:
+    """Probe newest-to-oldest so a weekend or holiday cannot mask recent availability."""
+
+    last_target = end
+    for days_ago in range(MAX_TUSHARE_RECENT_PROBE_LOOKBACK_DAYS):
+        target = date.fromordinal(end.toordinal() - days_ago)
+        last_target = target
+        row_count = _tushare_daily_row_count(client, target)
+        if row_count:
+            return target, row_count
+    return last_target, 0
 
 
 def _query_baostock_universe_with_reconnect(
