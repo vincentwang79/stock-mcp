@@ -448,6 +448,17 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("Could not configure service identity for $Name.", library)
         self.assertNotIn("NT SERVICE\\$name", install)
 
+    def test_restricted_service_accounts_do_not_auto_refresh_winsw_configuration(self) -> None:
+        service = (WINDOWS / "deploy" / "services" / "StockMcpService.xml.tmpl").read_text(
+            encoding="utf-8"
+        )
+        tunnel = (WINDOWS / "deploy" / "services" / "StockMcpTunnel.xml.tmpl").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("<autoRefresh>false</autoRefresh>", service)
+        self.assertIn("<autoRefresh>false</autoRefresh>", tunnel)
+
     def test_acl_separates_app_and_tunnel_built_in_service_accounts(self) -> None:
         library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
 
