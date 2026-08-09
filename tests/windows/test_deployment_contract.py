@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -38,6 +39,25 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("Assert-Sha256 $download $entry.archive_sha256", fetch)
         self.assertIn("Expand-Archive", fetch)
         self.assertIn("Assert-Sha256 $destination $entry.sha256", fetch)
+
+    def test_tunnel_client_includes_plain_http_mcp_oauth_discovery_fix(self) -> None:
+        manifest = json.loads(self._read_required("tools-manifest.json"))
+        tunnel = manifest["tools"]["tunnel-client"]
+
+        self.assertEqual("0.0.11", tunnel["version"])
+        self.assertEqual(
+            "https://github.com/openai/tunnel-client/releases/download/v0.0.11/"
+            "tunnel-client-v0.0.11-windows-amd64.zip",
+            tunnel["url"],
+        )
+        self.assertEqual(
+            "eb912c86c6ccde90cda805cb17009507176a656725cf86c36fabe1901a12e29b",
+            tunnel["archive_sha256"],
+        )
+        self.assertEqual(
+            "7d3c7d492ce84b52835e11865a835a8a5bcd4a669dee84e169aa11b314dc952a",
+            tunnel["sha256"],
+        )
 
     def test_tool_fetch_uses_tls12_and_retries_transient_https_failures(self) -> None:
         fetch = self._read_required("fetch-tools.ps1")

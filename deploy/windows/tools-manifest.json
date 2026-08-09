@@ -17,12 +17,12 @@
       "sha256": "a2daa6a33a9c2b791ae31d9092e7935c339d1e03e89bfb747618ce2f4e819e20"
     },
     "tunnel-client": {
-      "version": "0.0.10",
+      "version": "0.0.11",
       "path": "tunnel-client.exe",
-      "url": "https://persistent.oaistatic.com/tunnel-client/v0.0.10/tunnel-client-v0.0.10-windows-amd64.zip",
-      "archive_sha256": "5e64a056f1d96786da0a6f8db1da5f5f4a03fd19a90d951a25cf2ca8d9093d00",
+      "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.11/tunnel-client-v0.0.11-windows-amd64.zip",
+      "archive_sha256": "eb912c86c6ccde90cda805cb17009507176a656725cf86c36fabe1901a12e29b",
       "archive_member": "tunnel-client.exe",
-      "sha256": "d893d8127eee35070d265c1be29bfe008f8d9fcb476e7febf56c8fdc6c0615c8"
+      "sha256": "7d3c7d492ce84b52835e11865a835a8a5bcd4a669dee84e169aa11b314dc952a"
     }
   }
 }
