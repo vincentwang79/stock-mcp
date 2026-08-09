@@ -119,6 +119,18 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn(clear, configure)
         self.assertLess(configure.index(clear), configure.index("-m stock_mcp.cli doctor"))
 
+    def test_configuration_passes_only_the_validated_token_to_python(self) -> None:
+        configure = self._read_required("configure.ps1")
+
+        assign = "$env:TUSHARE_TOKEN = $tushareValue"
+        doctor = "-m stock_mcp.cli doctor"
+        backfill = "-m stock_mcp.cli backfill"
+        clear = "Remove-Item Env:TUSHARE_TOKEN -ErrorAction SilentlyContinue"
+        self.assertIn(assign, configure)
+        self.assertLess(configure.index(assign), configure.index(doctor))
+        self.assertLess(configure.index(backfill), configure.rindex(clear))
+        self.assertIn("finally", configure)
+
     def test_configuration_can_use_one_acl_protected_input_file(self) -> None:
         configure = self._read_required("configure.ps1")
         example = self._read_required("configure-input.psd1.example")

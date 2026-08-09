@@ -144,7 +144,6 @@ $lines = @(
     'STOCK_MCP_CA_FILE=' + $managedCa
 )
 [IO.File]::WriteAllLines($secretFile, $lines, [Text.UTF8Encoding]::new($false))
-$tushareValue = $null
 # The MCP application can read only its Tushare configuration. It cannot modify
 # code/tools and it cannot read the Tunnel runtime-key file.
 Set-PrivateFileAcl $secretFile -Reader StockMcpService
@@ -186,24 +185,29 @@ Set-PrivateAcl $configDirectory -ReadableByApp -ReadableByTunnel
 # process-level value before launching Python, including values inherited by an
 # elevated PowerShell window from an earlier troubleshooting session.
 Remove-Item Env:TUSHARE_TOKEN -ErrorAction SilentlyContinue
+$env:TUSHARE_TOKEN = $tushareValue
+$tushareValue = $null
+try {
+    $servicePython = Join-Path $InstallRoot 'current\.venv\Scripts\python.exe'
+    $cli = Join-Path $InstallRoot 'current\.venv\Scripts\stock-mcp.exe'
+    if (-not (Test-Path -LiteralPath $servicePython)) { throw 'Isolated application Python is missing.' }
+    & $servicePython -m stock_mcp.cli doctor --root $InstallRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Data permissions/configuration probe failed.' }
 
-$servicePython = Join-Path $InstallRoot 'current\.venv\Scripts\python.exe'
-$cli = Join-Path $InstallRoot 'current\.venv\Scripts\stock-mcp.exe'
-if (-not (Test-Path -LiteralPath $servicePython)) { throw 'Isolated application Python is missing.' }
-& $servicePython -m stock_mcp.cli doctor --root $InstallRoot
-if ($LASTEXITCODE -ne 0) { throw 'Data permissions/configuration probe failed.' }
-
-# Build the replay baseline before the scheduler can publish a normal daily review.
-# Yesterday is used so configuration never mistakes an in-progress trading day for
-# an incomplete historical source response. The command is idempotent and resumes
-# only missing dates after an interruption.
-$chinaTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
-$chinaNow = [TimeZoneInfo]::ConvertTime([DateTimeOffset]::UtcNow, $chinaTimeZone)
-$backfillEnd = $chinaNow.Date.AddDays(-1)
-$backfillStart = $backfillEnd.AddYears(-3)
-& $servicePython -m stock_mcp.cli backfill --root $InstallRoot `
-    --start $backfillStart.ToString('yyyy-MM-dd') --end $backfillEnd.ToString('yyyy-MM-dd')
-if ($LASTEXITCODE -ne 0) { throw 'Three-year historical backfill is incomplete; rerun configure.ps1.' }
+    # Build the replay baseline before the scheduler can publish a normal daily review.
+    # Yesterday is used so configuration never mistakes an in-progress trading day for
+    # an incomplete historical source response. The command is idempotent and resumes
+    # only missing dates after an interruption.
+    $chinaTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
+    $chinaNow = [TimeZoneInfo]::ConvertTime([DateTimeOffset]::UtcNow, $chinaTimeZone)
+    $backfillEnd = $chinaNow.Date.AddDays(-1)
+    $backfillStart = $backfillEnd.AddYears(-3)
+    & $servicePython -m stock_mcp.cli backfill --root $InstallRoot `
+        --start $backfillStart.ToString('yyyy-MM-dd') --end $backfillEnd.ToString('yyyy-MM-dd')
+    if ($LASTEXITCODE -ne 0) { throw 'Three-year historical backfill is incomplete; rerun configure.ps1.' }
+} finally {
+    Remove-Item Env:TUSHARE_TOKEN -ErrorAction SilentlyContinue
+}
 
 $tunnelClient = Join-Path $InstallRoot 'runtime\tools\tunnel-client.exe'
 # Always restart both services so readiness proves the configured virtual service
