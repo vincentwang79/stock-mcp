@@ -219,6 +219,38 @@ class TushareDailyBackfillContractTest(unittest.TestCase):
             self.assertEqual(provider.requests, [START])
             self.assertEqual(len(database.load_market_snapshots(START, START)), 1)
 
+    def test_rerun_uses_lightweight_snapshot_presence_check(self) -> None:
+        class PresenceOnlyDatabase:
+            def __init__(self) -> None:
+                self.presence_checks = 0
+                self.full_snapshot_loads = 0
+
+            def has_market_snapshot(self, target: date, *, source: str) -> bool:
+                self.presence_checks += 1
+                if target != START or source != SOURCE:
+                    raise AssertionError("backfill presence lookup used the wrong snapshot key")
+                return True
+
+            def load_market_snapshots(self, *_args: object, **_kwargs: object) -> tuple[MarketSnapshot, ...]:
+                self.full_snapshot_loads += 1
+                return (_snapshot(START),)
+
+            @staticmethod
+            def save_market_snapshot(_snapshot: MarketSnapshot) -> None:
+                raise AssertionError("an existing snapshot must not be written again")
+
+        database = PresenceOnlyDatabase()
+        result = self._service(
+            database=database,  # type: ignore[arg-type]
+            calendar=RecordedTradingCalendar((START,)),
+            provider=RecordedTushareDailyProvider({}),
+        ).backfill(START, START)
+
+        self.assertEqual(result.published_dates, ())
+        self.assertEqual(result.incomplete_dates, ())
+        self.assertEqual(database.presence_checks, 1)
+        self.assertEqual(database.full_snapshot_loads, 0)
+
     def test_incomplete_day_is_not_published_and_a_later_run_resumes_from_that_day(self) -> None:
         calendar = RecordedTradingCalendar((START, END))
         provider = RecordedTushareDailyProvider(

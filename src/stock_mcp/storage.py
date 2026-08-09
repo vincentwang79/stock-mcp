@@ -414,6 +414,20 @@ class Database:
                 (cutoff.isoformat(),),
             )
 
+    def has_market_snapshot(self, target: date, *, source: str = "tushare") -> bool:
+        """Return whether an immutable snapshot is present without loading its facts."""
+
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM market_snapshots
+                WHERE trade_date = ? AND source = ?
+                LIMIT 1
+                """,
+                (target.isoformat(), source),
+            ).fetchone()
+        return row is not None
+
     def load_market_snapshots(
         self, start: date, end: date, *, source: str = "tushare", history_limit: int = 60
     ) -> tuple[MarketSnapshot, ...]:

@@ -95,6 +95,16 @@ class MarketFactImmutabilityTest(unittest.TestCase):
             (original,),
         )
 
+    def test_snapshot_presence_check_does_not_load_market_facts(self) -> None:
+        exists = getattr(self.database, "has_market_snapshot", None)
+        self.assertTrue(callable(exists), "Database must expose a lightweight snapshot presence check")
+        self.assertFalse(exists(TRADE_DATE, source="tushare"))
+
+        self.database.save_market_snapshot(_snapshot())
+
+        self.assertTrue(exists(TRADE_DATE, source="tushare"))
+        self.assertFalse(exists(TRADE_DATE, source="akshare"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -171,6 +171,9 @@ class TushareDailyBackfillService:
         )
 
     def _is_published(self, target: date) -> bool:
+        has_snapshot = getattr(self._database, "has_market_snapshot", None)
+        if callable(has_snapshot):
+            return bool(has_snapshot(target, source=TUSHARE_SOURCE))
         return bool(self._database.load_market_snapshots(target, target, source=TUSHARE_SOURCE))
 
     def _validate_snapshot(self, snapshot: MarketSnapshot, target: date) -> None:
