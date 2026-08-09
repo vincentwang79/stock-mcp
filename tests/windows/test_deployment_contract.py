@@ -112,6 +112,13 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("'^[0-9a-fA-F]{56}$'", configure)
         self.assertIn("-TushareTokenFromClipboard", readme)
 
+    def test_configuration_clears_ambient_tushare_token_before_python_checks(self) -> None:
+        configure = self._read_required("configure.ps1")
+
+        clear = "Remove-Item Env:TUSHARE_TOKEN -ErrorAction SilentlyContinue"
+        self.assertIn(clear, configure)
+        self.assertLess(configure.index(clear), configure.index("-m stock_mcp.cli doctor"))
+
     def test_configuration_can_use_one_acl_protected_input_file(self) -> None:
         configure = self._read_required("configure.ps1")
         example = self._read_required("configure-input.psd1.example")

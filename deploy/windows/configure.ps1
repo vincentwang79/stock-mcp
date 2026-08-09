@@ -182,6 +182,11 @@ Set-PrivateFileAcl $tunnelKeyFile -Reader StockMcpTunnel
 Set-PrivateFileAcl $profilePath -Reader StockMcpTunnel
 Set-PrivateAcl $configDirectory -ReadableByApp -ReadableByTunnel
 
+# The protected host file is the only credential source.  Remove any stale
+# process-level value before launching Python, including values inherited by an
+# elevated PowerShell window from an earlier troubleshooting session.
+Remove-Item Env:TUSHARE_TOKEN -ErrorAction SilentlyContinue
+
 $servicePython = Join-Path $InstallRoot 'current\.venv\Scripts\python.exe'
 $cli = Join-Path $InstallRoot 'current\.venv\Scripts\stock-mcp.exe'
 if (-not (Test-Path -LiteralPath $servicePython)) { throw 'Isolated application Python is missing.' }
