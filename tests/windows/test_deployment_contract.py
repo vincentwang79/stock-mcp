@@ -243,13 +243,18 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertNotIn("stock_mcp.cli doctor --config", configure + update)
         self.assertIn("127.0.0.1:8765/readyz", library)
 
-    def test_loopback_readiness_bypasses_proxy_and_allows_service_startup_time(self) -> None:
+    def test_loopback_readiness_uses_isolated_python_probe(self) -> None:
         library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
+        configure = self._read_required("configure.ps1")
 
         self.assertIn("function Test-LoopbackReady", library)
-        self.assertIn("$request.Proxy = $null", library)
+        self.assertIn("[string] $PythonExe", library)
+        self.assertIn("-m stock_mcp.loopback_probe $Url", library)
         self.assertIn("[int] $Attempts = 30", library)
-        self.assertIn("Test-LoopbackReady $Url", library)
+        self.assertIn("Test-LoopbackReady -Url $Url -PythonExe $PythonExe", library)
+        self.assertIn("Wait-LocalReady -PythonExe $servicePython", configure)
+        self.assertIn("Wait-TunnelReady -PythonExe $servicePython", configure)
+        self.assertNotIn("[System.Net.HttpWebRequest]::Create", library)
         self.assertNotIn("Invoke-WebRequest -Uri $Url -UseBasicParsing", library)
 
     def test_configuration_starts_the_app_before_tunnel_doctor(self) -> None:

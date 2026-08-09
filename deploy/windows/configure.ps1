@@ -213,11 +213,11 @@ $tunnelClient = Join-Path $InstallRoot 'runtime\tools\tunnel-client.exe'
 # identities can read their respective protected files, rather than an old process.
 Stop-StockServices
 Start-Service -Name StockMcpService
-if (-not (Wait-LocalReady)) { throw 'MCP local readiness check failed.' }
+if (-not (Wait-LocalReady -PythonExe $servicePython)) { throw 'MCP local readiness check failed.' }
 & $tunnelClient doctor --config $profilePath --explain
 if ($LASTEXITCODE -ne 0) { throw 'Tunnel doctor failed.' }
 Start-Service -Name StockMcpTunnel
-if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after service startup.' }
+if (-not (Wait-TunnelReady -PythonExe $servicePython)) { throw 'Tunnel readiness check failed after service startup.' }
 'ready' | Set-Content -LiteralPath (Join-Path $InstallRoot 'state\service-status') -Encoding ASCII
 if ($configurationInputFile) { Remove-Item -LiteralPath $configurationInputFile -Force }
 Write-Host 'Configuration validated. Secrets were not printed.'

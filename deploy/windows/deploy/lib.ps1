@@ -176,34 +176,40 @@ function New-CurrentJunction([Parameter(Mandatory = $true)][string] $Root, [Para
     New-Item -ItemType Junction -Path $current -Target $Target | Out-Null
 }
 
-function Test-LoopbackReady([Parameter(Mandatory = $true)][string] $Url) {
-    $request = [System.Net.HttpWebRequest]::Create($Url)
-    $request.Proxy = $null
-    $request.Timeout = 5000
-    $request.ReadWriteTimeout = 5000
-    try {
-        $response = [System.Net.HttpWebResponse]$request.GetResponse()
-        try {
-            return $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
-        } finally {
-            $response.Close()
-        }
-    } catch {
-        return $false
-    }
+function Test-LoopbackReady {
+    param(
+        [Parameter(Mandatory = $true)][string] $Url,
+        [Parameter(Mandatory = $true)][string] $PythonExe
+    )
+    if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) { return $false }
+    # HttpWebRequest can time out after Uvicorn already logged a 200 response on
+    # Windows loopback. Use the pinned application's proxy-free probe; it reads
+    # and closes the full response before declaring success.
+    & $PythonExe -m stock_mcp.loopback_probe $Url
+    return $LASTEXITCODE -eq 0
 }
 
-function Wait-LocalReady([string] $Url = 'http://127.0.0.1:8765/readyz', [int] $Attempts = 30) {
+function Wait-LocalReady {
+    param(
+        [string] $Url = 'http://127.0.0.1:8765/readyz',
+        [Parameter(Mandatory = $true)][string] $PythonExe,
+        [int] $Attempts = 30
+    )
     for ($i = 1; $i -le $Attempts; $i++) {
-        if (Test-LoopbackReady $Url) { return $true }
+        if (Test-LoopbackReady -Url $Url -PythonExe $PythonExe) { return $true }
         if ($i -lt $Attempts) { Start-Sleep -Seconds 2 }
     }
     return $false
 }
 
-function Wait-TunnelReady([string] $Url = 'http://127.0.0.1:8766/readyz', [int] $Attempts = 30) {
+function Wait-TunnelReady {
+    param(
+        [string] $Url = 'http://127.0.0.1:8766/readyz',
+        [Parameter(Mandatory = $true)][string] $PythonExe,
+        [int] $Attempts = 30
+    )
     for ($i = 1; $i -le $Attempts; $i++) {
-        if (Test-LoopbackReady $Url) { return $true }
+        if (Test-LoopbackReady -Url $Url -PythonExe $PythonExe) { return $true }
         if ($i -lt $Attempts) { Start-Sleep -Seconds 2 }
     }
     return $false

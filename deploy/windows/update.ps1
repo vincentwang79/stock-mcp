@@ -257,9 +257,9 @@ try {
         Write-Host "Updated to $version. Configuration is still required. Backup: $backupRoot"
     } else {
         Start-Service -Name StockMcpService
-        if (-not (Wait-LocalReady)) { throw 'Readiness check failed after update.' }
+        if (-not (Wait-LocalReady -PythonExe $python)) { throw 'Readiness check failed after update.' }
         Start-Service -Name StockMcpTunnel
-        if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after update.' }
+        if (-not (Wait-TunnelReady -PythonExe $python)) { throw 'Tunnel readiness check failed after update.' }
         Set-UpdateState 'ready'
         Write-Host "Updated to $version. Backup: $backupRoot"
     }
@@ -295,9 +295,9 @@ try {
                 Write-Warning 'Rollback succeeded; configuration is still required.'
             } else {
                 Start-Service -Name StockMcpService
-                if (-not (Wait-LocalReady)) { throw 'Rollback MCP readiness check failed.' }
+                if (-not (Wait-LocalReady -PythonExe $oldPython)) { throw 'Rollback MCP readiness check failed.' }
                 Start-Service -Name StockMcpTunnel
-                if (-not (Wait-TunnelReady)) { throw 'Rollback Tunnel readiness check failed.' }
+                if (-not (Wait-TunnelReady -PythonExe $oldPython)) { throw 'Rollback Tunnel readiness check failed.' }
                 Set-UpdateState 'rollback_ready'
                 Write-Warning 'Rollback succeeded; the previous release is ready.'
             }

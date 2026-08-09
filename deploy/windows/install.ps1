@@ -156,10 +156,11 @@ if (-not (Test-Path -LiteralPath $secretFile)) {
     'configuration_required' | Set-Content -LiteralPath (Join-Path $InstallRoot 'state\service-status') -Encoding ASCII
     Write-Host "Installed. Run .\configure.ps1 -InstallRoot '$InstallRoot' to provide secrets."
 } else {
+    $servicePython = Join-Path $InstallRoot 'current\.venv\Scripts\python.exe'
     Start-Service -Name StockMcpService
-    if (-not (Wait-LocalReady)) { throw 'MCP local readiness check failed after install.' }
+    if (-not (Wait-LocalReady -PythonExe $servicePython)) { throw 'MCP local readiness check failed after install.' }
     Start-Service -Name StockMcpTunnel
-    if (-not (Wait-TunnelReady)) { throw 'Tunnel readiness check failed after install.' }
+    if (-not (Wait-TunnelReady -PythonExe $servicePython)) { throw 'Tunnel readiness check failed after install.' }
 }
 } finally {
     if ($packageWork -and (Test-Path -LiteralPath $packageWork)) { Remove-Item -LiteralPath $packageWork -Recurse -Force }
