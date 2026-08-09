@@ -1416,6 +1416,23 @@ class Database:
             "foreign_keys": foreign_keys,
         }
 
+    def is_ready(self) -> bool:
+        """Return a constant-time schema/readability check for HTTP readiness.
+
+        Full ``PRAGMA integrity_check`` remains part of ``doctor`` and backup
+        diagnostics. It is intentionally excluded here because scanning a
+        multi-million-row database would block the single MCP event loop on
+        every ``/readyz`` request.
+        """
+
+        try:
+            with self.connect() as connection:
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                readable = connection.execute("SELECT 1").fetchone()
+        except sqlite3.Error:
+            return False
+        return version == SCHEMA_VERSION and readable == (1,)
+
     def load_idempotent_write(
         self, operation: str, idempotency_key: str, request: object
     ) -> object | None:

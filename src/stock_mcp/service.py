@@ -157,23 +157,15 @@ def _default_dependencies(settings: Settings) -> dict[str, object]:
         replay=HistoricalReplayService(database, strategy_registry),
     )
 
-    def route_health() -> Mapping[str, object]:
-        missing = settings.missing_secrets
-        integrity = _database_health(database).get("integrity")
-        if missing:
-            readyz = "configuration_required"
-        elif integrity != "ok":
-            readyz = "database_unavailable"
-        else:
-            readyz = "ready"
-        return {"healthz": "healthy", "readyz": readyz}
-
     scheduler = _make_scheduler()
     _register_post_market_job(scheduler, ProductionPostMarketTask(settings, database))
     return {
         "database": database,
         "application": application,
-        "mcp_server": create_server(application, health_provider=route_health),
+        "mcp_server": create_server(
+            application,
+            health_provider=lambda: _mcp_route_health(settings, database),
+        ),
         "scheduler": scheduler,
     }
 
@@ -242,6 +234,22 @@ def _database_health(database: Any) -> dict[str, object]:
     except Exception as error:  # A health probe must expose, not crash on, a DB fault.
         return {"integrity": "error", "error": str(error)}
     return dict(result) if isinstance(result, Mapping) else {"integrity": "unknown"}
+
+
+def _mcp_route_health(settings: Settings, database: Any) -> Mapping[str, object]:
+    """Return constant-time facts for high-frequency MCP HTTP probes."""
+
+    missing = settings.missing_secrets
+    if missing:
+        readyz = "configuration_required"
+    else:
+        is_ready = getattr(database, "is_ready", None)
+        try:
+            database_ready = bool(is_ready()) if callable(is_ready) else False
+        except Exception:  # Readiness must report an unavailable DB, not crash HTTP.
+            database_ready = False
+        readyz = "ready" if database_ready else "database_unavailable"
+    return {"healthz": "healthy", "readyz": readyz}
 
 
 def _run_mcp(runtime: ServiceRuntime) -> int:

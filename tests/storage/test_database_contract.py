@@ -267,6 +267,12 @@ class DatabaseContractTest(unittest.TestCase):
         self.assertEqual("wal", report["journal_mode"])
         self.assertNotIn("rows", report)
 
+    def test_readiness_check_accepts_initialized_schema_without_full_integrity_scan(self) -> None:
+        self.assertTrue(self.database.is_ready())
+
+        uninitialized = Database(Path(self.temp_dir.name) / "uninitialized.sqlite3")
+        self.assertFalse(uninitialized.is_ready())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,12 +20,19 @@ from stock_mcp.config import Settings
 class _Database:
     def __init__(self) -> None:
         self.initialized = 0
+        self.readiness_checks = 0
+        self.full_integrity_checks = 0
 
     def initialize(self) -> None:
         self.initialized += 1
 
     def doctor(self) -> dict[str, str]:
+        self.full_integrity_checks += 1
         return {"integrity": "ok"}
+
+    def is_ready(self) -> bool:
+        self.readiness_checks += 1
+        return True
 
 
 class _Scheduler:
@@ -135,6 +142,22 @@ class ServiceRuntimeContractTest(unittest.TestCase):
             unsafe_path = Settings(root=Path(temporary), mcp_path="/private")
             with self.assertRaisesRegex(ValueError, "/mcp"):
                 build_runtime(unsafe_path, dependencies=dependencies)
+
+    def test_mcp_readiness_route_does_not_run_a_full_database_integrity_scan(self) -> None:
+        try:
+            from stock_mcp.service import _mcp_route_health
+        except ImportError as error:
+            self.fail(f"constant-time MCP readiness is not implemented: {error}")
+
+        with TemporaryDirectory() as temporary:
+            database = _Database()
+            payload = _mcp_route_health(
+                self._settings(Path(temporary), configured=True), database
+            )
+
+        self.assertEqual({"healthz": "healthy", "readyz": "ready"}, payload)
+        self.assertEqual(1, database.readiness_checks)
+        self.assertEqual(0, database.full_integrity_checks)
 
     def test_production_scheduler_registers_one_coalesced_singleton_job(self) -> None:
         from stock_mcp.service import _register_post_market_job
