@@ -138,12 +138,11 @@ if (-not [string]::IsNullOrWhiteSpace($customCaValue)) {
 }
 
 $secretFile = Join-Path $configDirectory 'secrets.env'
-$lines = @(
-    'TUSHARE_TOKEN=' + $tushareValue,
-    'HTTPS_PROXY=' + (Get-Plaintext $proxy),
-    'STOCK_MCP_CA_FILE=' + $managedCa
-)
-[IO.File]::WriteAllLines($secretFile, $lines, [Text.UTF8Encoding]::new($false))
+$secretLines = [string[]]::new(3)
+$secretLines[0] = 'TUSHARE_TOKEN=' + $tushareValue
+$secretLines[1] = 'HTTPS_PROXY=' + (Get-Plaintext $proxy)
+$secretLines[2] = 'STOCK_MCP_CA_FILE=' + $managedCa
+[IO.File]::WriteAllLines($secretFile, $secretLines, [Text.UTF8Encoding]::new($false))
 # The MCP application can read only its Tushare configuration. It cannot modify
 # code/tools and it cannot read the Tunnel runtime-key file.
 Set-PrivateFileAcl $secretFile -Reader StockMcpService

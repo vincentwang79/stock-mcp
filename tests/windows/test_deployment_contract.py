@@ -131,6 +131,16 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertLess(configure.index(backfill), configure.rindex(clear))
         self.assertIn("finally", configure)
 
+    def test_configuration_writes_each_host_setting_on_its_own_line(self) -> None:
+        configure = self._read_required("configure.ps1")
+
+        self.assertIn("$secretLines = [string[]]::new(3)", configure)
+        self.assertIn("$secretLines[0] = 'TUSHARE_TOKEN=' + $tushareValue", configure)
+        self.assertIn("$secretLines[1] = 'HTTPS_PROXY=' + (Get-Plaintext $proxy)", configure)
+        self.assertIn("$secretLines[2] = 'STOCK_MCP_CA_FILE=' + $managedCa", configure)
+        self.assertIn("WriteAllLines($secretFile, $secretLines", configure)
+        self.assertNotIn("$lines = @(", configure)
+
     def test_configuration_can_use_one_acl_protected_input_file(self) -> None:
         configure = self._read_required("configure.ps1")
         example = self._read_required("configure-input.psd1.example")
