@@ -176,22 +176,35 @@ function New-CurrentJunction([Parameter(Mandatory = $true)][string] $Root, [Para
     New-Item -ItemType Junction -Path $current -Target $Target | Out-Null
 }
 
-function Wait-LocalReady([string] $Url = 'http://127.0.0.1:8765/readyz', [int] $Attempts = 12) {
-    for ($i = 1; $i -le $Attempts; $i++) {
+function Test-LoopbackReady([Parameter(Mandatory = $true)][string] $Url) {
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.Proxy = $null
+    $request.Timeout = 5000
+    $request.ReadWriteTimeout = 5000
+    try {
+        $response = [System.Net.HttpWebResponse]$request.GetResponse()
         try {
-            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
-            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) { return $true }
-        } catch { Start-Sleep -Seconds 2 }
+            return $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
+        } finally {
+            $response.Close()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Wait-LocalReady([string] $Url = 'http://127.0.0.1:8765/readyz', [int] $Attempts = 30) {
+    for ($i = 1; $i -le $Attempts; $i++) {
+        if (Test-LoopbackReady $Url) { return $true }
+        if ($i -lt $Attempts) { Start-Sleep -Seconds 2 }
     }
     return $false
 }
 
-function Wait-TunnelReady([string] $Url = 'http://127.0.0.1:8766/readyz', [int] $Attempts = 12) {
+function Wait-TunnelReady([string] $Url = 'http://127.0.0.1:8766/readyz', [int] $Attempts = 30) {
     for ($i = 1; $i -le $Attempts; $i++) {
-        try {
-            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
-            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) { return $true }
-        } catch { Start-Sleep -Seconds 2 }
+        if (Test-LoopbackReady $Url) { return $true }
+        if ($i -lt $Attempts) { Start-Sleep -Seconds 2 }
     }
     return $false
 }
