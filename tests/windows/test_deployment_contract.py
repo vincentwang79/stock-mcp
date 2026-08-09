@@ -253,6 +253,13 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("run --config $clientConfig", runner)
         self.assertNotIn("connect --config", runner)
 
+    def test_tunnel_proxy_is_limited_to_the_openai_control_plane(self) -> None:
+        configure = self._read_required("configure.ps1")
+
+        self.assertIn("\"  http_proxy: '$proxyValue'\"", configure)
+        self.assertNotIn("$profileLines += \"http_proxy: '$proxyValue'\"", configure)
+        self.assertNotIn("mcp.http_proxy", configure)
+
     def test_windows_scripts_use_the_supported_root_cli_and_healthz(self) -> None:
         configure = self._read_required("configure.ps1")
         update = self._read_required("update.ps1")

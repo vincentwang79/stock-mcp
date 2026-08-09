@@ -154,11 +154,20 @@ $tunnelKeyFile = Join-Path $configDirectory 'tunnel-api-key'
 [IO.File]::WriteAllText($tunnelKeyFile, (Get-Plaintext $tunnelKey), [Text.UTF8Encoding]::new($false))
 $profilePath = (Join-Path $configDirectory 'tunnel-client.yaml').Replace('\', '/')
 $keyReference = $tunnelKeyFile.Replace('\', '/')
+$proxyValue = Get-Plaintext $proxy
 $profileLines = @(
     'config_version: 1',
     'control_plane:',
     "  tunnel_id: '$(Get-Plaintext $tunnelId)'",
-    "  api_key: 'file:$keyReference'",
+    "  api_key: 'file:$keyReference'"
+)
+if (-not [string]::IsNullOrWhiteSpace($proxyValue)) {
+    # Only OpenAI control-plane traffic uses the outbound proxy.  A global
+    # http_proxy also proxies the loopback MCP channel and can leave /readyz
+    # degraded after the Windows service starts under NetworkService.
+    $profileLines += "  http_proxy: '$proxyValue'"
+}
+$profileLines += @(
     'health:',
     '  listen_addr: 127.0.0.1:8766',
     'admin_ui:',
@@ -168,10 +177,6 @@ $profileLines = @(
     '    - channel: main',
     '      url: http://127.0.0.1:8765/mcp'
 )
-$proxyValue = Get-Plaintext $proxy
-if (-not [string]::IsNullOrWhiteSpace($proxyValue)) {
-    $profileLines += "http_proxy: '$proxyValue'"
-}
 if (-not [string]::IsNullOrWhiteSpace($managedCa)) {
     $profileLines += "ca_bundle: '$($managedCa.Replace('\', '/'))'"
 }
