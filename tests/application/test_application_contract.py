@@ -448,6 +448,16 @@ class StockMcpApplicationContractTests(unittest.TestCase):
         self.assertEqual("strategy_proposal_rejected", unknown["error"]["code"])
         self.assertEqual("strategy_proposal_rejected", invalid["error"]["code"])
 
+    def test_official_v03_names_cannot_be_used_with_legacy_parameters(self) -> None:
+        result = self.application.create_strategy_proposal(
+            version="v0.3-policy-1",
+            parameters={"offensive_limit": 3},
+            idempotency_key="reserved-v03-name",
+        )
+
+        self.assertEqual("strategy_proposal_rejected", result["error"]["code"])
+        self.assertIn("frozen v3 policy", result["error"]["message"])
+
     def test_application_methods_do_not_accept_trading_or_account_arguments(self) -> None:
         with self.assertRaises(TypeError):
             self.application.create_watchlist(  # type: ignore[call-arg]

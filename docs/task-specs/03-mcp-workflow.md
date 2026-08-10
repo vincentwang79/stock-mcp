@@ -17,7 +17,7 @@ ChatGPT 需要结构化读取日报并记录个人观察，但不能改变排名
 - 可维护命名观察列表，记录候选事件和复盘说明。
 - 次日行情只有显式调用时获取，来源及时间随响应返回。
 - 策略激活必须携带明确确认，不允许历史重写。
-- 用户可以发起完整三年单版本回放，查看异步进度和逐日证据，完成审阅后显式认证，再完成主机批准和激活。
+- 用户可以人工创建 v0.3 提案，发起完整三年单版本回放，查看异步进度、逐日证据和候选后的 outcome，完成审阅后显式认证，再完成主机批准和激活。
 
 ## 实现决策
 
@@ -40,23 +40,24 @@ ChatGPT 需要结构化读取日报并记录个人观察，但不能改变排名
 
 回放后台每次最多处理一个交易日；重启会把中断的 `running` 作业恢复为 `queued`，而已保存的逐日证据不可覆盖。调用 `get_strategy_replay` 和 `get_strategy_replay_days` 是按需查看，不会触发后台行情轮询或连续监控。
 
-数据库初始化与 Windows 更新会自动应用 Schema v9 迁移。该迁移持久化作业、日期级证据和认证记录；认证证明永久保留，包含不可变策略参数哈希、数据集哈希、结果哈希、覆盖范围和会话数。激活时只消费主机侧一次性批准，不删除证明。
+数据库初始化与 Windows 更新会自动应用 Schema v10 迁移。该迁移在保留旧记录的前提下持久化 v3 事实、作业、日期级输入/输出哈希、60 个交易日预热、候选 `outcome`、`outcome_hash`、策略关系和生命周期；认证证明永久保留，包含不可变策略参数哈希、数据集哈希、结果哈希、`outcome_hash`、覆盖范围和会话数。激活时只消费主机侧一次性批准，不删除证明。
 
 `compare_strategy_versions` 是纯只读研究工具，必须传入两个不同版本；同版本比较返回结构化拒绝，且不会启动回放、写入证据或产生证明。比较输出不能替代单版本治理回放认证。
 
 ### 治理流程
 
-1. ChatGPT 以固定日期范围调用 `start_strategy_replay`，保存返回的 `replay_id`；返回 `queued` 或 `running` 只是受理/执行状态，不是通过认证。
-2. ChatGPT 按需调用 `get_strategy_replay`，并以 `after_trade_date` 和受限 `limit` 调用 `get_strategy_replay_days` 审阅分页面的完整性、失败原因、哈希和候选证据。
-3. 仅当作业为 `completed` 且覆盖完整交易日历时，用户明确要求后调用 `certify_strategy_replay(confirmed=true)`；认证失败必须保留原始状态并显式报告。
-4. 管理员在 Windows 主机上运行 `approve-strategy` 并再次键入版本号，取得与参数哈希绑定的一次性批准。
-5. 用户再调用 `activate_strategy_version(confirmed=true)`。缺少认证、主机批准或显式确认均必须失败；成功后只更新活动版本指针。
+1. 用户明确决定后，ChatGPT 才可用 `create_strategy_proposal` 创建 `v0.3-policy-1` 或 `v0.3-policy-2`；每个请求包含完整参数、理由、幂等键和 `supersedes_version="v0.2-proposed"`。本轮不自动创建提案、不自动认证、不自动激活。
+2. 仅当 Windows 主机已成功运行离线 `build-v3-facts` 后，ChatGPT 才以固定日期范围 `2023-08-08` 至 `2026-08-07` 调用 `start_strategy_replay`。这必须覆盖 727 个交易日，前 60 个交易日只是预热；返回 `queued` 或 `running` 只是受理/执行状态，不是通过认证。
+3. ChatGPT 按需调用 `get_strategy_replay`，并以 `after_trade_date` 和受限 `limit` 调用 `get_strategy_replay_days` 审阅分页面的完整性、失败原因、哈希、预热标记、候选证据和 outcome 状态；不得建立持续轮询。
+4. 仅当候选作业为 `completed`、727 个交易日完整、异步 outcome 已完成并存在 `outcome_hash` 时，用户明确要求后调用 `certify_strategy_replay(confirmed=true)`；任何事实缺口、失败或认证冲突均必须保留原始状态并显式报告。
+5. 管理员在 Windows 主机上运行 `approve-strategy` 并再次键入版本号，取得与参数哈希绑定的一次性批准。
+6. 用户再调用 `activate_strategy_version(confirmed=true)`。缺少认证、outcome、主机批准或显式确认均必须失败；成功时原子切换活动版本并将被取代的 v0.2 标记为 `superseded`，历史记录保留。
 
 ## 测试决策
 
 - 断言公开模式、安全注解、结构化错误、幂等和输入边界。
 - 使用模拟应用服务证明读取不改写排名、次日检查不会后台轮询。
-- 使用离线夹具验证五个回放工具、闭合 Schema、异步状态、`after_trade_date` 分页、认证显式确认、Schema v9 自动迁移、永久证明和同版本比较的只读拒绝。
+- 使用离线夹具验证五个回放工具、闭合 Schema、异步状态、`after_trade_date` 分页、认证显式确认、Schema v10 自动迁移、60 个交易日预热、outcome 门禁、永久证明、原子 superseded 和同版本比较的只读拒绝。
 
 ## 非目标
 

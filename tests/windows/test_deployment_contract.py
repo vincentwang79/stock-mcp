@@ -43,7 +43,7 @@ class WindowsDeploymentContractTest(unittest.TestCase):
             "纯只读",
         ):
             self.assertIn(phrase, strategy + workflow)
-        self.assertIn("Schema v9", strategy + workflow + windows)
+        self.assertIn("Schema v10", strategy + workflow + windows)
         self.assertIn("2023-08-08", windows)
         self.assertIn("2026-08-07", windows)
         self.assertIn("certify_strategy_replay", windows)
@@ -51,6 +51,44 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("activate_strategy_version", windows)
         self.assertIn("外部门禁", windows)
         self.assertNotIn("727日回放已验证", windows)
+
+    def test_v3_chinese_docs_describe_facts_policy_outcomes_and_manual_gates(self) -> None:
+        """发布中文文档持续记录可审计的 v3 证据与人工门禁。"""
+        strategy = (ROOT / "docs" / "task-specs" / "02-strategy-replay.md").read_text(
+            encoding="utf-8"
+        )
+        workflow = (ROOT / "docs" / "task-specs" / "03-mcp-workflow.md").read_text(
+            encoding="utf-8"
+        )
+        release = (ROOT / "docs" / "task-specs" / "04-windows-release.md").read_text(
+            encoding="utf-8"
+        )
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        windows = self._read_required("README-WINDOWS.md")
+        published = "\n".join((strategy, workflow, release, readme, windows))
+
+        for phrase in (
+            "Schema v10",
+            "build-v3-facts",
+            "E:\\StockMcp",
+            "行业 JSON 随发布包提供",
+            "v0.3-policy-1",
+            "v0.3-policy-2",
+            "supersedes_version",
+            "v0.2-proposed",
+            "regime_policy",
+            "727 个交易日",
+            "60 个交易日",
+            "outcome_hash",
+            "不自动创建提案、不自动认证、不自动激活",
+            "原子",
+            "superseded",
+            "历史保留",
+            "备份",
+            "readyz",
+            "外部门禁",
+        ):
+            self.assertIn(phrase, published)
 
     def test_release_contains_one_command_install_surface(self) -> None:
         required = {

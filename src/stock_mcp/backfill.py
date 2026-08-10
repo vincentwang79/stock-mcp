@@ -6,6 +6,7 @@ import socket
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from time import monotonic, sleep
 from typing import Any, Protocol
 
@@ -13,6 +14,7 @@ from .domain import MarketSnapshot, Security
 from .providers.metadata import normalize_baostock_trading_calendar
 from .providers.normalization import ProviderNormalizationError, _parse_date
 from .providers.runtime import BaoStockTradingCalendar, TushareDailyProvider
+from .v3_facts import build_v3_facts as _build_v3_facts
 
 TUSHARE_SOURCE = "tushare"
 MAX_BACKFILL_DAYS = 1_100
@@ -23,6 +25,25 @@ MAX_RETRY_BACKOFF_SECONDS = 30.0
 BAOSTOCK_SOCKET_TIMEOUT_SECONDS = 30.0
 MAX_BAOSTOCK_UNIVERSE_ATTEMPTS = 3
 MAX_TUSHARE_RECENT_PROBE_LOOKBACK_DAYS = 10
+
+
+def build_v3_facts(
+    *,
+    database: Any,
+    industry_json_path: Path | str,
+    source: str,
+    start: date,
+    end: date,
+) -> dict[str, object]:
+    """Thin local-only entry point for rebuilding recorded v3 facts."""
+
+    return _build_v3_facts(
+        database=database,
+        industry_json_path=industry_json_path,
+        source=source,
+        start=start,
+        end=end,
+    )
 
 
 class TradingCalendar(Protocol):

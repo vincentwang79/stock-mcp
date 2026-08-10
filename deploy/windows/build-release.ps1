@@ -38,6 +38,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $repo 'src') -Destination (Join-Path $app 'src') -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $repo 'pyproject.toml') -Destination (Join-Path $app 'pyproject.toml') -Force
     Copy-Item -LiteralPath (Join-Path $repo 'README.md') -Destination (Join-Path $app 'README.md') -Force
+    Copy-Item -LiteralPath (Join-Path $repo 'a_share_mainboard_code_name.json') -Destination (Join-Path $app 'a_share_mainboard_code_name.json') -Force
     Copy-Item -LiteralPath $lock -Destination (Join-Path $app 'uv.lock') -Force
     Copy-Item -LiteralPath $ToolsManifest -Destination (Join-Path $releaseRoot 'tools-manifest.json') -Force
     $tools = Join-Path $releaseRoot 'tools'

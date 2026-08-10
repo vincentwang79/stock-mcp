@@ -45,6 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "backup",
             "restore",
             "backfill",
+            "build-v3-facts",
             "approve-strategy",
             "serve",
         ),
@@ -56,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--version")
     parser.add_argument("--start", type=date.fromisoformat)
     parser.add_argument("--end", type=date.fromisoformat)
+    parser.add_argument("--industry-json", type=Path)
     args = parser.parse_args(argv)
     settings = Settings.load(root=args.root)
 
@@ -146,6 +148,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"published={len(result.published_dates)} incomplete={len(result.incomplete_dates)}"
         )
         return 0 if not result.incomplete_dates else 2
+
+    if args.command == "build-v3-facts":
+        from .backfill import build_v3_facts
+        from .storage import Database
+
+        if args.start is None or args.end is None:
+            parser.error("build-v3-facts requires --start and --end")
+        industry_json = args.industry_json or (
+            settings.root / "current" / "a_share_mainboard_code_name.json"
+        )
+        database = Database(settings.database_path)
+        database.initialize()
+        report = build_v3_facts(
+            database=database,
+            industry_json_path=industry_json,
+            source="tushare",
+            start=args.start,
+            end=args.end,
+        )
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 0 if report.get("ready") is True else 2
 
     if args.command == "approve-strategy":
         from .storage import Database

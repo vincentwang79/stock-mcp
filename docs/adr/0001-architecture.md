@@ -10,6 +10,8 @@
 - 每个已发布日报只能绑定一个价格源。
 - MCP 只绑定本机回环地址，通过 Secure MCP Tunnel 私有访问。
 - Windows 通过一个发布 ZIP、PowerShell 安装器和两个 WinSW 服务部署。
+- v3 研究事实在本机 SQLite 中以 Schema v10 不可变保存；`build-v3-facts` 只读取已记录日线和随发布包提供的行业 JSON，不访问实时网络。
+- v3 策略激活依赖 727 个交易日回放、60 个交易日预热、异步 outcome 证据、主机一次性批准和用户明确确认；v3 取代 v0.2 时以原子事务写入 `superseded`，历史证据保留。
 
 ## 测试边界
 

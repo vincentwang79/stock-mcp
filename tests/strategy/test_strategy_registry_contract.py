@@ -38,7 +38,7 @@ class StrategyRegistryContractTest(unittest.TestCase):
         stored = registry.propose(version_two)
 
         self.assertEqual(2, stored.parameters["rule_engine_version"])
-        with self.assertRaisesRegex(ValueError, "rule_engine_version.*out of range"):
+        with self.assertRaisesRegex(ValueError, "v3 strategy parameters"):
             registry.propose(
                 replace(
                     _proposal(version="v0.3-proposed"),

@@ -129,6 +129,21 @@ def _review_result(review: DailyReview) -> dict[str, object]:
                 "candidate_id": candidate.candidate_id,
                 "symbol": candidate.symbol,
                 "score": candidate.score,
+                "setup_type": candidate.setup_type.value,
+                "confirmation_condition": candidate.confirmation_condition,
+                "invalidation_condition": candidate.invalidation_condition,
+                "industry_evidence": {
+                    evidence.metric: evidence.value
+                    for evidence in candidate.evidence
+                    if evidence.metric
+                    in {
+                        "industry",
+                        "industry_strength_bps",
+                        "classification_mode",
+                        "classification_as_of",
+                        "classification_mapping_sha256",
+                    }
+                },
                 "evidence": [
                     {
                         "metric": evidence.metric,

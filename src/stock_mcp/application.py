@@ -98,11 +98,18 @@ def _review(
 
 
 def _strategy(strategy: StrategyVersion) -> dict[str, Any]:
-    return {
+    result = {
         "version": strategy.version,
         "status": strategy.status,
         "parameters": dict(strategy.parameters),
     }
+    lifecycle = getattr(strategy, "lifecycle", None)
+    superseded_by = getattr(strategy, "superseded_by", None)
+    if lifecycle is not None:
+        result["lifecycle"] = lifecycle
+    if superseded_by is not None:
+        result["superseded_by"] = superseded_by
+    return result
 
 
 def _condition_threshold(condition: str, *, expected: str) -> tuple[str, int] | None:
@@ -397,14 +404,28 @@ class StockMcpApplication:
                 "strategy_comparison_invalid",
                 "strategy comparison requires distinct strategy versions",
             )
-        if self._get_strategy(left_version) is None:
+        left_strategy = self._get_strategy(left_version)
+        right_strategy = self._get_strategy(right_version)
+        if left_strategy is None:
             return _error("strategy_version_not_found", "left strategy version does not exist")
-        if self._get_strategy(right_version) is None:
+        if right_strategy is None:
             return _error("strategy_version_not_found", "right strategy version does not exist")
         if self._replay is None:
             return _error("replay_unavailable", "strategy replay is unavailable")
         try:
-            comparison = self._replay.compare(left_version, right_version, start, end)
+            persisted_compare = getattr(self._replay, "compare_completed_replays", None)
+            if (
+                callable(persisted_compare)
+                and (
+                    left_version.startswith("v3")
+                    or left_strategy.parameters.get("rule_engine_version") == 3
+                    or right_version.startswith("v3")
+                    or right_strategy.parameters.get("rule_engine_version") == 3
+                )
+            ):
+                comparison = persisted_compare(left_version, right_version, start, end)
+            else:
+                comparison = self._replay.compare(left_version, right_version, start, end)
         except ValueError as error:
             return _error("strategy_comparison_invalid", str(error))
         return _ok(dict(comparison))
@@ -514,9 +535,15 @@ class StockMcpApplication:
         parameters: Mapping[str, Any],
         idempotency_key: str,
         rationale: str | None = None,
+        supersedes_version: str | None = None,
     ) -> Result:
         operation = "create_strategy_proposal"
-        request = {"version": version, "parameters": dict(parameters), "rationale": rationale}
+        request = {
+            "version": version,
+            "parameters": dict(parameters),
+            "rationale": rationale,
+            "supersedes_version": supersedes_version,
+        }
         persistent = self._load_persistent_write(operation, idempotency_key, request)
         if persistent is not None:
             return persistent
@@ -530,8 +557,39 @@ class StockMcpApplication:
             return self._strategy_write_results[cache_key]
         try:
             validated = validate_strategy_parameters(parameters)
+            if version in {"v0.3-policy-1", "v0.3-policy-2"}:
+                from .v3 import v3_proposal_parameters
+
+                expected_policy = 1 if version.endswith("-1") else 2
+                if dict(validated) != v3_proposal_parameters(expected_policy):
+                    raise ValueError(
+                        f"{version} is reserved for the frozen v3 policy template"
+                    )
             strategy = StrategyVersion(version=version, status="proposed", parameters=validated)
-            persisted = self._strategy_registry.propose(strategy)
+            if supersedes_version is not None:
+                if self._get_strategy(supersedes_version) is None:
+                    raise ValueError("superseded strategy version does not exist")
+                atomic_propose = getattr(
+                    self._strategy_registry, "propose_with_relation", None
+                )
+                if callable(atomic_propose):
+                    persisted = atomic_propose(
+                        strategy, supersedes_version=supersedes_version
+                    )
+                else:
+                    relation_writer = getattr(
+                        self._repository, "save_strategy_version_relation", None
+                    )
+                    if not callable(relation_writer):
+                        raise ValueError("strategy version relations are unavailable")
+                    persisted = self._strategy_registry.propose(strategy)
+                    relation_writer(
+                        predecessor=supersedes_version,
+                        successor=version,
+                        relation="supersedes",
+                    )
+            else:
+                persisted = self._strategy_registry.propose(strategy)
         except ValueError as error:
             result = _error("strategy_proposal_rejected", str(error))
         else:

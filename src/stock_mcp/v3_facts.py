@@ -1,0 +1,318 @@
+"""Rebuild immutable v3 facts exclusively from recorded local evidence."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+from .domain import (
+    DailyPriceLimit,
+    IndustryClassificationReference,
+    MarketSnapshot,
+    V3BreadthFacts,
+    V3MarketInput,
+    V3SecurityInput,
+)
+from .industry import load_industry_reference
+from .v3 import adjusted_close_chain, derive_daily_price_limit
+
+
+def load_v3_market_input(
+    database: Any,
+    target: date,
+    *,
+    source: str,
+    prior_history_sessions: int = 60,
+) -> V3MarketInput:
+    """Load one complete v3 input from locally persisted v10 facts and price history."""
+
+    if prior_history_sessions != 60:
+        raise ValueError("v3 requires exactly sixty prior history sessions")
+    snapshot = database.load_market_snapshot(
+        target, source=source, history_limit=prior_history_sessions + 1
+    )
+    recorded_prior_dates = tuple(
+        database.load_expected_trading_days(
+            target - timedelta(days=180), target - timedelta(days=1), source=source
+        )
+    )
+    prior_dates = recorded_prior_dates[-prior_history_sessions:]
+    if len(prior_dates) != prior_history_sessions:
+        raise ValueError("v3 input does not contain sixty recorded prior market sessions")
+    limits = database.load_daily_price_limits(target, source=source)
+    features = database.load_v3_snapshot_features(target, source=source)
+    if not limits or not features:
+        raise ValueError("v3 facts have not been built for the target date")
+    bars_by_symbol: dict[str, list[Any]] = {}
+    for bar in snapshot.bars:
+        if bar.trade_date > target or bar.source != source:
+            raise ValueError("v3 input contains future or mixed-source bars")
+        bars_by_symbol.setdefault(bar.symbol, []).append(bar)
+    security_inputs: list[V3SecurityInput] = []
+    industries: dict[str, str] = {}
+    standard: str | None = None
+    mode: str | None = None
+    classification_as_of: date | None = None
+    mapping_hash: str | None = None
+    eligible_count = 0
+    advance_count = 0
+    ma20_eligible_count = 0
+    above_ma20_count = 0
+    for security in snapshot.securities:
+        bars = sorted(bars_by_symbol.get(security.symbol, ()), key=lambda item: item.trade_date)
+        target_bars = [bar for bar in bars if bar.trade_date == target]
+        if len(target_bars) != 1:
+            raise ValueError(f"v3 target bar is missing for {security.symbol}")
+        prior = tuple(bar for bar in bars if bar.trade_date < target)
+        fact = limits.get(security.symbol)
+        feature = features.get(security.symbol)
+        if not isinstance(fact, Mapping) or not isinstance(feature, Mapping):
+            raise ValueError(f"v3 persisted facts are missing for {security.symbol}")
+        limit = DailyPriceLimit(
+            symbol=security.symbol,
+            trade_date=target,
+            up_limit_1e4=int(fact["limit_up_1e4"]),
+            down_limit_1e4=int(fact["limit_down_1e4"]),
+            touched_up=bool(fact["touched_up"]),
+            touched_down=bool(fact["touched_down"]),
+            policy_exception=bool(fact["policy_exception"]),
+            algorithm=str(fact["algorithm"]),
+        )
+        industry = str(feature.get("industry") or "unavailable")
+        industries[security.symbol] = industry
+        standard = _same_metadata(standard, feature.get("industry_standard"), "standard")
+        mode = _same_metadata(mode, feature.get("industry_mode"), "mode")
+        raw_as_of = feature.get("industry_as_of")
+        parsed_as_of = None if raw_as_of is None else date.fromisoformat(str(raw_as_of))
+        if classification_as_of is not None and parsed_as_of != classification_as_of:
+            raise ValueError("v3 industry as-of metadata conflicts within the snapshot")
+        classification_as_of = classification_as_of or parsed_as_of
+        mapping_hash = _same_metadata(
+            mapping_hash, feature.get("industry_mapping_sha256"), "mapping hash"
+        )
+        target_bar = target_bars[0]
+        item = V3SecurityInput(security, prior, target_bar, limit, industry)
+        security_inputs.append(item)
+        basic_eligible = (
+            security.board == "MAIN"
+            and not security.is_st
+            and (target - security.list_date).days >= 180
+            and tuple(bar.trade_date for bar in prior) == prior_dates
+            and not limit.policy_exception
+        )
+        if not basic_eligible:
+            continue
+        eligible_count += 1
+        if target_bar.close_1e4 > target_bar.pre_close_1e4:
+            advance_count += 1
+        adjusted = adjusted_close_chain(prior, target_bar)
+        if len(adjusted) >= 20:
+            ma20_eligible_count += 1
+            ma20 = sum(adjusted[-20:]) / 20
+            if adjusted[-1] > ma20:
+                above_ma20_count += 1
+    if not eligible_count:
+        raise ValueError("v3 market breadth has no eligible main-board securities")
+    coverage_bps = ma20_eligible_count * 10_000 // eligible_count
+    if coverage_bps < 9_700:
+        raise ValueError("v3 ma20 coverage is below 9700 bps")
+    if standard is None or mode is None or classification_as_of is None or mapping_hash is None:
+        raise ValueError("v3 industry reference metadata is incomplete")
+    reference = IndustryClassificationReference(
+        classification_standard=standard,
+        classification_mode=mode,
+        classification_as_of=classification_as_of,
+        classification_mapping_sha256=mapping_hash,
+        industries=industries,
+    )
+    return V3MarketInput(
+        trade_date=target,
+        source=source,
+        source_timestamp=snapshot.source_timestamp,
+        prior_dates=prior_dates,
+        securities=tuple(security_inputs),
+        breadth=V3BreadthFacts(
+            advance_count=advance_count,
+            eligible_count=eligible_count,
+            above_ma20_count=above_ma20_count,
+            ma20_eligible_count=ma20_eligible_count,
+            advance_ratio_bps=advance_count * 10_000 // eligible_count,
+            above_ma20_ratio_bps=above_ma20_count * 10_000 // ma20_eligible_count,
+        ),
+        industry_reference=reference,
+    )
+
+
+def _same_metadata(current: str | None, value: object, label: str) -> str:
+    resolved = str(value or "").strip()
+    if not resolved:
+        raise ValueError(f"v3 industry {label} is missing")
+    if current is not None and current != resolved:
+        raise ValueError(f"v3 industry {label} conflicts within the snapshot")
+    return resolved
+
+
+def build_v3_facts(
+    *,
+    database: Any,
+    industry_json_path: Path | str,
+    source: str,
+    start: date,
+    end: date,
+) -> dict[str, object]:
+    """Derive v3 evidence from existing SQLite snapshots without altering them."""
+
+    if end < start:
+        raise ValueError("v3 facts range is invalid")
+    if not source:
+        raise ValueError("v3 facts require a recorded source")
+    reference = load_industry_reference(industry_json_path)
+    expected_dates = tuple(database.load_expected_trading_days(start, end, source=source))
+    snapshot_dates = tuple(database.load_market_snapshot_dates(start, end, source=source))
+    snapshot_date_set = set(snapshot_dates)
+    expected_date_set = set(expected_dates)
+    data_gap_dates = tuple(day for day in expected_dates if day not in snapshot_date_set)
+    unexpected_snapshot_dates = tuple(
+        day for day in snapshot_dates if day not in expected_date_set
+    )
+    price_limits_written = 0
+    snapshot_features_written = 0
+    limit_policy_exceptions = 0
+    classified_symbols: set[str] = set()
+    observed_symbols: set[str] = set()
+    unavailable: set[str] = set()
+    for trade_date in snapshot_dates:
+        snapshot = database.load_market_snapshot(trade_date, source=source, history_limit=1)
+        limits, features, day_unavailable = _facts_for_snapshot(snapshot, reference.industries)
+        limit_policy_exceptions += sum(
+            bool(fact["policy_exception"])
+            for fact in limits.values()
+            if isinstance(fact, Mapping)
+        )
+        observed_symbols.update(features)
+        classified_symbols.update(
+            symbol
+            for symbol, feature in features.items()
+            if isinstance(feature, Mapping) and feature.get("industry") != "unavailable"
+        )
+        persisted_features = {
+            symbol: {
+                **feature,
+                "industry_standard": reference.standard,
+                "industry_mode": reference.mode,
+                "industry_as_of": None if reference.as_of is None else reference.as_of.isoformat(),
+                "industry_mapping_sha256": reference.mapping_sha256,
+            }
+            for symbol, feature in features.items()
+        }
+        _reject_conflicting_facts(
+            database.load_daily_price_limits(trade_date, source=source),
+            limits,
+            "daily price-limit",
+        )
+        _reject_conflicting_facts(
+            database.load_v3_snapshot_features(trade_date, source=source),
+            persisted_features,
+            "v3 snapshot-feature",
+        )
+        price_limits_written += database.save_daily_price_limits(
+            trade_date=trade_date, source=source, limits=limits
+        )
+        snapshot_features_written += database.save_v3_snapshot_features(
+            trade_date=trade_date,
+            source=source,
+            features=persisted_features,
+        )
+        unavailable.update(day_unavailable)
+    calendar_available = bool(expected_dates)
+    warmup_count = min(60, len(expected_dates)) if calendar_available else 0
+    fixed_governance_range = (start, end) == (date(2023, 8, 8), date(2026, 8, 7))
+    expected_coverage_valid = not fixed_governance_range or len(expected_dates) == 727
+    return {
+        "source": source,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "ready": (
+            calendar_available
+            and not data_gap_dates
+            and not unexpected_snapshot_dates
+            and expected_coverage_valid
+        ),
+        "calendar_available": calendar_available,
+        "expected_coverage_valid": expected_coverage_valid,
+        "expected_dates": tuple(day.isoformat() for day in expected_dates),
+        "processed_dates": tuple(day.isoformat() for day in snapshot_dates),
+        "data_gap_dates": tuple(day.isoformat() for day in data_gap_dates),
+        "unexpected_snapshot_dates": tuple(
+            day.isoformat() for day in unexpected_snapshot_dates
+        ),
+        "warmup_dates": warmup_count,
+        "assessable_dates": max(0, len(expected_dates) - warmup_count),
+        "price_limits_written": price_limits_written,
+        "snapshot_features_written": snapshot_features_written,
+        "limit_policy_exceptions": limit_policy_exceptions,
+        "industry_classified_symbols": len(classified_symbols),
+        "industry_observed_symbols": len(observed_symbols),
+        "industry_unavailable_symbols": tuple(sorted(unavailable)),
+    }
+
+
+def _reject_conflicting_facts(existing: object, expected: object, name: str) -> None:
+    if existing and existing != expected:
+        raise ValueError(f"{name} facts are immutable; conflicting batch")
+
+
+def _facts_for_snapshot(
+    snapshot: MarketSnapshot, industries: Mapping[str, str]
+) -> tuple[dict[str, object], dict[str, object], tuple[str, ...]]:
+    trade_date = snapshot.trade_date
+    source = snapshot.source
+    securities = {security.symbol: security for security in snapshot.securities}
+    target_bars = tuple(
+        bar
+        for bar in snapshot.bars
+        if bar.trade_date == trade_date
+    )
+    if (
+        len(target_bars) != len(securities)
+        or {bar.symbol for bar in target_bars} != set(securities)
+    ):
+        raise ValueError("recorded market snapshot has incomplete target-day bars")
+    if any(bar.source != source for bar in target_bars):
+        raise ValueError("recorded market snapshot has mixed price sources")
+    limits: dict[str, object] = {}
+    features: dict[str, object] = {}
+    unavailable: list[str] = []
+    for bar in sorted(target_bars, key=lambda item: item.symbol):
+        limit = derive_daily_price_limit(bar, securities[bar.symbol])
+        industry = industries.get(bar.symbol, "unavailable")
+        if industry == "unavailable":
+            unavailable.append(bar.symbol)
+        limits[bar.symbol] = {
+            "algorithm": limit.algorithm,
+            "limit_down_1e4": limit.down_limit_1e4,
+            "limit_up_1e4": limit.up_limit_1e4,
+            "policy_exception": limit.policy_exception,
+            "touched_down": limit.touched_down,
+            "touched_up": limit.touched_up,
+        }
+        features[bar.symbol] = {
+            "industry": industry,
+            "industry_group": None if industry == "unavailable" else industry,
+            "price_limit_state": _price_limit_state(limit),
+        }
+    return limits, features, tuple(unavailable)
+
+
+def _price_limit_state(limit: DailyPriceLimit) -> str:
+    if limit.policy_exception:
+        return "policy_exception"
+    if limit.touched_up and limit.touched_down:
+        return "limit_up_and_down"
+    if limit.touched_up:
+        return "limit_up"
+    if limit.touched_down:
+        return "limit_down"
+    return "none"

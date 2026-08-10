@@ -63,6 +63,8 @@ class StrategyVersion:
     version: str
     status: str
     parameters: Mapping[str, Any]
+    lifecycle: str | None = None
+    superseded_by: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,3 +99,70 @@ class DailyReview:
     strategy_version: str
     market_regime: MarketRegime
     candidates: tuple[Candidate, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IndustryClassificationReference:
+    """Versioned, retrospective industry labels used only by rule engine v3."""
+
+    classification_standard: str
+    classification_mode: str
+    classification_as_of: date
+    classification_mapping_sha256: str
+    industries: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class DailyPriceLimit:
+    """One derived main-board price-limit fact, expressed in 1e4 yuan units."""
+
+    symbol: str
+    trade_date: date
+    up_limit_1e4: int
+    down_limit_1e4: int
+    touched_up: bool
+    touched_down: bool
+    policy_exception: bool
+    algorithm: str
+
+
+@dataclass(frozen=True, slots=True)
+class V3SecurityInput:
+    """Point-in-time facts for exactly one v3 security evaluation."""
+
+    security: Security
+    prior_bars: tuple[DailyBar, ...]
+    target_bar: DailyBar
+    price_limit: DailyPriceLimit
+    industry: str
+
+
+@dataclass(frozen=True, slots=True)
+class V3BreadthFacts:
+    advance_count: int
+    eligible_count: int
+    above_ma20_count: int
+    ma20_eligible_count: int
+    advance_ratio_bps: int
+    above_ma20_ratio_bps: int
+
+
+@dataclass(frozen=True, slots=True)
+class V3MarketInput:
+    """Immutable input boundary for the v3 rule engine."""
+
+    trade_date: date
+    source: str
+    source_timestamp: datetime
+    prior_dates: tuple[date, ...]
+    securities: tuple[V3SecurityInput, ...]
+    breadth: V3BreadthFacts
+    industry_reference: IndustryClassificationReference
+    pipeline_version: str = "pipeline-v0.2"
+    input_hash_schema: str = "v3-input-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class EligibilityDecision:
+    eligible: bool
+    reason: str

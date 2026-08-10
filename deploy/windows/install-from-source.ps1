@@ -15,7 +15,7 @@ function Get-GitText([Parameter(Mandatory = $true)][string[]] $Arguments) {
 }
 
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot)
-foreach ($required in @('src', 'pyproject.toml', 'uv.lock', 'README.md', 'deploy\windows\tools-manifest.json')) {
+foreach ($required in @('src', 'pyproject.toml', 'uv.lock', 'README.md', 'a_share_mainboard_code_name.json', 'deploy\windows\tools-manifest.json')) {
     if (-not (Test-Path -LiteralPath (Join-Path $SourceRoot $required))) {
         throw "Source checkout is incomplete: missing $required"
     }
@@ -56,6 +56,7 @@ try {
     foreach ($name in @('pyproject.toml', 'README.md', 'uv.lock')) {
         Copy-Item -LiteralPath (Join-Path $SourceRoot $name) -Destination (Join-Path $app $name) -Force
     }
+    Copy-Item -LiteralPath (Join-Path $SourceRoot 'a_share_mainboard_code_name.json') -Destination (Join-Path $app 'a_share_mainboard_code_name.json') -Force
     Copy-Item -LiteralPath (Join-Path $sourceWindows 'tools-manifest.json') -Destination (Join-Path $releaseRoot 'tools-manifest.json') -Force
 
     $tools = Join-Path $releaseRoot 'tools'

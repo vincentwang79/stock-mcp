@@ -130,6 +130,7 @@ class CreateStrategyProposalInput(_IdempotentWrite):
     version: str = Field(min_length=1, max_length=80)
     parameters: dict[str, Any] = Field(default_factory=dict)
     rationale: str = Field(min_length=1, max_length=4_000)
+    supersedes_version: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class ActivateStrategyVersionInput(_IdempotentWrite):
@@ -236,6 +237,8 @@ class StrategyVersionOutput(_Dto):
     version: str
     status: str
     parameters: dict[str, int]
+    lifecycle: str | None = None
+    superseded_by: str | None = None
 
 
 class StrategyVersionsData(_Dto):
@@ -296,15 +299,57 @@ class ReviewNoteResult(_Dto):
     error: ToolError | None = None
 
 
+class IndustryEvidenceOutput(_Dto):
+    standard: str | None = None
+    bucket: str | None = None
+    industry: str | None = None
+    industry_strength_bps: int | str | None = None
+    classification_mode: str | None = None
+    classification_as_of: date | None = None
+    classification_mapping_sha256: str | None = None
+
+
+class CandidateOutcomeOutput(_Dto):
+    availability: Literal["complete", "partial", "unavailable"]
+    path_status: Literal["confirmed", "invalidated", "pending", "unavailable"]
+    return_5d_bps: int | None = None
+    return_10d_bps: int | None = None
+    return_20d_bps: int | None = None
+    benchmark_return_5d_bps: int | None = None
+    benchmark_return_10d_bps: int | None = None
+    benchmark_return_20d_bps: int | None = None
+    excess_return_5d_bps: int | None = None
+    excess_return_10d_bps: int | None = None
+    excess_return_20d_bps: int | None = None
+    mfe_20d_bps: int | None = None
+    mae_20d_bps: int | None = None
+    first_confirmation_date: date | None = None
+    first_invalidation_date: date | None = None
+
+
+class CandidateOutcomeRecordOutput(CandidateOutcomeOutput):
+    candidate_id: str
+
+
+class StrategyReplayOutcomeOutput(_Dto):
+    candidates: list[CandidateOutcomeRecordOutput]
+
+
 class ReplayCandidateOutput(_Dto):
     candidate_id: str
     symbol: str
     score: int
     evidence: list[EvidenceOutput]
+    setup_type: str | None = None
+    confirmation_condition: str | None = None
+    invalidation_condition: str | None = None
+    industry_evidence: IndustryEvidenceOutput | None = None
+    outcome: CandidateOutcomeOutput | None = None
 
 
 class ReplayReviewOutput(_Dto):
-    market_regime: str
+    warmup: bool = False
+    market_regime: str | None = None
     candidates: list[ReplayCandidateOutput]
 
 
@@ -323,6 +368,7 @@ class StrategyComparisonData(_Dto):
     left_candidate_count: int
     right_candidate_count: int
     daily: list[ReplayDayOutput]
+    result_hash_schema: str | None = None
 
 
 class StrategyComparisonResult(_Dto):
@@ -361,6 +407,19 @@ class StrategyReplayOutput(_Dto):
     created_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    pipeline_version: str | None = None
+    input_hash: str | None = None
+    input_hash_schema: str | None = None
+    result_hash_schema: str | None = None
+    outcome_hash_schema: str | None = None
+    warmup_sessions: int | None = Field(default=None, ge=0)
+    outcome_status: ReplayStatus | None = None
+    outcome: StrategyReplayOutcomeOutput | None = None
+    outcome_hash: str | None = None
+    industry_classification_standard: str | None = None
+    industry_classification_mode: str | None = None
+    industry_classification_as_of: date | None = None
+    industry_mapping_sha256: str | None = None
 
 
 class StrategyReplayResult(_Dto):
@@ -387,6 +446,13 @@ class StrategyReplayDayOutput(_Dto):
     output_hash: str | None = None
     market_regime: str | None = None
     candidates: list[ReplayCandidateOutput] = Field(default_factory=list)
+    pipeline_version: str | None = None
+    input_hash_schema: str | None = None
+    result_hash_schema: str | None = None
+    industry_classification_standard: str | None = None
+    industry_classification_mode: str | None = None
+    industry_classification_as_of: date | None = None
+    industry_mapping_sha256: str | None = None
 
 
 class StrategyReplayDaysData(_Dto):

@@ -1,6 +1,6 @@
 # Stock MCP Windows Server 部署手册
 
-本项目采用原生 Windows x64 部署，不要求 Docker、WSL、Node、系统 Python 或独立数据库服务器。MCP 进程只监听 `127.0.0.1:8765/mcp`；Secure MCP Tunnel 作为独立服务，仅建立出站 HTTPS 连接，因此不需要配置入站防火墙规则。发布 ZIP 安装不需要 Git；本手册的首选“源码直接安装”方式需要 Git。
+本项目采用原生 Windows x64 部署，不要求 Docker、WSL、Git、Node、系统 Python 或独立数据库服务器。MCP 进程只监听 `127.0.0.1:8765/mcp`；Secure MCP Tunnel 作为独立服务，仅建立出站 HTTPS 连接，因此不需要配置入站防火墙规则。正式服务器的默认入口是可信发布 ZIP 中的一条 `install.ps1` 命令；密钥配置仍单独进行安全交互，不能合并为命令行参数。下文“源码直接安装”只适用于已受控 Git 工作区的维护升级，不是无 Git 服务器的前置条件。
 
 所有安装和运维操作都必须遵守仓库根目录的[项目基本规则](../../GROUND_RULES.md)。
 
@@ -16,7 +16,7 @@ git clone https://github.com/vincentwang79/stock-mcp.git E:\code\stock-mcp
 cd E:\code\stock-mcp
 ```
 
-## 源码直接安装（推荐）
+## 源码直接安装（已有受控 Git 工作区时）
 
 从普通 PowerShell 先打开管理员窗口：
 
@@ -147,15 +147,17 @@ Tunnel 服务使用官方 `tunnel-client run --config ...` 流程。YAML 配置�
 
 ## 策略激活
 
-策略激活设有主机侧批准门禁。提案版本必须先在完整三年交易日历上完成逐日向前回放，前 20 个交易日只用于预热。回放认证证明会永久保留，绑定版本的参数哈希、数据集哈希、结果哈希、日期范围和会话数；激活只消费一次性主机批准，不会删除证明。
+策略激活设有主机侧批准门禁。v3 提案必须先以本机研究事实完成完整三年交易日历的逐日向前回放；固定范围 `2023-08-08` 至 `2026-08-07` 为 727 个交易日，前 60 个交易日仅预热，第 61 日才可产生候选证据。候选回放完成后还要异步计算 outcome；认证证明永久保留，绑定参数哈希、数据集哈希、结果哈希、`outcome_hash`、日期范围和会话数。激活只消费一次性主机批准，不会删除证明。
 
-规则引擎 v1 会在行业分类可用时把行业强度计入分数。由于当前三年历史数据中的行业分类覆盖不完整，已经回放和认证的 `v0.1-proposed` 只作为审计记录保留，不得批准或激活。规则引擎 v2 仍将行业强度作为解释性证据返回，但无论该值可用与否，其评分贡献都固定为 0，因此不会因行业标签覆盖差异改变候选排名。创建 `v0.2-proposed` 时应复制已经确认的其他阈值，只把 `rule_engine_version` 改为 `2`，然后重新完成下面的全部治理流程。
+规则引擎 v3 的行业分类、涨跌停和快照特征不是在线临时查询：行业 JSON 随发布包提供，在 `E:\StockMcp\current\a_share_mainboard_code_name.json` 可用；`build-v3-facts` 只读取它和本机 SQLite 中已记录的同源日线。行业事实仅用于可追溯解释，缺失必须显示为 `unavailable`，不能编造行业或改变候选分数、排名和数量。
+
+本轮只记录 `v0.3-policy-1` 和 `v0.3-policy-2` 两个待审阅模板；**不自动创建提案、不自动认证、不自动激活**。两者创建时都必须显式给出 `supersedes_version="v0.2-proposed"`，且各自使用新的、无密钥的幂等键。两者共同参数为：`rule_engine_version=3`、`offensive_min_bps=5500`、`defensive_max_bps=4000`、中性配额 `1/1`、进攻配额 `2/1`、`min_median_amount_fen=5000000000`、流动性/趋势窗口 `20/60`、回踩参数 `20/1200/350/10000`、突破参数 `60/20/15000`、近期涨停窗口 `5` 以及 `required_warmup_sessions=60`。两者唯一差异是 `regime_policy`：policy-1 为 `1`（中性 1+1、防御为零），policy-2 为 `2`（使用进攻 2+1 配额）。每个版本必须独立回放、审阅、认证，不能复用另一个版本或 v0.2 的证明。
 
 `compare_strategy_versions` 仅供纯只读研究对照。它要求两个不同版本；同版本比较被拒绝，不启动回放、不写入任何作业或证明，不能作为激活依据。
 
-### Git 更新后的首次治理回放（ChatGPT 发起）
+### 升级后的 v3 事实构建与治理回放（人工发起）
 
-Git 更新后，先以管理员 PowerShell 更新受控源码安装。已有安装会进入带备份和回滚的更新路径，并在切换服务前自动执行 Schema v9 数据库迁移；不要手工编辑 SQLite 或跳过迁移。
+Git 更新后，先以管理员 PowerShell 更新受控源码安装。已有安装会进入带备份和回滚的更新路径，并在切换服务前自动执行 Schema v10 数据库迁移；不要手工编辑 SQLite 或跳过迁移。
 
 ```powershell
 cd E:\code\stock-mcp
@@ -163,23 +165,34 @@ git pull --ff-only
 .\deploy\windows\install-from-source.ps1 -InstallRoot E:\StockMcp
 ```
 
-随后在已连接到本机 MCP 的 ChatGPT 中，按下列顺序发起**首次**候选策略的治理回放；每一次写调用使用新的、可追溯但不含密钥的幂等键。
+随后先在 Windows 主机上执行离线事实构建；这一步成功只是事实就绪，**不是**提案、回放、认证或激活。
 
-1. 先调用 `list_strategy_versions` 读取旧提案参数，再调用 `create_strategy_proposal` 创建 `v0.2-proposed`：复制 v0.1 的全部阈值，只把 `rule_engine_version` 改为 `2`，并使用新的幂等键。不得修改或覆盖 `v0.1-proposed`。
-2. 调用 `start_strategy_replay`，传入 `v0.2-proposed`、`start_date="2023-08-08"`、`end_date="2026-08-07"` 与新的幂等键。成功只表示持久化作业已进入 `queued` 或 `running`，不表示回放、审阅或认证已通过。
-3. 用返回的 `replay_id` 按需调用 `get_strategy_replay` 查看 `queued`、`running`、`completed` 或 `failed` 状态、会话进度、摘要、哈希和错误；无需也不得要求 ChatGPT 持续轮询。用 `get_strategy_replay_days` 审阅逐日证据时，以 `after_trade_date` 传入上一页最后日期，并设置受限 `limit`，直至覆盖全部已处理日期。抽查时必须确认行业强度仍可作为证据读取，但其 `score_contribution` 始终为 `0`。
-4. 只有状态为 `completed`、完整交易日历与逐日证据均经人工审阅后，才调用 `certify_strategy_replay`，并明确传入 `confirmed=true` 和幂等键。认证失败或覆盖不足时停止，保留证据并排查数据/环境，不得补造结果。
+```powershell
+& 'E:\StockMcp\current\.venv\Scripts\stock-mcp.exe' build-v3-facts `
+  --root E:\StockMcp `
+  --start 2023-08-08 `
+  --end 2026-08-07
+```
+
+命令报告任一数据缺口、行业 JSON 缺失、不可变事实冲突或非零退出码时，停止后续流程，保留报告、备份和现有历史；不得手工改库或跳过失败门禁。
+
+只有用户明确要求后，才在已连接到本机 MCP 的 ChatGPT 中按下列顺序处理某一个 v0.3 提案；每一次写调用使用新的、可追溯但不含密钥的幂等键。
+
+1. 调用 `create_strategy_proposal` 创建 `v0.3-policy-1` 或 `v0.3-policy-2`，给出上文完整参数、理由和 `supersedes_version="v0.2-proposed"`。不得修改或覆盖 v0.2。
+2. 调用 `start_strategy_replay`，传入所创建的版本、`start_date="2023-08-08"`、`end_date="2026-08-07"` 与新的幂等键。成功只表示持久化作业已进入 `queued` 或 `running`，不表示回放、审阅或认证已通过。
+3. 用返回的 `replay_id` 按需调用 `get_strategy_replay` 查看 `queued`、`running`、`completed` 或 `failed` 状态、727 个交易日的会话进度、输入/结果/结果证据哈希和错误；无需也不得要求 ChatGPT 持续轮询。用 `get_strategy_replay_days` 审阅逐日证据时，以 `after_trade_date` 传入上一页最后日期，并设置受限 `limit`，确认前 60 个交易日都标为预热，并审阅候选与 outcome 状态。
+4. 只有候选作业为 `completed`、727 个交易日完整、异步 outcome 为完成状态并已有 `outcome_hash`，且逐日证据经人工审阅后，才调用 `certify_strategy_replay`，并明确传入 `confirmed=true` 和幂等键。认证失败或覆盖不足时停止，保留证据并排查数据/环境，不得补造结果。
 5. 认证成功后，管理员在本机运行下列命令，并在提示中再次完整键入同一版本号：
 
 ```powershell
-stock-mcp approve-strategy `
+& 'E:\StockMcp\current\.venv\Scripts\stock-mcp.exe' approve-strategy `
   --root E:\StockMcp `
-  --version v0.2-proposed
+  --version v0.3-policy-1
 ```
 
-6. 最后才由用户在 ChatGPT 调用 `activate_strategy_version`，显式传入 `confirmed=true`、`version="v0.2-proposed"` 和新的幂等键。该确认不能替代上一步主机批准；批准与已保存参数哈希绑定、只能消费一次，也不能通过 MCP 创建。
+6. 最后才由用户在 ChatGPT 调用 `activate_strategy_version`，显式传入 `confirmed=true`、所认证的版本和新的幂等键。该确认不能替代上一步主机批准；批准与已保存参数哈希绑定、只能消费一次，也不能通过 MCP 创建。成功时活动指针切换和 v0.2 的 `superseded` 状态以原子事务写入；v0.2 的日报、候选、回放和证明仍历史保留。
 
-上述日期范围和流程是操作说明，不是已完成的环境验收。真实 Windows Server 上该范围的 727 个交易日回放、MCP 审阅、认证和激活仍为**外部门禁**：在目标主机、目标数据源、受控服务身份与实际 ChatGPT 工作区连接中完成并保留证据前，任何人不得将其描述为已验证或已认证。
+上述日期范围和流程是操作说明，不是已完成的环境验收。真实 Windows Server 上该范围的 727 个交易日事实构建、回放、outcome 审阅、MCP 审阅、认证和激活仍为**外部门禁**：在目标主机、目标数据源、受控服务身份与实际 ChatGPT 工作区连接中完成并保留证据前，任何人不得将其描述为已验证或已认证。
 
 ## 升级、恢复与卸载
 

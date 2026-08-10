@@ -38,6 +38,11 @@ def validate_strategy_parameters(
 ) -> dict[str, int]:
     """Return a plain validated strategy map with a closed set of integer keys."""
 
+    if parameters.get("rule_engine_version") == 3:
+        from .v3 import validate_v3_parameters
+
+        return validate_v3_parameters(parameters, require_complete=require_complete)
+
     unknown = sorted(set(parameters) - set(_PARAMETER_RANGES))
     if unknown:
         raise ValueError("unsupported strategy parameters: " + ", ".join(unknown))
@@ -120,6 +125,19 @@ class DatabaseStrategyRegistry:
         self._database.save_strategy_version(stored)
         return self.get(stored.version)
 
+    def propose_with_relation(
+        self, strategy: StrategyVersion, *, supersedes_version: str
+    ) -> StrategyVersion:
+        if strategy.status != "proposed":
+            raise ValueError("only proposed strategy versions can be registered")
+        parameters = validate_strategy_parameters(strategy.parameters)
+        stored = replace(strategy, parameters=deepcopy(parameters))
+        writer = getattr(self._database, "save_strategy_proposal_with_relation", None)
+        if not callable(writer):
+            raise ValueError("atomic strategy version relations are unavailable")
+        writer(stored, predecessor=supersedes_version)
+        return self.get(stored.version)
+
     def activate(self, version: str, *, confirmed: bool) -> StrategyVersion:
         if not confirmed:
             raise ValueError("strategy activation requires explicit confirmation")
@@ -141,6 +159,8 @@ class DatabaseStrategyRegistry:
             authorization = atomic_activate(version, parameters_hash)
             if authorization == "replay_attestation_required":
                 raise ValueError("replay attestation is required for strategy activation")
+            if authorization == "replay_outcome_required":
+                raise ValueError("replay outcome evidence is required for strategy activation")
             if authorization != "ok":
                 raise ValueError("operator approval is required for strategy activation")
             return replace(
@@ -170,7 +190,17 @@ class DatabaseStrategyRegistry:
         if strategy is None:
             raise KeyError(f"unknown strategy version: {version}")
         status = "active" if version == self.active_version else strategy.status
-        return replace(strategy, status=status, parameters=_freeze_mapping(strategy.parameters))
+        lifecycle_loader = getattr(self._database, "get_strategy_lifecycle_state", None)
+        superseded_loader = getattr(self._database, "get_strategy_superseded_by", None)
+        lifecycle = lifecycle_loader(version) if callable(lifecycle_loader) else status
+        superseded_by = superseded_loader(version) if callable(superseded_loader) else None
+        return replace(
+            strategy,
+            status=status,
+            parameters=_freeze_mapping(strategy.parameters),
+            lifecycle=lifecycle,
+            superseded_by=superseded_by,
+        )
 
     def list_versions(self) -> tuple[StrategyVersion, ...]:
         return tuple(

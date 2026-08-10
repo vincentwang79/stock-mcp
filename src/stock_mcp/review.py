@@ -30,6 +30,13 @@ def generate_daily_review(
         return _generate_daily_review_v1(snapshot, strategy)
     if engine_version == 2:
         return _generate_daily_review_v2(snapshot, strategy)
+    if engine_version == 3:
+        from .domain import V3MarketInput
+        from .v3 import generate_v3_daily_review
+
+        if not isinstance(snapshot, V3MarketInput):
+            raise ValueError("rule engine v3 requires a V3MarketInput")
+        return generate_v3_daily_review(snapshot, strategy)
     raise ValueError("unsupported rule_engine_version")
 
 
