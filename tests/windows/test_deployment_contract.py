@@ -12,6 +12,46 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertTrue(path.is_file(), f"missing deployment artifact: {path}")
         return path.read_text(encoding="utf-8")
 
+    def test_governance_replay_docs_describe_the_durable_mcp_and_windows_gates(self) -> None:
+        """Published Chinese docs keep the replay governance boundary auditable."""
+        root = ROOT
+        strategy = (root / "docs" / "task-specs" / "02-strategy-replay.md").read_text(
+            encoding="utf-8"
+        )
+        workflow = (root / "docs" / "task-specs" / "03-mcp-workflow.md").read_text(
+            encoding="utf-8"
+        )
+        windows = self._read_required("README-WINDOWS.md")
+
+        for tool in (
+            "start_strategy_replay",
+            "get_strategy_replay",
+            "list_strategy_replays",
+            "get_strategy_replay_days",
+            "certify_strategy_replay",
+        ):
+            self.assertIn(tool, workflow)
+        for phrase in (
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "after_trade_date",
+            "分页",
+            "证明永久保留",
+            "同版本",
+            "纯只读",
+        ):
+            self.assertIn(phrase, strategy + workflow)
+        self.assertIn("Schema v9", strategy + workflow + windows)
+        self.assertIn("2023-08-08", windows)
+        self.assertIn("2026-08-07", windows)
+        self.assertIn("certify_strategy_replay", windows)
+        self.assertIn("approve-strategy", windows)
+        self.assertIn("activate_strategy_version", windows)
+        self.assertIn("外部门禁", windows)
+        self.assertNotIn("727日回放已验证", windows)
+
     def test_release_contains_one_command_install_surface(self) -> None:
         required = {
             "install.ps1",
@@ -191,11 +231,13 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("[AllowEmptyString()][string] $Value", configure)
         self.assertIn("return [Security.SecureString]::new()", configure)
         self.assertIn(
-            "ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'HttpsProxy' -Optional)",
+            "ConvertTo-ConfigurationSecureString "
+            "(Get-ConfigurationText $configuration 'HttpsProxy' -Optional)",
             configure,
         )
         self.assertIn(
-            "ConvertTo-ConfigurationSecureString (Get-ConfigurationText $configuration 'CustomCaFilePath' -Optional)",
+            "ConvertTo-ConfigurationSecureString "
+            "(Get-ConfigurationText $configuration 'CustomCaFilePath' -Optional)",
             configure,
         )
 
@@ -520,7 +562,10 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         )
         self.assertIn("Set-UpdateState 'configuration_required'", update)
         self.assertLess(
-            update.index("if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready')"),
+            update.index(
+                "if ($doctorStatus -eq 'configuration_required' "
+                "-or $configurationState -ne 'ready')"
+            ),
             update.index("Start-Service -Name StockMcpService"),
         )
 
@@ -534,7 +579,10 @@ class WindowsDeploymentContractTest(unittest.TestCase):
             update,
         )
         self.assertLess(
-            update.index("if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready')"),
+            update.index(
+                "if ($doctorStatus -eq 'configuration_required' "
+                "-or $configurationState -ne 'ready')"
+            ),
             update.index("Start-Service -Name StockMcpService"),
         )
 

@@ -141,25 +141,30 @@ class HistoricalReplayComparisonContractTest(unittest.TestCase):
                     <= candidate["evidence"][0].keys()
                 )
 
-    def test_sparse_calendar_cannot_create_an_activation_attestation(self) -> None:
+    def test_comparison_of_distinct_versions_is_read_only_for_a_sparse_calendar(self) -> None:
         start = date(2023, 1, 1)
         expected_dates = tuple(
             start + timedelta(days=round(offset * 1_095 / 599)) for offset in range(600)
         )
         snapshots = tuple(_snapshot(day) for day in expected_dates if day != expected_dates[200])
         repository = _GovernanceRepository(snapshots, expected_dates)
-        strategy = _strategy()
+        left = _strategy()
+        right = StrategyVersion(
+            version="v0.2-proposed", status="proposed", parameters=left.parameters
+        )
 
-        HistoricalReplayService(repository, _StrategiesByVersion((strategy,))).compare(
-            strategy.version,
-            strategy.version,
+        service = HistoricalReplayService(repository, _StrategiesByVersion((left, right)))
+        comparison = service.compare(
+            left.version,
+            right.version,
             start,
             expected_dates[-1],
         )
 
+        self.assertEqual(len(snapshots), comparison["days_compared"])
         self.assertEqual([], repository.attestations)
 
-    def test_complete_calendar_binds_attestation_to_the_replayed_dataset(self) -> None:
+    def test_complete_calendar_produces_a_single_version_governance_replay(self) -> None:
         start = date(2023, 1, 1)
         expected_dates = tuple(
             start + timedelta(days=round(offset * 1_095 / 599)) for offset in range(600)
@@ -168,18 +173,17 @@ class HistoricalReplayComparisonContractTest(unittest.TestCase):
         repository = _GovernanceRepository(snapshots, expected_dates)
         strategy = _strategy()
 
-        comparison = HistoricalReplayService(repository, _StrategiesByVersion((strategy,))).compare(
-            strategy.version, strategy.version, start, expected_dates[-1]
-        )
+        service = HistoricalReplayService(repository, _StrategiesByVersion((strategy,)))
+        replay = service.replay_for_governance(strategy.version, start, expected_dates[-1])
 
-        self.assertEqual(580, comparison["days_compared"], "first 20 sessions are warm-up")
-        self.assertEqual(2, len(repository.attestations))
-        for attestation in repository.attestations:
-            self.assertEqual(strategy.version, attestation[0])
-            self.assertEqual(64, len(attestation[2]), "attestation must bind a dataset hash")
-            self.assertEqual(start, attestation[3])
-            self.assertEqual(expected_dates[-1], attestation[4])
-            self.assertEqual(580, attestation[5])
+        self.assertEqual(580, replay["days_replayed"], "first 20 sessions are warm-up")
+        self.assertEqual(
+            tuple(date.fromisoformat(day) for day in replay["snapshot_dates"]), expected_dates
+        )
+        for name in ("parameters_hash", "dataset_hash", "result_hash"):
+            with self.subTest(name=name):
+                self.assertRegex(replay[name], r"^[0-9a-f]{64}$")
+        self.assertEqual([], repository.attestations)
 
 
 class _RecordedSnapshotRepository:

@@ -23,6 +23,11 @@ EXPECTED_TOOL_NAMES = frozenset(
         "compare_strategy_versions",
         "create_strategy_proposal",
         "activate_strategy_version",
+        "start_strategy_replay",
+        "get_strategy_replay",
+        "list_strategy_replays",
+        "get_strategy_replay_days",
+        "certify_strategy_replay",
     }
 )
 
@@ -36,6 +41,9 @@ READ_TOOL_NAMES = frozenset(
         "get_review_history",
         "list_strategy_versions",
         "compare_strategy_versions",
+        "get_strategy_replay",
+        "list_strategy_replays",
+        "get_strategy_replay_days",
     }
 )
 WRITE_TOOL_NAMES = EXPECTED_TOOL_NAMES - READ_TOOL_NAMES

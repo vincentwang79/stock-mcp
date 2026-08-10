@@ -96,6 +96,24 @@ def _review() -> DailyReview:
 
 
 class DatabaseContractTest(unittest.TestCase):
+    def test_newer_database_schema_is_rejected_before_any_ddl_mutation(self) -> None:
+        future = Path(self.temp_dir.name) / "future.sqlite3"
+        with sqlite3.connect(future) as connection:
+            connection.execute("CREATE TABLE future_only(value TEXT)")
+            connection.execute("PRAGMA user_version = 10")
+
+        with self.assertRaisesRegex(ValueError, "newer|version"):
+            Database(future).initialize()
+
+        with sqlite3.connect(future) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        self.assertEqual({"future_only"}, tables)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -134,7 +152,7 @@ class DatabaseContractTest(unittest.TestCase):
         with sqlite3.connect(legacy_path) as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(idempotent_writes)")}
             self.assertIn("request_hash", columns)
-            self.assertEqual(8, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(9, connection.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 "[]",
                 connection.execute(

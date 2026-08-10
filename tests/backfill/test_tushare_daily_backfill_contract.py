@@ -71,8 +71,8 @@ class _SimulatedMonotonicClock:
 
 
 class RecordedStrategyRegistry:
-    def __init__(self, strategies: StrategyVersion) -> None:
-        self._strategies = {strategies.version: strategies}
+    def __init__(self, *strategies: StrategyVersion) -> None:
+        self._strategies = {strategy.version: strategy for strategy in strategies}
 
     def get(self, version: str) -> StrategyVersion:
         return self._strategies[version]
@@ -192,9 +192,14 @@ class TushareDailyBackfillContractTest(unittest.TestCase):
                 stored_dates,
                 TRADING_DAYS,
             )
+            comparison_strategy = StrategyVersion(
+                version="v0.2-proposed",
+                status="proposed",
+                parameters=strategy.parameters,
+            )
             comparison = HistoricalReplayService(
-                database, RecordedStrategyRegistry(strategy)
-            ).compare(strategy.version, strategy.version, START, END)
+                database, RecordedStrategyRegistry(strategy, comparison_strategy)
+            ).compare(strategy.version, comparison_strategy.version, START, END)
 
         self.assertEqual(comparison["days_compared"], len(TRADING_DAYS))
         self.assertEqual(
@@ -231,7 +236,9 @@ class TushareDailyBackfillContractTest(unittest.TestCase):
                     raise AssertionError("backfill presence lookup used the wrong snapshot key")
                 return True
 
-            def load_market_snapshots(self, *_args: object, **_kwargs: object) -> tuple[MarketSnapshot, ...]:
+            def load_market_snapshots(
+                self, *_args: object, **_kwargs: object
+            ) -> tuple[MarketSnapshot, ...]:
                 self.full_snapshot_loads += 1
                 return (_snapshot(START),)
 

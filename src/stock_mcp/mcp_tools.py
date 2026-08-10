@@ -100,6 +100,32 @@ class CompareStrategyVersionsInput(_Dto):
     end: date
 
 
+class StartStrategyReplayInput(_IdempotentWrite):
+    version: str = Field(min_length=1, max_length=80)
+    start_date: date
+    end_date: date
+
+
+class GetStrategyReplayInput(_Dto):
+    replay_id: str = Field(min_length=1, max_length=100)
+
+
+class ListStrategyReplaysInput(_Dto):
+    version: str | None = Field(default=None, min_length=1, max_length=80)
+    limit: int = Field(default=20, ge=1, le=200)
+
+
+class GetStrategyReplayDaysInput(_Dto):
+    replay_id: str = Field(min_length=1, max_length=100)
+    after_trade_date: date | None = None
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class CertifyStrategyReplayInput(_IdempotentWrite):
+    replay_id: str = Field(min_length=1, max_length=100)
+    confirmed: bool
+
+
 class CreateStrategyProposalInput(_IdempotentWrite):
     version: str = Field(min_length=1, max_length=80)
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -305,6 +331,75 @@ class StrategyComparisonResult(_Dto):
     error: ToolError | None = None
 
 
+ReplayStatus = Literal["queued", "running", "completed", "failed"]
+
+
+class StrategyReplaySummaryOutput(_Dto):
+    sessions: int | None = Field(default=None, ge=0)
+    reviewed_sessions: int | None = Field(default=None, ge=0)
+    total_candidates: int | None = Field(default=None, ge=0)
+    zero_candidate_days: int | None = Field(default=None, ge=0)
+    max_candidates_per_day: int | None = Field(default=None, ge=0)
+
+
+class StrategyReplayOutput(_Dto):
+    replay_id: str
+    version: str
+    start_date: date
+    end_date: date
+    status: ReplayStatus
+    certified: bool = False
+    source: str | None = None
+    parameters_hash: str | None = None
+    dataset_hash: str | None = None
+    result_hash: str | None = None
+    expected_session_count: int | None = Field(default=None, ge=0)
+    processed_sessions: int | None = Field(default=None, ge=0)
+    next_trade_date: date | None = None
+    summary: StrategyReplaySummaryOutput | None = None
+    error: str | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class StrategyReplayResult(_Dto):
+    ok: bool
+    data: StrategyReplayOutput | None = None
+    error: ToolError | None = None
+
+
+class StrategyReplayListData(_Dto):
+    replays: list[StrategyReplayOutput]
+
+
+class StrategyReplayListResult(_Dto):
+    ok: bool
+    data: StrategyReplayListData | None = None
+    error: ToolError | None = None
+
+
+class StrategyReplayDayOutput(_Dto):
+    trade_date: date
+    status: Literal["completed"]
+    warmup: bool = False
+    input_hash: str | None = None
+    output_hash: str | None = None
+    market_regime: str | None = None
+    candidates: list[ReplayCandidateOutput] = Field(default_factory=list)
+
+
+class StrategyReplayDaysData(_Dto):
+    replay_id: str
+    days: list[StrategyReplayDayOutput]
+
+
+class StrategyReplayDaysResult(_Dto):
+    ok: bool
+    data: StrategyReplayDaysData | None = None
+    error: ToolError | None = None
+
+
 class StrategyVersionResult(_Dto):
     ok: bool
     data: StrategyVersionOutput | None = None
@@ -409,6 +504,11 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         ("get_review_history", GetReviewHistoryInput, True, False, False),
         ("list_strategy_versions", ListStrategyVersionsInput, True, False, False),
         ("compare_strategy_versions", CompareStrategyVersionsInput, True, False, False),
+        ("start_strategy_replay", StartStrategyReplayInput, False, False, False),
+        ("get_strategy_replay", GetStrategyReplayInput, True, False, False),
+        ("list_strategy_replays", ListStrategyReplaysInput, True, False, False),
+        ("get_strategy_replay_days", GetStrategyReplayDaysInput, True, False, False),
+        ("certify_strategy_replay", CertifyStrategyReplayInput, False, False, False),
         ("create_strategy_proposal", CreateStrategyProposalInput, False, False, False),
         ("activate_strategy_version", ActivateStrategyVersionInput, False, True, False),
     )
@@ -426,6 +526,11 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         "get_review_history": GetReviewHistoryResult,
         "list_strategy_versions": ListStrategyVersionsResult,
         "compare_strategy_versions": StrategyComparisonResult,
+        "start_strategy_replay": StrategyReplayResult,
+        "get_strategy_replay": StrategyReplayResult,
+        "list_strategy_replays": StrategyReplayListResult,
+        "get_strategy_replay_days": StrategyReplayDaysResult,
+        "certify_strategy_replay": StrategyReplayResult,
         "create_strategy_proposal": StrategyVersionResult,
         "activate_strategy_version": StrategyVersionResult,
     }

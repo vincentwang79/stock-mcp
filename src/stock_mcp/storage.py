@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from stock_mcp.domain import (
     Candidate,
@@ -28,7 +29,7 @@ from stock_mcp.domain import (
     StrategyVersion,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class IdempotencyKeyReuseError(ValueError):
@@ -56,6 +57,14 @@ class Database:
         return connection
 
     def initialize(self) -> None:
+        if self.path.exists():
+            with sqlite3.connect(self.path) as existing:
+                version = int(existing.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                raise ValueError(
+                    f"database schema version {version} is newer than supported "
+                    f"version {SCHEMA_VERSION}"
+                )
         with self.connect() as connection:
             connection.executescript(
                 """
@@ -181,6 +190,50 @@ class Database:
                     parameters_hash TEXT NOT NULL,
                     recorded_at TEXT NOT NULL,
                     FOREIGN KEY (version) REFERENCES strategy_versions(version)
+                );
+
+                CREATE TABLE IF NOT EXISTS strategy_replay_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    strategy_version TEXT NOT NULL,
+                    parameters_hash TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    expected_sessions_json TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+                    dataset_hash TEXT,
+                    result_hash TEXT,
+                    summary_json TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    FOREIGN KEY (strategy_version) REFERENCES strategy_versions(version)
+                );
+
+                CREATE TABLE IF NOT EXISTS strategy_replay_days (
+                    job_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    output_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    PRIMARY KEY (job_id, trade_date),
+                    FOREIGN KEY (job_id) REFERENCES strategy_replay_jobs(job_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS strategy_replay_attestations (
+                    strategy_version TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL UNIQUE,
+                    parameters_hash TEXT NOT NULL,
+                    dataset_hash TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    session_count INTEGER NOT NULL,
+                    certified_at TEXT NOT NULL,
+                    FOREIGN KEY (strategy_version) REFERENCES strategy_versions(version),
+                    FOREIGN KEY (job_id) REFERENCES strategy_replay_jobs(job_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -433,57 +486,91 @@ class Database:
     ) -> tuple[MarketSnapshot, ...]:
         if end < start:
             raise ValueError("snapshot replay range is invalid")
+        return tuple(
+            self.load_market_snapshot(day, source=source, history_limit=history_limit)
+            for day in self.load_market_snapshot_dates(start, end, source=source)
+        )
+
+    def load_market_snapshot_dates(
+        self, start: date, end: date, *, source: str = "tushare"
+    ) -> tuple[date, ...]:
+        if end < start:
+            raise ValueError("snapshot replay range is invalid")
         with self.connect() as connection:
-            meta = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT trade_date, source_timestamp, advance_ratio_bps, above_ma20_ratio_bps
+                SELECT trade_date
                 FROM market_snapshots
                 WHERE source = ? AND trade_date BETWEEN ? AND ? ORDER BY trade_date
                 """,
                 (source, start.isoformat(), end.isoformat()),
             ).fetchall()
-            snapshots: list[MarketSnapshot] = []
-            for row in meta:
-                target = date.fromisoformat(row[0])
-                security_rows = connection.execute(
-                    """
-                    SELECT symbol, name, exchange, board, list_date, industry, is_st
-                    FROM snapshot_securities
-                    WHERE trade_date = ? AND source = ? ORDER BY symbol
-                    """,
-                    (row[0], source),
-                ).fetchall()
-                securities = tuple(
-                    Security(
-                        symbol=item[0],
-                        name=item[1],
-                        exchange=item[2],
-                        board=item[3],
-                        list_date=date.fromisoformat(item[4]),
-                        industry=item[5],
-                        is_st=bool(item[6]),
-                    )
-                    for item in security_rows
+        return tuple(date.fromisoformat(str(row[0])) for row in rows)
+
+    def load_market_snapshot(
+        self, target: date, *, source: str = "tushare", history_limit: int = 60
+    ) -> MarketSnapshot:
+        if history_limit < 1:
+            raise ValueError("snapshot history limit must be positive")
+        with self.connect() as connection:
+            meta = connection.execute(
+                """
+                SELECT source_timestamp, advance_ratio_bps, above_ma20_ratio_bps
+                FROM market_snapshots WHERE trade_date = ? AND source = ?
+                """,
+                (target.isoformat(), source),
+            ).fetchone()
+            if meta is None:
+                raise ValueError(f"market snapshot does not exist: {target.isoformat()}")
+            security_rows = connection.execute(
+                """
+                SELECT symbol, name, exchange, board, list_date, industry, is_st
+                FROM snapshot_securities
+                WHERE trade_date = ? AND source = ? ORDER BY symbol
+                """,
+                (target.isoformat(), source),
+            ).fetchall()
+            bar_rows = connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT b.symbol, b.trade_date, b.open_1e4, b.high_1e4, b.low_1e4,
+                           b.close_1e4, b.pre_close_1e4, b.volume_shares, b.amount_fen,
+                           b.source, b.source_timestamp,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY b.symbol ORDER BY b.trade_date DESC
+                           ) AS history_rank
+                    FROM daily_bars AS b
+                    JOIN snapshot_securities AS s
+                      ON s.symbol = b.symbol AND s.trade_date = ? AND s.source = ?
+                    WHERE b.source = ? AND b.trade_date <= ?
                 )
-                bars = tuple(
-                    bar
-                    for security in securities
-                    for bar in self.load_symbol_history(
-                        security.symbol, end_date=target, source=source, limit=history_limit
-                    )
-                )
-                snapshots.append(
-                    MarketSnapshot(
-                        trade_date=target,
-                        source=source,
-                        source_timestamp=datetime.fromisoformat(row[1]),
-                        securities=securities,
-                        bars=bars,
-                        advance_ratio_bps=int(row[2]),
-                        above_ma20_ratio_bps=int(row[3]),
-                    )
-                )
-        return tuple(snapshots)
+                SELECT symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4,
+                       pre_close_1e4, volume_shares, amount_fen, source, source_timestamp
+                FROM ranked WHERE history_rank <= ? ORDER BY trade_date, symbol
+                """,
+                (target.isoformat(), source, source, target.isoformat(), history_limit),
+            ).fetchall()
+        securities = tuple(
+            Security(
+                symbol=row[0],
+                name=row[1],
+                exchange=row[2],
+                board=row[3],
+                list_date=date.fromisoformat(row[4]),
+                industry=row[5],
+                is_st=bool(row[6]),
+            )
+            for row in security_rows
+        )
+        return MarketSnapshot(
+            trade_date=target,
+            source=source,
+            source_timestamp=datetime.fromisoformat(str(meta[0])),
+            securities=securities,
+            bars=tuple(self._daily_bar_from_row(row) for row in bar_rows),
+            advance_ratio_bps=int(meta[1]),
+            above_ma20_ratio_bps=int(meta[2]),
+        )
 
     def save_expected_trading_days(self, source: str, days: Iterable[date]) -> None:
         """Persist the provider calendar used to judge historical coverage."""
@@ -551,6 +638,487 @@ class Database:
             StrategyVersion(version=row[0], status=row[1], parameters=json.loads(row[2]))
             for row in rows
         )
+
+    def create_strategy_replay_job(
+        self,
+        *,
+        strategy_version: str,
+        parameters_hash: str,
+        source: str,
+        start_date: date,
+        end_date: date,
+        expected_sessions: Iterable[date],
+        idempotency_key: str | None = None,
+    ) -> dict[str, object]:
+        """Create one durable replay attempt over an immutable strategy and calendar."""
+
+        strategy = self.load_strategy_version(strategy_version)
+        if strategy is None:
+            raise ValueError(f"unknown strategy version: {strategy_version}")
+        if strategy.status != "proposed":
+            raise ValueError("only a proposed strategy version can start a governance replay")
+        self._validate_sha256(parameters_hash, "parameters")
+        stored_hash = hashlib.sha256(self._json(strategy.parameters).encode("utf-8")).hexdigest()
+        if stored_hash != parameters_hash:
+            raise ValueError("strategy replay parameters hash does not match the stored version")
+        if not source or end_date < start_date:
+            raise ValueError("strategy replay range is invalid")
+        sessions = tuple(expected_sessions)
+        if (
+            not sessions
+            or sessions != tuple(sorted(set(sessions)))
+            or sessions[0] < start_date
+            or sessions[-1] > end_date
+        ):
+            raise ValueError("strategy replay expected sessions are invalid")
+        operation = "strategy:start_strategy_replay"
+        request = {
+            "version": strategy_version,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        }
+        request_hash = self._request_hash(operation, request)
+        context = self._idempotent_write_connection() if idempotency_key else self.connect()
+        job_id = f"replay-{uuid4().hex}"
+        with context as connection:
+            if idempotency_key:
+                cached = self._idempotent_result(
+                    connection, operation, idempotency_key, request_hash
+                )
+                if cached is not None:
+                    job_id = str(cached["job_id"])
+                    job = self.get_strategy_replay_job(job_id)
+                    if job is None:  # pragma: no cover - protected by the same database
+                        raise RuntimeError("idempotent strategy replay job disappeared")
+                    return job
+            connection.execute(
+                """
+                INSERT INTO strategy_replay_jobs(
+                    job_id, strategy_version, parameters_hash, source,
+                    start_date, end_date, expected_sessions_json, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+                """,
+                (
+                    job_id,
+                    strategy_version,
+                    parameters_hash,
+                    source,
+                    start_date.isoformat(),
+                    end_date.isoformat(),
+                    self._json([session.isoformat() for session in sessions]),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            if idempotency_key:
+                self._save_idempotent_result(
+                    connection,
+                    operation,
+                    idempotency_key,
+                    request_hash,
+                    {"job_id": job_id},
+                )
+        job = self.get_strategy_replay_job(job_id)
+        if job is None:  # pragma: no cover - the INSERT above is authoritative
+            raise RuntimeError("strategy replay job was not persisted")
+        return job
+
+    def get_strategy_replay_job(self, job_id: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT job_id, strategy_version, parameters_hash, source,
+                       start_date, end_date, expected_sessions_json, status,
+                       dataset_hash, result_hash, summary_json, error,
+                       created_at, started_at, completed_at
+                FROM strategy_replay_jobs WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            completed_dates = {
+                str(item[0])
+                for item in connection.execute(
+                    "SELECT trade_date FROM strategy_replay_days WHERE job_id = ?",
+                    (job_id,),
+                ).fetchall()
+            }
+            certified = connection.execute(
+                "SELECT 1 FROM strategy_replay_attestations WHERE job_id = ?",
+                (job_id,),
+            ).fetchone() is not None
+        return self._strategy_replay_job(row, completed_dates, certified)
+
+    def bind_strategy_replay_start_idempotency(
+        self,
+        job_id: str,
+        *,
+        strategy_version: str,
+        start_date: date,
+        end_date: date,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        """Bind a deduplicated replay result to a request key without creating another job."""
+
+        operation = "strategy:start_strategy_replay"
+        request = {
+            "version": strategy_version,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        }
+        request_hash = self._request_hash(operation, request)
+        with self._idempotent_write_connection() as connection:
+            cached = self._idempotent_result(
+                connection, operation, idempotency_key, request_hash
+            )
+            if cached is None:
+                if connection.execute(
+                    "SELECT 1 FROM strategy_replay_jobs WHERE job_id = ?", (job_id,)
+                ).fetchone() is None:
+                    raise ValueError(f"unknown strategy replay job: {job_id}")
+                self._save_idempotent_result(
+                    connection,
+                    operation,
+                    idempotency_key,
+                    request_hash,
+                    {"job_id": job_id},
+                )
+            else:
+                job_id = str(cached["job_id"])
+        job = self.get_strategy_replay_job(job_id)
+        if job is None:  # pragma: no cover
+            raise RuntimeError("idempotent strategy replay job disappeared")
+        return job
+
+    def list_strategy_replay_jobs(
+        self, *, version: str | None = None, limit: int = 20
+    ) -> tuple[dict[str, object], ...]:
+        if not 1 <= limit <= 200:
+            raise ValueError("strategy replay list limit is invalid")
+        query = "SELECT job_id FROM strategy_replay_jobs"
+        values: tuple[object, ...]
+        if version is None:
+            values = (limit,)
+        else:
+            query += " WHERE strategy_version = ?"
+            values = (version, limit)
+        query += " ORDER BY created_at DESC, job_id DESC LIMIT ?"
+        with self.connect() as connection:
+            rows = connection.execute(query, values).fetchall()
+        jobs = tuple(self.get_strategy_replay_job(str(row[0])) for row in rows)
+        return tuple(job for job in jobs if job is not None)
+
+    def get_next_runnable_strategy_replay_job(self) -> dict[str, object] | None:
+        """Return the running job, or the oldest queued job, without terminal-job starvation."""
+
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT job_id FROM strategy_replay_jobs
+                WHERE status IN ('running', 'queued')
+                ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,
+                         created_at, job_id
+                LIMIT 1
+                """
+            ).fetchone()
+        return None if row is None else self.get_strategy_replay_job(str(row[0]))
+
+    def save_strategy_replay_day(
+        self,
+        job_id: str,
+        *,
+        trade_date: date,
+        input_hash: str,
+        output_hash: str,
+        result: object,
+    ) -> dict[str, object]:
+        self._validate_sha256(input_hash, "input")
+        self._validate_sha256(output_hash, "output")
+        result_json = self._json(result)
+        with self._idempotent_write_connection() as connection:
+            job = connection.execute(
+                "SELECT expected_sessions_json, status FROM strategy_replay_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if job is None:
+                raise ValueError(f"unknown strategy replay job: {job_id}")
+            if job[1] in {"completed", "failed"}:
+                raise ValueError("strategy replay job is terminal")
+            expected = tuple(json.loads(str(job[0])))
+            if trade_date.isoformat() not in expected:
+                raise ValueError("strategy replay day is outside the expected calendar")
+            existing = connection.execute(
+                """
+                SELECT input_hash, output_hash, result_json FROM strategy_replay_days
+                WHERE job_id = ? AND trade_date = ?
+                """,
+                (job_id, trade_date.isoformat()),
+            ).fetchone()
+            values = (input_hash, output_hash, result_json)
+            if existing is not None:
+                if existing != values:
+                    raise ValueError("strategy replay day is immutable; conflicting result")
+            else:
+                completed = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT trade_date FROM strategy_replay_days WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchall()
+                }
+                next_expected = next(
+                    (session for session in expected if session not in completed), None
+                )
+                if trade_date.isoformat() != next_expected:
+                    raise ValueError("strategy replay day must be the next expected session")
+                connection.execute(
+                    """
+                    INSERT INTO strategy_replay_days(
+                        job_id, trade_date, input_hash, output_hash, result_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (job_id, trade_date.isoformat(), *values),
+                )
+            connection.execute(
+                """
+                UPDATE strategy_replay_jobs SET status = 'running',
+                    started_at = COALESCE(started_at, ?)
+                WHERE job_id = ?
+                """,
+                (datetime.now(UTC).isoformat(), job_id),
+            )
+        return {
+            "job_id": job_id,
+            "trade_date": trade_date,
+            "status": "completed",
+            "input_hash": input_hash,
+            "output_hash": output_hash,
+            "result": json.loads(result_json),
+        }
+
+    def list_strategy_replay_days(
+        self,
+        job_id: str,
+        *,
+        after_trade_date: date | None = None,
+        limit: int | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        if limit is not None and not 1 <= limit <= 200:
+            raise ValueError("strategy replay day limit is invalid")
+        query = """
+            SELECT trade_date, input_hash, output_hash, result_json
+            FROM strategy_replay_days WHERE job_id = ?
+        """
+        values: list[object] = [job_id]
+        if after_trade_date is not None:
+            query += " AND trade_date > ?"
+            values.append(after_trade_date.isoformat())
+        query += " ORDER BY trade_date"
+        if limit is not None:
+            query += " LIMIT ?"
+            values.append(limit)
+        with self.connect() as connection:
+            rows = connection.execute(query, tuple(values)).fetchall()
+        return tuple(
+            {
+                "job_id": job_id,
+                "trade_date": date.fromisoformat(str(row[0])),
+                "status": "completed",
+                "input_hash": str(row[1]),
+                "output_hash": str(row[2]),
+                "result": json.loads(str(row[3])),
+            }
+            for row in rows
+        )
+
+    def complete_strategy_replay(
+        self,
+        job_id: str,
+        *,
+        dataset_hash: str,
+        result_hash: str,
+        summary: object,
+    ) -> dict[str, object]:
+        self._validate_sha256(dataset_hash, "dataset")
+        self._validate_sha256(result_hash, "result")
+        summary_json = self._json(summary)
+        with self._idempotent_write_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT expected_sessions_json, status, dataset_hash, result_hash, summary_json
+                FROM strategy_replay_jobs WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown strategy replay job: {job_id}")
+            if row[1] == "failed":
+                raise ValueError("failed strategy replay job is terminal")
+            if row[1] == "completed":
+                if tuple(row[2:]) != (dataset_hash, result_hash, summary_json):
+                    raise ValueError("completed strategy replay evidence is immutable")
+            else:
+                expected = tuple(json.loads(str(row[0])))
+                actual = tuple(
+                    str(item[0])
+                    for item in connection.execute(
+                        """
+                        SELECT trade_date FROM strategy_replay_days
+                        WHERE job_id = ? ORDER BY trade_date
+                        """,
+                        (job_id,),
+                    ).fetchall()
+                )
+                if actual != expected:
+                    raise ValueError("strategy replay is incomplete; expected sessions are missing")
+                connection.execute(
+                    """
+                    UPDATE strategy_replay_jobs SET status = 'completed',
+                        dataset_hash = ?, result_hash = ?, summary_json = ?,
+                        error = NULL, completed_at = ? WHERE job_id = ?
+                    """,
+                    (
+                        dataset_hash,
+                        result_hash,
+                        summary_json,
+                        datetime.now(UTC).isoformat(),
+                        job_id,
+                    ),
+                )
+        completed = self.get_strategy_replay_job(job_id)
+        if completed is None:  # pragma: no cover
+            raise RuntimeError("completed strategy replay disappeared")
+        return completed
+
+    def fail_strategy_replay(self, job_id: str, *, error: str) -> dict[str, object]:
+        if not error:
+            raise ValueError("strategy replay failure requires an error")
+        with self._idempotent_write_connection() as connection:
+            row = connection.execute(
+                "SELECT status, error FROM strategy_replay_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown strategy replay job: {job_id}")
+            if row[0] == "completed":
+                raise ValueError("completed strategy replay job is terminal")
+            if row[0] == "failed" and row[1] != error:
+                raise ValueError("failed strategy replay evidence is immutable")
+            connection.execute(
+                """
+                UPDATE strategy_replay_jobs SET status = 'failed', error = ?, completed_at = ?
+                WHERE job_id = ?
+                """,
+                (error, datetime.now(UTC).isoformat(), job_id),
+            )
+        failed = self.get_strategy_replay_job(job_id)
+        if failed is None:  # pragma: no cover
+            raise RuntimeError("failed strategy replay disappeared")
+        return failed
+
+    def requeue_interrupted_strategy_replays(self) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE strategy_replay_jobs SET status = 'queued' WHERE status = 'running'"
+            )
+            return int(cursor.rowcount)
+
+    def certify_strategy_replay(
+        self, job_id: str, *, idempotency_key: str | None = None
+    ) -> dict[str, object]:
+        job = self.get_strategy_replay_job(job_id)
+        if job is None:
+            raise ValueError(f"unknown strategy replay job: {job_id}")
+        sessions = tuple(job["expected_sessions"])
+        if (
+            job["status"] != "completed"
+            or not 1_095 <= (job["end_date"] - job["start_date"]).days <= 1_100
+            or len(sessions) < 600
+            or job["processed_sessions"] != len(sessions)
+        ):
+            raise ValueError("strategy replay governance coverage is insufficient")
+        values = (
+            job["strategy_version"],
+            job_id,
+            job["parameters_hash"],
+            job["dataset_hash"],
+            job["result_hash"],
+            job["start_date"].isoformat(),
+            job["end_date"].isoformat(),
+            len(sessions),
+        )
+        operation = "strategy:certify_strategy_replay"
+        request = {"replay_id": job_id, "confirmed": True}
+        request_hash = self._request_hash(operation, request)
+        with self._idempotent_write_connection() as connection:
+            if idempotency_key:
+                cached = self._idempotent_result(
+                    connection, operation, idempotency_key, request_hash
+                )
+                if cached is not None:
+                    strategy_version = str(cached["strategy_version"])
+                    attestation = self.get_strategy_replay_attestation(strategy_version)
+                    if attestation is None:  # pragma: no cover
+                        raise RuntimeError("idempotent replay attestation disappeared")
+                    return attestation
+            existing = connection.execute(
+                """
+                SELECT strategy_version, job_id, parameters_hash, dataset_hash,
+                       result_hash, start_date, end_date, session_count
+                FROM strategy_replay_attestations WHERE strategy_version = ?
+                """,
+                (job["strategy_version"],),
+            ).fetchone()
+            if existing is not None and existing != values:
+                raise ValueError("strategy replay attestation is immutable; conflicting proof")
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO strategy_replay_attestations(
+                        strategy_version, job_id, parameters_hash, dataset_hash,
+                        result_hash, start_date, end_date, session_count, certified_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*values, datetime.now(UTC).isoformat()),
+                )
+            if idempotency_key:
+                self._save_idempotent_result(
+                    connection,
+                    operation,
+                    idempotency_key,
+                    request_hash,
+                    {"strategy_version": job["strategy_version"]},
+                )
+        attestation = self.get_strategy_replay_attestation(str(job["strategy_version"]))
+        if attestation is None:  # pragma: no cover
+            raise RuntimeError("strategy replay attestation was not persisted")
+        return attestation
+
+    def get_strategy_replay_attestation(
+        self, strategy_version: str
+    ) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT strategy_version, job_id, parameters_hash, dataset_hash,
+                       result_hash, start_date, end_date, session_count, certified_at
+                FROM strategy_replay_attestations WHERE strategy_version = ?
+                """,
+                (strategy_version,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "strategy_version": str(row[0]),
+            "job_id": str(row[1]),
+            "parameters_hash": str(row[2]),
+            "dataset_hash": str(row[3]),
+            "result_hash": str(row[4]),
+            "start_date": date.fromisoformat(str(row[5])),
+            "end_date": date.fromisoformat(str(row[6])),
+            "session_count": int(row[7]),
+            "certified_at": datetime.fromisoformat(str(row[8])),
+        }
 
     def set_active_strategy_version(self, version: str) -> None:
         if self.load_strategy_version(version) is None:
@@ -668,16 +1236,16 @@ class Database:
     def consume_replay_attestation(self, version: str, parameters_hash: str) -> bool:
         with self._idempotent_write_connection() as connection:
             row = connection.execute(
-                "SELECT parameters_hash, dataset_hash FROM replay_attestations WHERE version = ?",
+                """
+                SELECT parameters_hash, dataset_hash
+                FROM strategy_replay_attestations WHERE strategy_version = ?
+                """,
                 (version,),
             ).fetchone()
-            if row is None or row[0] != parameters_hash or row[1] is None:
-                return False
-            connection.execute("DELETE FROM replay_attestations WHERE version = ?", (version,))
-            return True
+            return not (row is None or row[0] != parameters_hash or row[1] is None)
 
     def consume_strategy_activation_grants(self, version: str, parameters_hash: str) -> str:
-        """Atomically consume the replay proof and operator approval."""
+        """Atomically consume approval while retaining the permanent replay proof."""
 
         with self._idempotent_write_connection() as connection:
             approval = connection.execute(
@@ -687,12 +1255,14 @@ class Database:
             if approval is None or approval[0] != parameters_hash:
                 return "operator_approval_required"
             replay = connection.execute(
-                "SELECT parameters_hash, dataset_hash FROM replay_attestations WHERE version = ?",
+                """
+                SELECT parameters_hash, dataset_hash
+                FROM strategy_replay_attestations WHERE strategy_version = ?
+                """,
                 (version,),
             ).fetchone()
             if replay is None or replay[0] != parameters_hash or replay[1] is None:
                 return "replay_attestation_required"
-            connection.execute("DELETE FROM replay_attestations WHERE version = ?", (version,))
             connection.execute("DELETE FROM strategy_approvals WHERE version = ?", (version,))
             return "ok"
 
@@ -717,8 +1287,8 @@ class Database:
                 return "operator_approval_required"
             replay = connection.execute(
                 """
-                SELECT parameters_hash, dataset_hash FROM replay_attestations
-                WHERE version = ?
+                SELECT parameters_hash, dataset_hash FROM strategy_replay_attestations
+                WHERE strategy_version = ?
                 """,
                 (version,),
             ).fetchone()
@@ -731,7 +1301,6 @@ class Database:
                 """,
                 (version,),
             )
-            connection.execute("DELETE FROM replay_attestations WHERE version = ?", (version,))
             connection.execute("DELETE FROM strategy_approvals WHERE version = ?", (version,))
             return "ok"
 
@@ -1464,6 +2033,46 @@ class Database:
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
+    @staticmethod
+    def _validate_sha256(value: object, label: str) -> None:
+        if not isinstance(value, str) or len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise ValueError(f"strategy replay {label} hash must be lowercase SHA-256")
+
+    @staticmethod
+    def _strategy_replay_job(
+        row: tuple[object, ...], completed_dates: set[str], certified: bool
+    ) -> dict[str, object]:
+        expected = tuple(date.fromisoformat(item) for item in json.loads(str(row[6])))
+        next_trade_date = next(
+            (session for session in expected if session.isoformat() not in completed_dates),
+            None,
+        )
+        return {
+            "job_id": str(row[0]),
+            "replay_id": str(row[0]),
+            "strategy_version": str(row[1]),
+            "version": str(row[1]),
+            "parameters_hash": str(row[2]),
+            "source": str(row[3]),
+            "start_date": date.fromisoformat(str(row[4])),
+            "end_date": date.fromisoformat(str(row[5])),
+            "expected_sessions": expected,
+            "expected_session_count": len(expected),
+            "processed_sessions": len(completed_dates),
+            "next_trade_date": next_trade_date,
+            "status": str(row[7]),
+            "dataset_hash": None if row[8] is None else str(row[8]),
+            "result_hash": None if row[9] is None else str(row[9]),
+            "summary": None if row[10] is None else json.loads(str(row[10])),
+            "error": None if row[11] is None else str(row[11]),
+            "created_at": datetime.fromisoformat(str(row[12])),
+            "started_at": None if row[13] is None else datetime.fromisoformat(str(row[13])),
+            "completed_at": None if row[14] is None else datetime.fromisoformat(str(row[14])),
+            "certified": certified,
+        }
+
     def _migrate(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version > SCHEMA_VERSION:
@@ -1570,6 +2179,53 @@ class Database:
                     PRIMARY KEY (source, trade_date)
                 );
                 PRAGMA user_version = 8;
+                """
+            )
+        if version < 9:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_replay_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    strategy_version TEXT NOT NULL,
+                    parameters_hash TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    expected_sessions_json TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+                    dataset_hash TEXT,
+                    result_hash TEXT,
+                    summary_json TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    FOREIGN KEY (strategy_version) REFERENCES strategy_versions(version)
+                );
+                CREATE TABLE IF NOT EXISTS strategy_replay_days (
+                    job_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    output_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    PRIMARY KEY (job_id, trade_date),
+                    FOREIGN KEY (job_id) REFERENCES strategy_replay_jobs(job_id)
+                );
+                CREATE TABLE IF NOT EXISTS strategy_replay_attestations (
+                    strategy_version TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL UNIQUE,
+                    parameters_hash TEXT NOT NULL,
+                    dataset_hash TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    session_count INTEGER NOT NULL,
+                    certified_at TEXT NOT NULL,
+                    FOREIGN KEY (strategy_version) REFERENCES strategy_versions(version),
+                    FOREIGN KEY (job_id) REFERENCES strategy_replay_jobs(job_id)
+                );
+                PRAGMA user_version = 9;
                 """
             )
 

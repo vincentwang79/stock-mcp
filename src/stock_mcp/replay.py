@@ -15,16 +15,21 @@ def walk_forward(
     strategy: StrategyVersion,
 ) -> tuple[DailyReview, ...]:
     """Generate one review per strictly increasing, point-in-time snapshot."""
-    reviews: list[DailyReview] = []
+    recorded_snapshots = tuple(snapshots)
+    _validate_point_in_time_snapshots(recorded_snapshots)
+    return tuple(generate_daily_review(snapshot, strategy) for snapshot in recorded_snapshots)
+
+
+def _validate_point_in_time_snapshots(snapshots: Iterable[MarketSnapshot]) -> None:
+    """Reject a replay sequence that is unordered or contains a future market fact."""
+
     previous_date = None
     for snapshot in snapshots:
         if previous_date is not None and snapshot.trade_date <= previous_date:
             raise ValueError("walk-forward snapshot dates must be strictly increasing")
         if any(bar.trade_date > snapshot.trade_date for bar in snapshot.bars):
             raise ValueError("walk-forward snapshots must not contain future bars")
-        reviews.append(generate_daily_review(snapshot, strategy))
         previous_date = snapshot.trade_date
-    return tuple(reviews)
 
 
 class HistoricalReplayService:
@@ -34,7 +39,47 @@ class HistoricalReplayService:
         self._database = database
         self._strategies = strategy_registry
 
+    def replay_for_governance(self, version: str, start: date, end: date) -> dict[str, object]:
+        """Replay one immutable strategy over a complete recorded three-year calendar."""
+
+        if not 1_095 <= (end - start).days <= 1_100:
+            raise ValueError("governance replay must cover 1095 to 1100 calendar days")
+        expected_loader = getattr(self._database, "load_expected_trading_days", None)
+        if not callable(expected_loader):
+            raise ValueError("governance replay requires a recorded trading calendar")
+        expected_dates = tuple(expected_loader(start, end, source="tushare"))
+        if len(expected_dates) < 600:
+            raise ValueError("governance replay requires at least 600 expected trading days")
+        snapshots = tuple(self._database.load_market_snapshots(start, end, source="tushare"))
+        snapshot_dates = tuple(snapshot.trade_date for snapshot in snapshots)
+        if snapshot_dates != expected_dates:
+            raise ValueError("governance replay snapshots must exactly match the trading calendar")
+        _validate_point_in_time_snapshots(snapshots)
+
+        strategy = self._strategies.get(version)
+        reviews = walk_forward(snapshots[20:], strategy)
+        daily = [
+            {"trade_date": review.trade_date.isoformat(), **_review_result(review)}
+            for review in reviews
+        ]
+        from .strategy import canonical_strategy_parameters_hash
+
+        result: dict[str, object] = {
+            "strategy_version": version,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "snapshot_dates": [snapshot_date.isoformat() for snapshot_date in snapshot_dates],
+            "days_replayed": len(reviews),
+            "daily": daily,
+            "parameters_hash": canonical_strategy_parameters_hash(strategy.parameters),
+            "dataset_hash": _dataset_hash(snapshots),
+        }
+        result["result_hash"] = _result_hash(daily)
+        return result
+
     def compare(self, left: str, right: str, start: date, end: date) -> dict[str, object]:
+        if left == right:
+            raise ValueError("strategy comparison requires distinct strategy versions")
         if end < start:
             raise ValueError("strategy comparison range is invalid")
         if (end - start).days > 1_100:
@@ -57,7 +102,7 @@ class HistoricalReplayService:
         replay_snapshots = snapshots[20:] if replay_is_governance_grade else snapshots
         left_reviews = walk_forward(replay_snapshots, self._strategies.get(left))
         right_reviews = walk_forward(replay_snapshots, self._strategies.get(right))
-        result = {
+        return {
             "left_version": left,
             "right_version": right,
             "start": start.isoformat(),
@@ -74,23 +119,6 @@ class HistoricalReplayService:
                 for left_review, right_review in zip(left_reviews, right_reviews, strict=True)
             ],
         }
-        record_attestation = getattr(self._database, "record_governance_replay_attestation", None)
-        if callable(record_attestation) and replay_is_governance_grade:
-            from .strategy import canonical_strategy_parameters_hash
-
-            load_strategy = getattr(self._database, "load_strategy_version", None)
-            for version in (left, right):
-                if callable(load_strategy) and load_strategy(version) is None:
-                    continue
-                record_attestation(
-                    version,
-                    canonical_strategy_parameters_hash(self._strategies.get(version).parameters),
-                    _dataset_hash(snapshots),
-                    start,
-                    end,
-                    len(replay_snapshots),
-                )
-        return result
 
 
 def _review_result(review: DailyReview) -> dict[str, object]:
@@ -162,4 +190,11 @@ def _dataset_hash(snapshots: Iterable[MarketSnapshot]) -> str:
             }
         )
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _result_hash(daily: list[dict[str, object]]) -> str:
+    """Hash the complete ordered, structured daily output of one replay."""
+
+    encoded = json.dumps(daily, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

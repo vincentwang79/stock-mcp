@@ -25,7 +25,7 @@ from .application import StockMcpApplication
 from .config import Settings
 from .mcp_server import create_server
 from .production import LazyAKShareQuoteProvider, ProductionPostMarketTask
-from .replay import HistoricalReplayService
+from .replay_jobs import StrategyReplayCoordinator
 from .storage import Database
 from .strategy import DatabaseStrategyRegistry
 
@@ -69,6 +69,7 @@ class ServiceRuntime:
     application: Any
     mcp_server: Any
     scheduler: Any
+    replay_runner: Any | None = None
     listener_started: bool = False
 
 
@@ -94,12 +95,21 @@ def build_runtime(
     initialize()
 
     _configure_scheduler(scheduler, settings.timezone)
+    replay_runner = resolved.get("replay_runner")
+    if replay_runner is not None:
+        requeue = getattr(replay_runner, "requeue_interrupted", None)
+        start_background = getattr(replay_runner, "start_background", None)
+        if not callable(requeue) or not callable(start_background):
+            raise TypeError("replay runner must provide recovery and background startup")
+        requeue()
+        start_background()
     return ServiceRuntime(
         settings=settings,
         database=database,
         application=resolved["application"],
         mcp_server=resolved["mcp_server"],
         scheduler=scheduler,
+        replay_runner=replay_runner,
     )
 
 
@@ -150,11 +160,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _default_dependencies(settings: Settings) -> dict[str, object]:
     database = Database(settings.database_path)
     strategy_registry = DatabaseStrategyRegistry(database)
+    replay_runner = StrategyReplayCoordinator(
+        database,
+        strategy_registry,
+        allowed=is_strategy_replay_allowed,
+    )
     application = StockMcpApplication(
         database,
         LazyAKShareQuoteProvider(),
         strategy_registry,
-        replay=HistoricalReplayService(database, strategy_registry),
+        replay=replay_runner,
     )
 
     scheduler = _make_scheduler()
@@ -167,6 +182,7 @@ def _default_dependencies(settings: Settings) -> dict[str, object]:
             health_provider=lambda: _mcp_route_health(settings, database),
         ),
         "scheduler": scheduler,
+        "replay_runner": replay_runner,
     }
 
 
@@ -214,6 +230,14 @@ def _configure_scheduler(scheduler: Any, timezone: str) -> None:
     if not callable(start):
         raise TypeError("scheduler dependency must provide start()")
     start()
+
+
+def is_strategy_replay_allowed(now: datetime) -> bool:
+    """Reserve the China post-market publication window for the daily pipeline."""
+
+    local = now.astimezone(ZoneInfo(_TIMEZONE))
+    current = (local.hour, local.minute)
+    return not ((16, 20) <= current <= (18, 10))
 
 
 def _validate_endpoint(settings: Settings) -> None:

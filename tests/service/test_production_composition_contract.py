@@ -127,9 +127,15 @@ class ProductionCompositionContractTest(unittest.TestCase):
             self.assertEqual("published", database.get_daily_review(DAY).status)
             self.assertTrue(tuple((root / "backups").glob("stock-mcp-*.sqlite3")))
             self.assertFalse((root / "state" / "schedule-state.json").exists())
+            comparison_strategy = StrategyVersion(
+                version="v0.2-proposed",
+                status="proposed",
+                parameters=strategy.parameters,
+            )
+            database.save_strategy_version(comparison_strategy)
             comparison = HistoricalReplayService(
                 database, DatabaseStrategyRegistry(database)
-            ).compare(strategy.version, strategy.version, DAY, DAY)
+            ).compare(strategy.version, comparison_strategy.version, DAY, DAY)
             self.assertEqual(1, comparison["days_compared"])
             self.assertEqual(
                 comparison["left_candidate_count"], comparison["right_candidate_count"]

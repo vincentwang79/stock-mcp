@@ -4,7 +4,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from hashlib import sha256
 from pathlib import Path
 
@@ -48,16 +48,7 @@ class PersistentStrategyRegistryContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "operator approval"):
             registry.activate(proposal.version, confirmed=True)
         self.database.approve_strategy_version(proposal.version)
-        record_attestation = getattr(self.database, "record_governance_replay_attestation", None)
-        self.assertTrue(callable(record_attestation))
-        record_attestation(
-            proposal.version,
-            _parameters_hash(dict(proposal.parameters)),
-            "0" * 64,
-            date(2023, 1, 1),
-            date(2025, 1, 1),
-            400,
-        )
+        _certify_governance_replay(self.database, proposal)
         active = registry.activate(proposal.version, confirmed=True)
         reopened = DatabaseStrategyRegistry(Database(self.database.path))
 
@@ -111,16 +102,8 @@ class PersistentStrategyRegistryContractTest(unittest.TestCase):
     def test_activation_pointer_and_grant_consumption_are_one_transaction(self) -> None:
         registry = DatabaseStrategyRegistry(self.database)
         proposal = registry.propose(_proposal())
-        parameters_hash = _parameters_hash(dict(proposal.parameters))
         self.database.approve_strategy_version(proposal.version)
-        self.database.record_governance_replay_attestation(
-            proposal.version,
-            parameters_hash,
-            "0" * 64,
-            date(2023, 1, 1),
-            date(2025, 1, 1),
-            400,
-        )
+        _certify_governance_replay(self.database, proposal)
         with self.database.connect() as connection:
             connection.execute(
                 """
@@ -184,6 +167,35 @@ def _parameters_hash(parameters: dict[str, int]) -> str:
 
     encoded = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
     return sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _certify_governance_replay(database: Database, proposal: StrategyVersion) -> None:
+    start = date(2023, 1, 1)
+    end = date(2026, 1, 1)
+    sessions = tuple(start + timedelta(days=round(index * 1_096 / 599)) for index in range(600))
+    job = database.create_strategy_replay_job(
+        strategy_version=proposal.version,
+        parameters_hash=_parameters_hash(dict(proposal.parameters)),
+        source="recorded-tushare",
+        start_date=start,
+        end_date=end,
+        expected_sessions=sessions,
+    )
+    for trade_date in sessions:
+        database.save_strategy_replay_day(
+            job["job_id"],
+            trade_date=trade_date,
+            input_hash="1" * 64,
+            output_hash="2" * 64,
+            result={"market_regime": "defensive", "candidates": []},
+        )
+    database.complete_strategy_replay(
+        job["job_id"],
+        dataset_hash="3" * 64,
+        result_hash="4" * 64,
+        summary={"sessions": len(sessions)},
+    )
+    database.certify_strategy_replay(job["job_id"])
 
 
 if __name__ == "__main__":

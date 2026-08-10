@@ -392,6 +392,11 @@ class StockMcpApplication:
     def compare_strategy_versions(
         self, *, left_version: str, right_version: str, start: date, end: date
     ) -> Result:
+        if left_version == right_version:
+            return _error(
+                "strategy_comparison_invalid",
+                "strategy comparison requires distinct strategy versions",
+            )
         if self._get_strategy(left_version) is None:
             return _error("strategy_version_not_found", "left strategy version does not exist")
         if self._get_strategy(right_version) is None:
@@ -403,6 +408,104 @@ class StockMcpApplication:
         except ValueError as error:
             return _error("strategy_comparison_invalid", str(error))
         return _ok(dict(comparison))
+
+    def start_strategy_replay(
+        self,
+        *,
+        version: str,
+        start_date: date,
+        end_date: date,
+        idempotency_key: str,
+    ) -> Result:
+        strategy = self._get_strategy(version)
+        if strategy is None:
+            return _error("strategy_version_not_found", "strategy version does not exist")
+        if strategy.status != "proposed":
+            return _error(
+                "strategy_replay_rejected",
+                "only a proposed strategy version can start a governance replay",
+            )
+        if self._replay is None:
+            return _error("replay_unavailable", "strategy replay is unavailable")
+        try:
+            replay = self._replay.start_strategy_replay(
+                version=version,
+                start_date=start_date,
+                end_date=end_date,
+                idempotency_key=idempotency_key,
+            )
+        except ValueError as error:
+            code = (
+                "idempotency_conflict"
+                if "idempotency" in str(error).lower()
+                else "strategy_replay_rejected"
+            )
+            result = _error(code, str(error))
+        else:
+            result = _ok(dict(replay))
+        return result
+
+    def get_strategy_replay(self, *, replay_id: str) -> Result:
+        if self._replay is None:
+            return _error("replay_unavailable", "strategy replay is unavailable")
+        replay = self._replay.get_strategy_replay(replay_id=replay_id)
+        if replay is None:
+            return _error("strategy_replay_not_found", "strategy replay does not exist")
+        return _ok(dict(replay))
+
+    def list_strategy_replays(
+        self, *, version: str | None = None, limit: int = 20
+    ) -> Result:
+        if self._replay is None:
+            return _error("replay_unavailable", "strategy replay is unavailable")
+        replays = self._replay.list_strategy_replays(version=version, limit=limit)
+        return _ok({"replays": [dict(replay) for replay in replays]})
+
+    def get_strategy_replay_days(
+        self,
+        *,
+        replay_id: str,
+        after_trade_date: date | None = None,
+        limit: int = 20,
+    ) -> Result:
+        if self._replay is None:
+            return _error("replay_unavailable", "strategy replay is unavailable")
+        days = self._replay.get_strategy_replay_days(
+            replay_id=replay_id,
+            after_trade_date=after_trade_date,
+            limit=limit,
+        )
+        if days is None:
+            return _error("strategy_replay_not_found", "strategy replay does not exist")
+        return _ok({"replay_id": replay_id, "days": [dict(day) for day in days]})
+
+    def certify_strategy_replay(
+        self, *, replay_id: str, confirmed: bool, idempotency_key: str
+    ) -> Result:
+        if not confirmed:
+            return _error("confirmation_required", "explicit confirmation is required")
+        if self._replay is None:
+            return _error("replay_unavailable", "strategy replay is unavailable")
+        try:
+            replay = self._replay.certify_strategy_replay(
+                replay_id=replay_id,
+                confirmed=True,
+                idempotency_key=idempotency_key,
+            )
+        except ValueError as error:
+            code = (
+                "idempotency_conflict"
+                if "idempotency" in str(error).lower()
+                else "strategy_replay_certification_rejected"
+            )
+            result = _error(code, str(error))
+        else:
+            result = (
+                _error("strategy_replay_not_found", "strategy replay does not exist")
+                if replay is None
+                else _ok(dict(replay))
+            )
+        return result
 
     def create_strategy_proposal(
         self,
