@@ -18,7 +18,7 @@ function Wait-ServiceRemoval([string] $Name, [int] $Attempts = 12) {
 
 Test-Administrator
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-Stop-StockServices
+Stop-StockServices -InstallRoot $InstallRoot
 $winsw = Join-Path $InstallRoot 'runtime\tools\WinSW.exe'
 if (Test-Path -LiteralPath $winsw) {
     foreach ($service in @('StockMcpTunnel', 'StockMcpService')) {

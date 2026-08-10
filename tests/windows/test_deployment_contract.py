@@ -628,6 +628,29 @@ class WindowsDeploymentContractTest(unittest.TestCase):
             update,
         )
 
+    def test_update_readiness_uses_python_from_the_installed_release_not_staging(self) -> None:
+        update = self._read_required("update.ps1")
+
+        release_move = "Move-Item -LiteralPath $newReleaseStaging -Destination $newRelease"
+        installed_python = "$python = Join-Path $newRelease '.venv\\Scripts\\python.exe'"
+        readiness = "Wait-LocalReady -PythonExe $python"
+        self.assertIn(installed_python, update)
+        self.assertLess(update.index(release_move), update.index(installed_python))
+        self.assertLess(update.index(installed_python), update.index(readiness))
+
+    def test_update_stops_residual_install_root_processes_before_database_restore(self) -> None:
+        update = self._read_required("update.ps1")
+        library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
+
+        self.assertGreaterEqual(
+            update.count("Stop-StockServices -InstallRoot $InstallRoot"), 2
+        )
+        self.assertIn("[string] $InstallRoot", library)
+        self.assertIn("Get-CimInstance Win32_Process", library)
+        self.assertIn("ExecutablePath", library)
+        self.assertIn("Stop-Process -Id", library)
+        self.assertIn("Refusing to stop a process outside the install root", library)
+
     def test_source_checkout_can_install_without_a_release_zip(self) -> None:
         install = self._read_required("install.ps1")
         source_install = self._read_required("install-from-source.ps1")

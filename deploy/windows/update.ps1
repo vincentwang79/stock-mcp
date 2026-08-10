@@ -165,7 +165,7 @@ try {
     & $oldPython -m stock_mcp.cli backup --root $InstallRoot --destination $databaseBackup
     if ($LASTEXITCODE -ne 0) { throw 'Verified online database backup failed.' }
     $servicesStopped = $true
-    Stop-StockServices
+    Stop-StockServices -InstallRoot $InstallRoot
     Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\stock-mcp.sqlite3')
     Copy-Item -LiteralPath $oldTarget -Destination (Join-Path $backupRoot 'previous-release') -Recurse -Force
     if (Test-Path -LiteralPath $toolsDestination) {
@@ -218,6 +218,7 @@ try {
     Move-Item -LiteralPath $newReleaseStaging -Destination $newRelease
     $newReleaseCreated = $true
     $newReleaseStaging = $null
+    $python = Join-Path $newRelease '.venv\Scripts\python.exe'
     New-CurrentJunction $InstallRoot $newRelease
     $winSw = Join-Path $toolsDestination ([IO.Path]::GetFileName($manifest.tools.winsw.path))
     if (Test-Path -LiteralPath $servicesDirectory) { Remove-Item -LiteralPath $servicesDirectory -Recurse -Force }
@@ -269,7 +270,7 @@ try {
     Write-Warning "Update failed; Rollback is starting: $($failure.Exception.Message)"
     if ($servicesStopped) {
         try {
-            Stop-StockServices
+            Stop-StockServices -InstallRoot $InstallRoot
             Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\stock-mcp.sqlite3')
             if ($oldTarget -and (Test-Path -LiteralPath $oldTarget)) { New-CurrentJunction $InstallRoot $oldTarget }
             if ($databaseBackup -and (Test-Path -LiteralPath $databaseBackup)) {

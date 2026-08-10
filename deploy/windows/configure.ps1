@@ -216,7 +216,7 @@ try {
 $tunnelClient = Join-Path $InstallRoot 'runtime\tools\tunnel-client.exe'
 # Always restart both services so readiness proves the configured virtual service
 # identities can read their respective protected files, rather than an old process.
-Stop-StockServices
+Stop-StockServices -InstallRoot $InstallRoot
 Start-Service -Name StockMcpService
 if (-not (Wait-LocalReady -PythonExe $servicePython)) { throw 'MCP local readiness check failed.' }
 & $tunnelClient doctor --config $profilePath --explain

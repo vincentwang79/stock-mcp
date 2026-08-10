@@ -216,11 +216,37 @@ function Wait-TunnelReady {
 }
 
 function Stop-StockServices {
+    param([Parameter(Mandatory = $true)][string] $InstallRoot)
+
+    $rootPrefix = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') + '\'
     foreach ($name in @('StockMcpTunnel', 'StockMcpService')) {
         $service = Get-Service -Name $name -ErrorAction SilentlyContinue
         if ($null -ne $service -and $service.Status -ne 'Stopped') {
             Stop-Service -Name $name -Force -ErrorAction Stop
             $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
         }
+    }
+
+    # A stopped WinSW wrapper can still leave a child alive briefly.  Such a
+    # child keeps SQLite open and makes rollback impossible, so terminate only
+    # residual executables whose resolved path is inside this installation.
+    $residual = @(
+        Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string] $_.ExecutablePath) -and
+            [IO.Path]::GetFullPath([string] $_.ExecutablePath).StartsWith(
+                $rootPrefix,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        }
+    )
+    foreach ($process in $residual) {
+        $executable = [IO.Path]::GetFullPath([string] $process.ExecutablePath)
+        if (-not $executable.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to stop a process outside the install root: $executable"
+        }
+        # The process can exit between the CIM snapshot and this call.  Ignore
+        # that benign race; the exclusive database check remains authoritative.
+        Stop-Process -Id ([int] $process.ProcessId) -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id ([int] $process.ProcessId) -Timeout 15 -ErrorAction SilentlyContinue
     }
 }
