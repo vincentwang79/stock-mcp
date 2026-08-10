@@ -149,6 +149,8 @@ Tunnel 服务使用官方 `tunnel-client run --config ...` 流程。YAML 配置�
 
 策略激活设有主机侧批准门禁。提案版本必须先在完整三年交易日历上完成逐日向前回放，前 20 个交易日只用于预热。回放认证证明会永久保留，绑定版本的参数哈希、数据集哈希、结果哈希、日期范围和会话数；激活只消费一次性主机批准，不会删除证明。
 
+规则引擎 v1 会在行业分类可用时把行业强度计入分数。由于当前三年历史数据中的行业分类覆盖不完整，已经回放和认证的 `v0.1-proposed` 只作为审计记录保留，不得批准或激活。规则引擎 v2 仍将行业强度作为解释性证据返回，但无论该值可用与否，其评分贡献都固定为 0，因此不会因行业标签覆盖差异改变候选排名。创建 `v0.2-proposed` 时应复制已经确认的其他阈值，只把 `rule_engine_version` 改为 `2`，然后重新完成下面的全部治理流程。
+
 `compare_strategy_versions` 仅供纯只读研究对照。它要求两个不同版本；同版本比较被拒绝，不启动回放、不写入任何作业或证明，不能作为激活依据。
 
 ### Git 更新后的首次治理回放（ChatGPT 发起）
@@ -163,18 +165,19 @@ git pull --ff-only
 
 随后在已连接到本机 MCP 的 ChatGPT 中，按下列顺序发起**首次**候选策略的治理回放；每一次写调用使用新的、可追溯但不含密钥的幂等键。
 
-1. 调用 `start_strategy_replay`，传入提案版本、`start_date="2023-08-08"`、`end_date="2026-08-07"` 与幂等键。成功只表示持久化作业已进入 `queued` 或 `running`，不表示回放、审阅或认证已通过。
-2. 用返回的 `replay_id` 按需调用 `get_strategy_replay` 查看 `queued`、`running`、`completed` 或 `failed` 状态、会话进度、摘要、哈希和错误；无需也不得要求 ChatGPT 持续轮询。用 `get_strategy_replay_days` 审阅逐日证据时，以 `after_trade_date` 传入上一页最后日期，并设置受限 `limit`，直至覆盖全部已处理日期。
-3. 只有状态为 `completed`、完整交易日历与逐日证据均经人工审阅后，才调用 `certify_strategy_replay`，并明确传入 `confirmed=true` 和幂等键。认证失败或覆盖不足时停止，保留证据并排查数据/环境，不得补造结果。
-4. 认证成功后，管理员在本机运行下列命令，并在提示中再次完整键入同一版本号：
+1. 先调用 `list_strategy_versions` 读取旧提案参数，再调用 `create_strategy_proposal` 创建 `v0.2-proposed`：复制 v0.1 的全部阈值，只把 `rule_engine_version` 改为 `2`，并使用新的幂等键。不得修改或覆盖 `v0.1-proposed`。
+2. 调用 `start_strategy_replay`，传入 `v0.2-proposed`、`start_date="2023-08-08"`、`end_date="2026-08-07"` 与新的幂等键。成功只表示持久化作业已进入 `queued` 或 `running`，不表示回放、审阅或认证已通过。
+3. 用返回的 `replay_id` 按需调用 `get_strategy_replay` 查看 `queued`、`running`、`completed` 或 `failed` 状态、会话进度、摘要、哈希和错误；无需也不得要求 ChatGPT 持续轮询。用 `get_strategy_replay_days` 审阅逐日证据时，以 `after_trade_date` 传入上一页最后日期，并设置受限 `limit`，直至覆盖全部已处理日期。抽查时必须确认行业强度仍可作为证据读取，但其 `score_contribution` 始终为 `0`。
+4. 只有状态为 `completed`、完整交易日历与逐日证据均经人工审阅后，才调用 `certify_strategy_replay`，并明确传入 `confirmed=true` 和幂等键。认证失败或覆盖不足时停止，保留证据并排查数据/环境，不得补造结果。
+5. 认证成功后，管理员在本机运行下列命令，并在提示中再次完整键入同一版本号：
 
 ```powershell
 stock-mcp approve-strategy `
   --root E:\StockMcp `
-  --version <版本号>
+  --version v0.2-proposed
 ```
 
-5. 最后才由用户在 ChatGPT 调用 `activate_strategy_version`，显式传入 `confirmed=true`、同一版本和幂等键。该确认不能替代上一步主机批准；批准与已保存参数哈希绑定、只能消费一次，也不能通过 MCP 创建。
+6. 最后才由用户在 ChatGPT 调用 `activate_strategy_version`，显式传入 `confirmed=true`、`version="v0.2-proposed"` 和新的幂等键。该确认不能替代上一步主机批准；批准与已保存参数哈希绑定、只能消费一次，也不能通过 MCP 创建。
 
 上述日期范围和流程是操作说明，不是已完成的环境验收。真实 Windows Server 上该范围的 727 个交易日回放、MCP 审阅、认证和激活仍为**外部门禁**：在目标主机、目标数据源、受控服务身份与实际 ChatGPT 工作区连接中完成并保留证据前，任何人不得将其描述为已验证或已认证。
 

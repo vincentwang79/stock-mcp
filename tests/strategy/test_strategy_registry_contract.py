@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from stock_mcp.domain import StrategyVersion
 from stock_mcp.strategy import StrategyRegistry
@@ -26,6 +27,28 @@ def _proposal(*, version: str = "v0.1-proposed", minimum: int = 5_500) -> Strate
 
 
 class StrategyRegistryContractTest(unittest.TestCase):
+    def test_rule_engine_v2_can_be_proposed_but_unknown_engines_are_rejected(self) -> None:
+        registry = StrategyRegistry()
+        version_two = _proposal(version="v0.2-proposed")
+        version_two = replace(
+            version_two,
+            parameters={**version_two.parameters, "rule_engine_version": 2},
+        )
+
+        stored = registry.propose(version_two)
+
+        self.assertEqual(2, stored.parameters["rule_engine_version"])
+        with self.assertRaisesRegex(ValueError, "rule_engine_version.*out of range"):
+            registry.propose(
+                replace(
+                    _proposal(version="v0.3-proposed"),
+                    parameters={
+                        **_proposal().parameters,
+                        "rule_engine_version": 3,
+                    },
+                )
+            )
+
     def test_only_proposed_versions_can_be_registered(self) -> None:
         registry = StrategyRegistry()
         already_active = StrategyVersion(

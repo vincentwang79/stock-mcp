@@ -11,7 +11,7 @@ from typing import Any
 from .domain import StrategyVersion
 
 _PARAMETER_RANGES: dict[str, tuple[int, int]] = {
-    "rule_engine_version": (1, 1),
+    "rule_engine_version": (1, 2),
     "offensive_min_bps": (0, 10_000),
     "defensive_max_bps": (0, 10_000),
     "neutral_limit": (0, 50),

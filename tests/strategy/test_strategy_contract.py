@@ -65,13 +65,15 @@ def _bar(
     )
 
 
-def _strategy(*, version: str = "v0.1-proposed") -> StrategyVersion:
+def _strategy(
+    *, version: str = "v0.1-proposed", rule_engine_version: int = 1
+) -> StrategyVersion:
     """One public, deliberately conservative v0.1 parameter set."""
     return StrategyVersion(
         version=version,
         status="proposed",
         parameters={
-            "rule_engine_version": 1,
+            "rule_engine_version": rule_engine_version,
             "offensive_min_bps": 5_500,
             "defensive_max_bps": 4_000,
             "neutral_limit": 2,
@@ -266,6 +268,60 @@ class StrategyScreeningContractTest(unittest.TestCase):
             self.assertEqual("unavailable", industry.value)
             self.assertFalse(industry.passed)
             self.assertEqual(0, industry.score_contribution)
+
+    def test_engine_v2_reports_industry_strength_without_scoring_or_ranking_bias(self) -> None:
+        unavailable = _security("600023.SH", industry="")
+        classified = _security("600024.SH", industry="银行")
+        bars = tuple(
+            bar
+            for security in (unavailable, classified)
+            for bar in (
+                _bar(
+                    security.symbol,
+                    TRADE_DATE - timedelta(days=2),
+                    close=98_000,
+                    volume=500_000,
+                ),
+                _bar(
+                    security.symbol,
+                    TRADE_DATE - timedelta(days=1),
+                    close=100_000,
+                    volume=500_000,
+                ),
+                _bar(
+                    security.symbol,
+                    TRADE_DATE,
+                    close=105_000,
+                    pre_close=100_000,
+                ),
+            )
+        )
+        snapshot = _snapshot((unavailable, classified), bars)
+
+        legacy = generate_daily_review(snapshot, _strategy(rule_engine_version=1))
+        informational = generate_daily_review(
+            snapshot,
+            _strategy(version="v0.2-proposed", rule_engine_version=2),
+        )
+
+        self.assertEqual(classified.symbol, legacy.candidates[0].symbol)
+        self.assertEqual(unavailable.symbol, informational.candidates[0].symbol)
+        self.assertEqual(
+            informational.candidates[0].score,
+            informational.candidates[1].score,
+        )
+        evidence_by_symbol = {
+            candidate.symbol: next(
+                item
+                for item in candidate.evidence
+                if item.metric == "industry_strength_bps"
+            )
+            for candidate in informational.candidates
+        }
+        self.assertEqual("unavailable", evidence_by_symbol[unavailable.symbol].value)
+        self.assertEqual(500, evidence_by_symbol[classified.symbol].value)
+        self.assertEqual(0, evidence_by_symbol[unavailable.symbol].score_contribution)
+        self.assertEqual(0, evidence_by_symbol[classified.symbol].score_contribution)
 
     def test_st_peer_does_not_change_industry_strength_or_candidate_score(self) -> None:
         eligible = _security("600025.SH", industry="银行")

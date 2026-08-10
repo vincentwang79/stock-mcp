@@ -28,6 +28,8 @@ def generate_daily_review(
     engine_version = parameters["rule_engine_version"]
     if engine_version == 1:
         return _generate_daily_review_v1(snapshot, strategy)
+    if engine_version == 2:
+        return _generate_daily_review_v2(snapshot, strategy)
     raise ValueError("unsupported rule_engine_version")
 
 
@@ -36,6 +38,26 @@ def _generate_daily_review_v1(
     strategy: StrategyVersion,
 ) -> DailyReview:
     """Frozen v1 screening/scoring semantics; changes require a new engine number."""
+
+    return _generate_daily_review(snapshot, strategy, score_industry=True)
+
+
+def _generate_daily_review_v2(
+    snapshot: MarketSnapshot,
+    strategy: StrategyVersion,
+) -> DailyReview:
+    """Keep industry strength as evidence without using partial coverage for ranking."""
+
+    return _generate_daily_review(snapshot, strategy, score_industry=False)
+
+
+def _generate_daily_review(
+    snapshot: MarketSnapshot,
+    strategy: StrategyVersion,
+    *,
+    score_industry: bool,
+) -> DailyReview:
+    """Generate one deterministic review with an engine-frozen industry policy."""
 
     _validate_single_source(snapshot)
     regime = _classify_regime(snapshot, strategy)
@@ -83,7 +105,9 @@ def _generate_daily_review_v1(
         has_industry = bool(security.industry.strip())
         industry_strength_bps = industry_returns.get(security.industry) if has_industry else None
         industry_points = (
-            0 if industry_strength_bps is None else max(-10, min(20, industry_strength_bps // 100))
+            max(-10, min(20, industry_strength_bps // 100))
+            if score_industry and industry_strength_bps is not None
+            else 0
         )
         score = int(20 + liquidity_points + momentum_points + industry_points)
         evidence = (
