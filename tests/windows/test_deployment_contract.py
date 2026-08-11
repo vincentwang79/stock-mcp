@@ -323,6 +323,33 @@ class WindowsDeploymentContractTest(unittest.TestCase):
             update.index("stock_mcp.cli restore"),
         )
 
+    def test_update_does_not_restore_database_when_configuration_fails_before_migration(
+        self,
+    ) -> None:
+        update = self._read_required("update.ps1")
+
+        config_preflight = "$preMigrationDoctorStatus = Invoke-UpdateDoctor $python $InstallRoot"
+        migration_started = "$databaseMigrationStarted = $true"
+        migration = "& $python -m stock_mcp.cli migrate --root $InstallRoot"
+        guarded_restore = (
+            "if ($databaseMigrationStarted -and $databaseBackup -and "
+            "(Test-Path -LiteralPath $databaseBackup))"
+        )
+        self.assertIn("$databaseMigrationStarted = $false", update)
+        self.assertIn(config_preflight, update)
+        self.assertIn(guarded_restore, update)
+        self.assertLess(update.index(config_preflight), update.index(migration_started))
+        self.assertLess(update.index(migration_started), update.index(migration))
+
+    def test_first_install_writes_valid_toml_for_a_windows_install_root(self) -> None:
+        install = self._read_required("install.ps1")
+
+        escape_root = "$tomlInstallRoot = $InstallRoot.Replace('\\', '\\\\')"
+        render = ".Replace('__INSTALL_ROOT__', $tomlInstallRoot)"
+        self.assertIn(escape_root, install)
+        self.assertIn(render, install)
+        self.assertLess(install.index(escape_root), install.index(render))
+
     def test_release_is_self_contained_and_emits_an_external_digest(self) -> None:
         build = self._read_required("build-release.ps1")
 
@@ -618,7 +645,10 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         update = self._read_required("update.ps1")
 
         self.assertIn("function Invoke-UpdateDoctor", update)
-        self.assertIn("$doctorStatus = Invoke-UpdateDoctor $python $InstallRoot", update)
+        self.assertIn(
+            "$preMigrationDoctorStatus = Invoke-UpdateDoctor $python $InstallRoot", update
+        )
+        self.assertIn("$doctorStatus = $preMigrationDoctorStatus", update)
         self.assertIn(
             "if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready')",
             update,

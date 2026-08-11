@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -171,5 +172,23 @@ def _read_toml(path: Path) -> dict[str, object]:
         return {}
     # Windows PowerShell 5.1 commonly writes UTF-8 text with a BOM.  TOML does
     # not treat U+FEFF as whitespace, so decode with utf-8-sig before parsing.
-    value = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    text = path.read_text(encoding="utf-8-sig")
+    value = tomllib.loads(_repair_legacy_windows_path_assignments(text))
     return dict(value)
+
+
+def _repair_legacy_windows_path_assignments(text: str) -> str:
+    """Repair only path fields emitted by the pre-v11 Windows installer."""
+    assignment = re.compile(
+        r'(?m)^(?P<prefix>\s*(?:database|backup_directory|environment_file)\s*=\s*")'
+        r'(?P<value>[^"\r\n]*)(?P<suffix>"\s*(?:#.*)?)$'
+    )
+
+    def repair(match: re.Match[str]) -> str:
+        path_value = match.group("value")
+        if not re.match(r"^[A-Za-z]:\\", path_value):
+            return match.group(0)
+        escaped = re.sub(r"(?<!\\)\\(?!\\)", r"\\\\", path_value)
+        return f'{match.group("prefix")}{escaped}{match.group("suffix")}'
+
+    return assignment.sub(repair, text)

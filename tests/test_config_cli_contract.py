@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from stock_mcp.backfill import BackfillResult
 from stock_mcp.cli import doctor, main
-from stock_mcp.config import Settings
+from stock_mcp.config import Settings, _read_toml
 
 
 class ConfigAndCliContractTest(unittest.TestCase):
@@ -84,6 +84,32 @@ class ConfigAndCliContractTest(unittest.TestCase):
 
         self.assertEqual(9876, settings.port)
         self.assertFalse(settings.sina_shadow_enabled)
+
+    def test_legacy_windows_app_toml_repairs_only_unescaped_path_separators(self) -> None:
+        config = self.root / "config"
+        config.mkdir(parents=True)
+        app_toml = config / "app.toml"
+        app_toml.write_text(
+            r'''[storage]
+database = "E:\StockMcp\\data\\stock-mcp.sqlite3"
+backup_directory = "E:\StockMcp\\backups"
+
+[secrets]
+environment_file = "E:\StockMcp\\config\\secrets.env"
+''',
+            encoding="utf-8",
+        )
+
+        values = _read_toml(app_toml)
+
+        self.assertEqual(
+            r"E:\StockMcp\data\stock-mcp.sqlite3",
+            values["storage"]["database"],
+        )
+        self.assertEqual(
+            r"E:\StockMcp\config\secrets.env",
+            values["secrets"]["environment_file"],
+        )
 
     def test_cli_creates_and_verifies_online_database_backup(self) -> None:
         self.assertEqual(0, main(["migrate", "--root", str(self.root)]))

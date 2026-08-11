@@ -132,7 +132,8 @@ try {
 
 $appConfig = Join-Path $InstallRoot 'config\app.toml'
 if (-not (Test-Path -LiteralPath $appConfig)) {
-    (Get-Content -LiteralPath (Join-Path $release 'deploy\config\app.toml.example') -Raw).Replace('__INSTALL_ROOT__', $InstallRoot) |
+    $tomlInstallRoot = $InstallRoot.Replace('\', '\\')
+    (Get-Content -LiteralPath (Join-Path $release 'deploy\config\app.toml.example') -Raw).Replace('__INSTALL_ROOT__', $tomlInstallRoot) |
         Set-Content -LiteralPath $appConfig -Encoding UTF8
 }
 New-CurrentJunction $InstallRoot $release

@@ -150,6 +150,7 @@ $newReleaseStaging = $null
 $newReleaseCreated = $false
 $oldPython = $null
 $databaseBackup = $null
+$databaseMigrationStarted = $false
 $servicesStopped = $false
 $toolsDestination = Join-Path $InstallRoot 'runtime\tools'
 $toolsStaging = $null
@@ -232,10 +233,14 @@ try {
     finally { Pop-Location }
 
     $python = Join-Path $newReleaseStaging '.venv\Scripts\python.exe'
+    # Validate host configuration before the migration can touch SQLite.  A
+    # syntax error must roll back program files without replacing an unchanged
+    # production database.
+    $preMigrationDoctorStatus = Invoke-UpdateDoctor $python $InstallRoot
+    $databaseMigrationStarted = $true
     & $python -m stock_mcp.cli migrate --root $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
-    # Keep the literal command as an operator-visible acceptance criterion as well.
-    $doctorStatus = Invoke-UpdateDoctor $python $InstallRoot # stock-mcp doctor
+    $doctorStatus = $preMigrationDoctorStatus # stock-mcp doctor completed before migration
 
     Move-Item -LiteralPath $newReleaseStaging -Destination $newRelease
     $newReleaseCreated = $true
@@ -294,11 +299,15 @@ try {
     if ($servicesStopped) {
         try {
             Suspend-StockServicesForUpdate -Root $InstallRoot
-            Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\stock-mcp.sqlite3')
+            if ($databaseMigrationStarted) {
+                Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\stock-mcp.sqlite3')
+            }
             if ($oldTarget -and (Test-Path -LiteralPath $oldTarget)) { New-CurrentJunction $InstallRoot $oldTarget }
-            if ($databaseBackup -and (Test-Path -LiteralPath $databaseBackup)) {
+            if ($databaseMigrationStarted -and $databaseBackup -and (Test-Path -LiteralPath $databaseBackup)) {
                 & $oldPython -m stock_mcp.cli restore --root $InstallRoot --source $databaseBackup
                 if ($LASTEXITCODE -ne 0) { throw 'Database restore failed during Rollback.' }
+            } elseif ($databaseBackup -and (Test-Path -LiteralPath $databaseBackup)) {
+                Write-Warning 'Database migration did not start; the unchanged database was not restored.'
             }
             if ($toolsReplacementStarted -and $toolsBackup -and (Test-Path -LiteralPath $toolsBackup)) {
                 if (Test-Path -LiteralPath $toolsDestination) { Remove-Item -LiteralPath $toolsDestination -Recurse -Force }
