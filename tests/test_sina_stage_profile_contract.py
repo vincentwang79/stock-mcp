@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,46 @@ FIXTURES = ROOT / "tests" / "providers" / "fixtures" / "sina"
 
 
 class SinaStageProfileContractTest(unittest.TestCase):
+    def test_sqlite_profile_connection_is_explicitly_closed_for_windows_cleanup(self) -> None:
+        namespace = runpy.run_path(
+            str(ROOT / "scripts" / "sina_stage_profile.py"),
+            run_name="sina_stage_profile_contract",
+        )
+        sqlite_counts = namespace.get("_sqlite_counts")
+        self.assertIsNotNone(
+            sqlite_counts, "the profiler must isolate and close its SQLite count connection"
+        )
+        if sqlite_counts is None:
+            return
+
+        class _Cursor:
+            def __init__(self, value: int) -> None:
+                self._value = value
+
+            def fetchone(self) -> tuple[int]:
+                return (self._value,)
+
+        class _Connection:
+            closed = False
+
+            def execute(self, query: str) -> _Cursor:
+                return _Cursor(1 if "daily_bars" in query else 2)
+
+            def close(self) -> None:
+                self.closed = True
+
+        class _Database:
+            def __init__(self) -> None:
+                self.connection = _Connection()
+
+            def connect(self) -> _Connection:
+                return self.connection
+
+        database = _Database()
+
+        self.assertEqual((1, 2), sqlite_counts(database))
+        self.assertTrue(database.connection.closed)
+
     def test_offline_profile_reports_each_stage_without_touching_production_database(self) -> None:
         script = ROOT / "scripts" / "sina_stage_profile.py"
         self.assertTrue(script.is_file(), "the standalone Sina stage profiler must exist")

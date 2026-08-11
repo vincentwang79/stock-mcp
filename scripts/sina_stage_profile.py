@@ -84,6 +84,20 @@ def _offline_result(payload: bytes, *, endpoint_kind: str, request_key: str) -> 
     )
 
 
+def _sqlite_counts(database: Any) -> tuple[int, int]:
+    connection = database.connect()
+    try:
+        daily_bar_rows = int(
+            connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()[0]
+        )
+        share_capital_rows = int(
+            connection.execute("SELECT COUNT(*) FROM share_capital_facts").fetchone()[0]
+        )
+        return daily_bar_rows, share_capital_rows
+    finally:
+        connection.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
@@ -223,13 +237,7 @@ def main() -> int:
                 checkpoint=checkpoint,
             ),
         )
-        with database.connect() as connection:
-            daily_bar_rows = int(
-                connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()[0]
-            )
-            share_capital_rows = int(
-                connection.execute("SELECT COUNT(*) FROM share_capital_facts").fetchone()[0]
-            )
+        daily_bar_rows, share_capital_rows = _sqlite_counts(database)
 
     timings.set(
         "total",
