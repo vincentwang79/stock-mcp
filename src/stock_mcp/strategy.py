@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
@@ -224,3 +225,176 @@ def _freeze_value(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_freeze_value(item) for item in value)
     return value
+
+
+def build_v4_research_arms(*, created_at: str) -> tuple[dict[str, object], ...]:
+    """Return the immutable preregistered baseline plus six one-factor arms."""
+
+    from .v3 import v3_proposal_parameters
+
+    baseline_parameters = v3_proposal_parameters(1)
+    changes = (
+        "trend-quality",
+        "breakout-overextension-cap",
+        "no-recent-limit-up",
+        "breadth-five-day-median",
+        "size-bottom-30pct-filter",
+        "signal-quality-rank",
+    )
+
+    def arm(version: str, role: str, change: str, parameters: Mapping[str, object]):
+        payload = dict(parameters)
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return {
+            "arm_id": version,
+            "version": version,
+            "role": role,
+            "change": change,
+            "status": "proposed",
+            "source": "tushare",
+            "parent_version": "v0.3-policy-1" if role != "baseline" else None,
+            "parameters": payload,
+            "parameters_hash": hashlib.sha256(encoded.encode()).hexdigest(),
+            "created_at": created_at,
+        }
+
+    result = [arm("v0.3-policy-1", "baseline", "baseline", baseline_parameters)]
+    for change in changes:
+        parameters: dict[str, object] = {
+            **baseline_parameters,
+            "research_factor": change,
+            "v4_rule_engine_version": 4,
+        }
+        result.append(arm(f"v4-{change}", "challenger", change, parameters))
+    return tuple(result)
+
+
+def evaluate_v4_research_statistics(
+    *,
+    manifest_hash: str,
+    primary_metric: str,
+    daily_candidate_returns: Mapping[str, tuple[int, ...]],
+    block_sessions: int = 20,
+    bootstrap_samples: int = 10_000,
+    seed: int | None = None,
+    arm_metadata: Mapping[str, Mapping[str, object]] | None = None,
+    replication_evidence: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Deterministic circular moving-block bootstrap with a White RC maximum."""
+
+    if block_sessions != 20 or bootstrap_samples != 10_000:
+        raise ValueError("v4 statistics require block=20 and exactly 10000 bootstrap samples")
+    if seed is not None:
+        raise ValueError("v4 statistics seed is derived from the manifest and cannot be overridden")
+    if primary_metric != "20d_25bps_market_cap_matched_excess_bps":
+        raise ValueError("v4 primary metric is frozen")
+    baseline_id = "v0.3-policy-1"
+    baseline = tuple(daily_candidate_returns.get(baseline_id, ()))
+    if not baseline:
+        raise ValueError("v4 statistics require the frozen baseline")
+    if any(len(values) != len(baseline) for values in daily_candidate_returns.values()):
+        raise ValueError("v4 statistics arms must share one signal-day calendar")
+    actual_seed = int(
+        hashlib.sha256(f"{manifest_hash}|v4-statistics-v1".encode()).hexdigest()[:16], 16
+    )
+    rng = random.Random(actual_seed)
+    challengers = {
+        name: tuple(value - base for value, base in zip(values, baseline, strict=True))
+        for name, values in daily_candidate_returns.items()
+        if name != baseline_id
+    }
+    expected_arms = {
+        baseline_id,
+        *(
+            f"v4-{change}"
+            for change in (
+                "trend-quality",
+                "breakout-overextension-cap",
+                "no-recent-limit-up",
+                "breadth-five-day-median",
+                "size-bottom-30pct-filter",
+                "signal-quality-rank",
+            )
+        ),
+    }
+    study_complete = set(daily_candidate_returns) == expected_arms
+    replication_ok = bool(
+        replication_evidence
+        and replication_evidence.get("status") == "complete"
+        and replication_evidence.get("completeness_rate_bps") == 10_000
+        and float(replication_evidence.get("primary_metric_bps", -1)) >= 0
+    )
+    means = {name: sum(values) / len(values) for name, values in challengers.items()}
+    boot_means: dict[str, list[float]] = {name: [] for name in challengers}
+    white_maxima: list[float] = []
+    centered = {
+        name: tuple(value - means[name] for value in values) for name, values in challengers.items()
+    }
+    for _ in range(bootstrap_samples):
+        indices: list[int] = []
+        while len(indices) < len(baseline):
+            start = rng.randrange(len(baseline))
+            indices.extend((start + offset) % len(baseline) for offset in range(block_sessions))
+        indices = indices[: len(baseline)]
+        maxima: list[float] = []
+        for name, values in challengers.items():
+            sampled = sum(values[index] for index in indices) / len(indices)
+            boot_means[name].append(sampled)
+            maxima.append(sum(centered[name][index] for index in indices) / len(indices))
+        white_maxima.append(max(maxima, default=0.0))
+    observed_max = max(means.values(), default=0.0)
+    family_p = sum(value >= observed_max for value in white_maxima) / bootstrap_samples
+    arm_results: dict[str, dict[str, object]] = {}
+    for name, mean in means.items():
+        ordered = sorted(boot_means[name])
+        lower = ordered[int(0.025 * (len(ordered) - 1))]
+        upper = ordered[int(0.975 * (len(ordered) - 1))]
+        metadata = dict((arm_metadata or {}).get(name, {}))
+        complete = metadata.get("completeness_rate_bps") == 10_000
+        executable_delta = int(metadata.get("executable_rate_delta_bps", -10_000))
+        unexecutable_delta = int(metadata.get("unexecutable_rate_delta_bps", 10_000))
+        eligible = (
+            study_complete
+            and replication_ok
+            and len(baseline) >= block_sessions * 2
+            and family_p <= 0.05
+            and lower > 0
+            and complete
+            and executable_delta >= -200
+            and unexecutable_delta <= 200
+        )
+        arm_results[name] = {
+            "mean_primary_bps": mean,
+            "ci95": [lower, upper],
+            "eligible": eligible,
+            "completeness_rate_bps": metadata.get("completeness_rate_bps"),
+            "unexecutable_rate_bps": metadata.get("unexecutable_rate_bps"),
+        }
+    eligible_names = [name for name, result in arm_results.items() if result["eligible"]]
+    eligible_names.sort(
+        key=lambda name: (
+            -float(arm_results[name]["mean_primary_bps"]),
+            int(arm_results[name].get("unexecutable_rate_bps") or 10_001),
+            name,
+        )
+    )
+    winner_name = eligible_names[0] if eligible_names else None
+    return {
+        "schema": "v4-statistics-v1",
+        "manifest_hash": manifest_hash,
+        "primary_metric": primary_metric,
+        "bootstrap_method": "circular_block_bootstrap",
+        "block_sessions": block_sessions,
+        "bootstrap_samples": bootstrap_samples,
+        "seed": actual_seed,
+        "multiple_testing_method": "white_reality_check",
+        "family_wise_p_value": family_p,
+        "study_complete": study_complete,
+        "sina_replication_complete": replication_ok,
+        "arms": arm_results,
+        "winner": {
+            "eligible": winner_name is not None,
+            "arm_id": winner_name,
+            "decision": "propose" if winner_name else "retain_baseline",
+        },
+    }

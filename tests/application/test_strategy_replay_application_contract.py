@@ -175,9 +175,7 @@ class StrategyReplayApplicationContractTest(unittest.TestCase):
         replay = get_replay(replay_id="replay-1")
         listed = list_replays(version="v0.1-proposed", limit=20)
         days = get_days(replay_id="replay-1", after_trade_date=date(2023, 1, 3), limit=20)
-        refused = certify(
-            replay_id="replay-1", confirmed=False, idempotency_key="replay-certify-1"
-        )
+        refused = certify(replay_id="replay-1", confirmed=False, idempotency_key="replay-certify-1")
 
         self.assertTrue(replay["ok"])
         self.assertEqual(["replay-1"], [item["replay_id"] for item in listed["data"]["replays"]])

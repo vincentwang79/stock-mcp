@@ -130,9 +130,7 @@ class TushareRuntimeAdapterContractTest(RuntimeAdapterContractTestCase):
             clock=lambda: NOW,
         ).fetch_snapshot(TRADE_DATE)
 
-        target_symbols = tuple(
-            bar.symbol for bar in snapshot.bars if bar.trade_date == TRADE_DATE
-        )
+        target_symbols = tuple(bar.symbol for bar in snapshot.bars if bar.trade_date == TRADE_DATE)
         self.assertEqual(target_symbols, ("600001.SH", "000001.SZ"))
 
     def test_fetches_day_dataframe_normalizes_and_calculates_snapshot_breadth(self) -> None:

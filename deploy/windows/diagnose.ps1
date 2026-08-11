@@ -120,6 +120,9 @@ try {
         Write-RedactedCommandOutput (Join-Path $stage 'database-integrity.txt') {
             & $python -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('PRAGMA integrity_check').fetchone()[0])" $database
         }
+        Write-RedactedCommandOutput (Join-Path $stage 'provider-v4-summary.txt') {
+            & $python -c "import sqlite3,sys,json; c=sqlite3.connect(sys.argv[1]); q=lambda t: c.execute('SELECT COUNT(*) FROM '+t).fetchone()[0]; print(json.dumps({'fetch_evidence':q('provider_fetch_evidence'),'sina_checkpoints':q('sina_backfill_checkpoints'),'shadow_runs':q('provider_shadow_runs'),'qualifications':q('provider_qualifications'),'v4_manifests':q('v4_dataset_manifests'),'v4_studies':q('v4_study_runs')}))" $database
+        }
     }
     if (Test-Path -LiteralPath $python) {
         # Invoke the module directly: the generated stock-mcp.exe launcher can

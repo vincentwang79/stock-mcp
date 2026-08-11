@@ -82,15 +82,9 @@ class StrategyReplayRuntimeContractTest(unittest.TestCase):
         if not callable(is_strategy_replay_allowed):
             return
 
-        self.assertFalse(
-            is_strategy_replay_allowed(datetime(2026, 8, 10, 16, 20, tzinfo=SHANGHAI))
-        )
-        self.assertFalse(
-            is_strategy_replay_allowed(datetime(2026, 8, 10, 18, 10, tzinfo=SHANGHAI))
-        )
-        self.assertTrue(
-            is_strategy_replay_allowed(datetime(2026, 8, 10, 18, 11, tzinfo=SHANGHAI))
-        )
+        self.assertFalse(is_strategy_replay_allowed(datetime(2026, 8, 10, 16, 20, tzinfo=SHANGHAI)))
+        self.assertFalse(is_strategy_replay_allowed(datetime(2026, 8, 10, 18, 10, tzinfo=SHANGHAI)))
+        self.assertTrue(is_strategy_replay_allowed(datetime(2026, 8, 10, 18, 11, tzinfo=SHANGHAI)))
 
 
 if __name__ == "__main__":

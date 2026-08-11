@@ -30,9 +30,7 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         strategy = (root / "docs" / "task-specs" / "02-strategy-replay.md").read_text(
             encoding="utf-8"
         )
-        workflow = (root / "docs" / "task-specs" / "03-mcp-workflow.md").read_text(
-            encoding="utf-8"
-        )
+        workflow = (root / "docs" / "task-specs" / "03-mcp-workflow.md").read_text(encoding="utf-8")
         windows = self._read_required("README-WINDOWS.md")
 
         for tool in (
@@ -69,9 +67,7 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         strategy = (ROOT / "docs" / "task-specs" / "02-strategy-replay.md").read_text(
             encoding="utf-8"
         )
-        workflow = (ROOT / "docs" / "task-specs" / "03-mcp-workflow.md").read_text(
-            encoding="utf-8"
-        )
+        workflow = (ROOT / "docs" / "task-specs" / "03-mcp-workflow.md").read_text(encoding="utf-8")
         release = (ROOT / "docs" / "task-specs" / "04-windows-release.md").read_text(
             encoding="utf-8"
         )
@@ -692,9 +688,7 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         update = self._read_required("update.ps1")
         library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
 
-        self.assertGreaterEqual(
-            update.count("Stop-StockServices -InstallRoot $InstallRoot"), 2
-        )
+        self.assertGreaterEqual(update.count("Stop-StockServices -InstallRoot $InstallRoot"), 2)
         self.assertIn("[string] $InstallRoot", library)
         self.assertIn("Get-CimInstance Win32_Process", library)
         self.assertIn("ExecutablePath", library)

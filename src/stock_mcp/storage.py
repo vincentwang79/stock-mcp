@@ -29,7 +29,7 @@ from stock_mcp.domain import (
     StrategyVersion,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class IdempotencyKeyReuseError(ValueError):
@@ -336,6 +336,962 @@ class Database:
         with self.connect() as connection:
             self._save_market_snapshot(connection, snapshot)
 
+    def save_provider_fetch_evidence(self, evidence: dict[str, object]) -> None:
+        with self._idempotent_write_connection() as connection:
+            self._save_provider_fetch_evidence(connection, evidence)
+
+    def _save_provider_fetch_evidence(
+        self, connection: sqlite3.Connection, evidence: dict[str, object]
+    ) -> None:
+        required = (
+            "fetch_id",
+            "source",
+            "endpoint_kind",
+            "request_key",
+            "retrieved_at",
+            "byte_length",
+            "payload_sha256",
+            "adapter_version",
+            "status",
+        )
+        if any(evidence.get(name) in (None, "") for name in required):
+            raise ValueError("provider fetch evidence is incomplete")
+        values = (
+            str(evidence["source"]),
+            str(evidence["endpoint_kind"]),
+            str(evidence["request_key"]),
+            self._iso(evidence.get("trade_date")),
+            None if evidence.get("http_date") is None else str(evidence["http_date"]),
+            self._iso(evidence["retrieved_at"]),
+            None if evidence.get("http_status") is None else int(evidence["http_status"]),
+            int(evidence["byte_length"]),
+            str(evidence["payload_sha256"]),
+            str(evidence["adapter_version"]),
+            str(evidence["status"]),
+            None if evidence.get("error_class") is None else str(evidence["error_class"]),
+        )
+        self._immutable_insert(
+            connection,
+            "provider_fetch_evidence",
+            "fetch_id",
+            str(evidence["fetch_id"]),
+            (
+                "source",
+                "endpoint_kind",
+                "request_key",
+                "trade_date",
+                "http_date",
+                "retrieved_at",
+                "http_status",
+                "byte_length",
+                "payload_sha256",
+                "adapter_version",
+                "status",
+                "error_class",
+            ),
+            values,
+        )
+
+    def save_share_capital_facts(self, facts: Iterable[dict[str, object] | object]) -> None:
+        with self._idempotent_write_connection() as connection:
+            self._save_share_capital_facts(connection, facts)
+
+    def _save_share_capital_facts(
+        self,
+        connection: sqlite3.Connection,
+        facts: Iterable[dict[str, object] | object],
+    ) -> None:
+        for fact in facts:
+            item = self._mapping(fact)
+            key = (str(item["symbol"]), self._iso(item["effective_date"]), str(item["source"]))
+            values = (
+                int(item["outstanding_shares"]),
+                self._iso(item["source_timestamp"]),
+                str(item["payload_sha256"]),
+            )
+            self._immutable_composite_insert(
+                connection,
+                "share_capital_facts",
+                ("symbol", "effective_date", "source"),
+                key,
+                ("outstanding_shares", "source_timestamp", "payload_sha256"),
+                values,
+            )
+
+    def save_sina_backfill_symbol(
+        self,
+        *,
+        bars: Iterable[DailyBar],
+        capital_facts: Iterable[dict[str, object] | object],
+        fetch_evidence: Iterable[dict[str, object]],
+        checkpoint: dict[str, object],
+    ) -> None:
+        """Atomically publish one Sina symbol's facts, evidence and checkpoint."""
+
+        recorded_bars = tuple(bars)
+        recorded_capital = tuple(capital_facts)
+        symbol = str(checkpoint["symbol"])
+        if not recorded_bars or any(
+            bar.source != "sina" or bar.symbol != symbol for bar in recorded_bars
+        ):
+            raise ValueError("Sina backfill bars must be complete and single-source")
+        if any(
+            str(self._mapping(fact).get("source")) != "sina"
+            or str(self._mapping(fact).get("symbol")) != symbol
+            for fact in recorded_capital
+        ):
+            raise ValueError("Sina share-capital facts must match the checkpoint symbol")
+        key = (str(checkpoint["run_id"]), symbol)
+        encoded = self._jsonable_json(checkpoint)
+        with self._idempotent_write_connection() as connection:
+            for evidence in fetch_evidence:
+                self._save_provider_fetch_evidence(connection, evidence)
+            self._save_daily_bars(connection, recorded_bars)
+            self._save_share_capital_facts(connection, recorded_capital)
+            self._immutable_composite_insert(
+                connection,
+                "sina_backfill_checkpoints",
+                ("run_id", "symbol"),
+                key,
+                ("status", "checkpoint_json"),
+                (str(checkpoint["status"]), encoded),
+            )
+
+    def save_daily_security_statuses(self, statuses: Iterable[dict[str, object] | object]) -> None:
+        with self._idempotent_write_connection() as connection:
+            for status in statuses:
+                item = self._mapping(status)
+                key = (str(item["symbol"]), self._iso(item["trade_date"]), str(item["source"]))
+                values = (
+                    str(item["tradestatus"]),
+                    int(bool(item["is_st"])),
+                    self._iso(item["source_timestamp"]),
+                    str(item["batch_sha256"]),
+                )
+                self._immutable_composite_insert(
+                    connection,
+                    "daily_security_status",
+                    ("symbol", "trade_date", "source"),
+                    key,
+                    ("tradestatus", "is_st", "source_timestamp", "batch_sha256"),
+                    values,
+                )
+
+    def save_provider_daily_metrics(self, metrics: Iterable[dict[str, object] | object]) -> None:
+        with self._idempotent_write_connection() as connection:
+            self._save_provider_daily_metrics(connection, metrics)
+
+    def _save_provider_daily_metrics(
+        self,
+        connection: sqlite3.Connection,
+        metrics: Iterable[dict[str, object] | object],
+    ) -> None:
+        for metric in metrics:
+            item = self._mapping(metric)
+            key = (
+                str(item["symbol"]),
+                self._iso(item["trade_date"]),
+                str(item["price_source"]),
+                str(item["capital_source"]),
+            )
+            values = (
+                None
+                if item.get("upstream_market_cap_fen") is None
+                else int(item["upstream_market_cap_fen"]),
+                int(item["derived_market_cap_fen"]),
+                None
+                if item.get("upstream_turnover_rate") is None
+                else str(item["upstream_turnover_rate"]),
+                str(item["derived_turnover_rate"]),
+                str(item["evidence_sha256"]),
+            )
+            self._immutable_composite_insert(
+                connection,
+                "provider_daily_metrics",
+                ("symbol", "trade_date", "price_source", "capital_source"),
+                key,
+                (
+                    "upstream_market_cap_fen",
+                    "derived_market_cap_fen",
+                    "upstream_turnover_rate",
+                    "derived_turnover_rate",
+                    "evidence_sha256",
+                ),
+                values,
+            )
+
+    def load_share_capital_fact(
+        self, symbol: str, *, on_date: date, source: str = "sina"
+    ) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT effective_date, outstanding_shares, source_timestamp, payload_sha256 "
+                "FROM share_capital_facts WHERE symbol=? AND source=? AND effective_date<=? "
+                "ORDER BY effective_date DESC LIMIT 1",
+                (symbol, source, on_date.isoformat()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "symbol": symbol,
+            "effective_date": date.fromisoformat(str(row[0])),
+            "source": source,
+            "outstanding_shares": int(row[1]),
+            "source_timestamp": datetime.fromisoformat(str(row[2])),
+            "payload_sha256": str(row[3]),
+        }
+
+    def save_sina_spot_batch(
+        self,
+        *,
+        snapshot: MarketSnapshot,
+        fetch_evidence: Iterable[dict[str, object]],
+        metrics: dict[str, object],
+        daily_metrics: Iterable[dict[str, object] | object] = (),
+        shadow_run: dict[str, object] | None = None,
+    ) -> None:
+        if snapshot.source != "sina" or any(bar.source != "sina" for bar in snapshot.bars):
+            raise ValueError("Sina spot batch cannot mix price sources")
+        with self._idempotent_write_connection() as connection:
+            for evidence in fetch_evidence:
+                self._save_provider_fetch_evidence(connection, evidence)
+            encoded = self._jsonable_json(metrics)
+            key = (snapshot.trade_date.isoformat(), snapshot.source)
+            self._immutable_composite_insert(
+                connection,
+                "provider_spot_batches",
+                ("trade_date", "source"),
+                key,
+                ("metrics_json",),
+                (encoded,),
+            )
+            self._save_market_snapshot(connection, snapshot)
+            self._save_provider_daily_metrics(connection, daily_metrics)
+            if shadow_run is not None:
+                self._save_provider_shadow_run(connection, shadow_run)
+
+    def save_provider_shadow_run(self, run: dict[str, object]) -> None:
+        with self._idempotent_write_connection() as connection:
+            self._save_provider_shadow_run(connection, run)
+
+    def _save_provider_shadow_run(
+        self, connection: sqlite3.Connection, run: dict[str, object]
+    ) -> None:
+        key = (str(run["source"]), self._iso(run["trade_date"]), str(run["adapter_version"]))
+        payload = self._jsonable_json(run)
+        self._immutable_composite_insert(
+            connection,
+            "provider_shadow_runs",
+            ("source", "trade_date", "adapter_version"),
+            key,
+            ("run_json", "status", "dataset_hash"),
+            (payload, str(run["status"]), str(run["dataset_hash"])),
+        )
+
+    def list_provider_shadow_runs(
+        self, source: str, *, through_date: date | None = None, limit: int = 100
+    ) -> tuple[dict[str, object], ...]:
+        clause = "source = ?"
+        values: list[object] = [source]
+        if through_date is not None:
+            clause += " AND trade_date <= ?"
+            values.append(through_date.isoformat())
+        values.append(limit)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT run_json FROM provider_shadow_runs WHERE {clause} "
+                "ORDER BY trade_date DESC LIMIT ?",
+                values,
+            ).fetchall()
+        return tuple(json.loads(str(row[0])) for row in rows)
+
+    def save_provider_qualification(self, qualification: dict[str, object]) -> None:
+        key = (str(qualification["source"]), self._iso(qualification["through_date"]))
+        payload = self._jsonable_json(qualification)
+        status = str(qualification["status"])
+        if status not in {"collecting", "qualified_for_manual_approval", "failed", "expired"}:
+            raise ValueError("unsupported provider qualification status")
+        qualification_id = str(
+            qualification.get("qualification_id")
+            or f"{qualification['source']}:{key[1]}:{str(qualification['dataset_hash'])[:12]}"
+        )
+        window_hash = str(qualification.get("window_hash") or qualification["dataset_hash"])
+        recorded_at = self._iso(qualification["recorded_at"])
+        with self._idempotent_write_connection() as connection:
+            existing = connection.execute(
+                "SELECT status, dataset_hash, report_json FROM provider_qualifications "
+                "WHERE source = ? AND through_date = ?",
+                key,
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO provider_qualifications VALUES (?, ?, ?, ?, ?, ?)",
+                    (*key, status, str(qualification["dataset_hash"]), recorded_at, payload),
+                )
+            elif existing != (status, str(qualification["dataset_hash"]), payload):
+                existing_report = json.loads(str(existing[2]))
+                current_report = json.loads(payload)
+                existing_report.pop("recorded_at", None)
+                current_report.pop("recorded_at", None)
+                same_evidence = (
+                    existing[0] == status
+                    and existing[1] == str(qualification["dataset_hash"])
+                    and existing_report == current_report
+                )
+                if same_evidence:
+                    # A repeated report command has a new observation timestamp,
+                    # but it is not new qualification evidence.  Preserve the
+                    # original immutable report so the later attested transition
+                    # can proceed without manufacturing a conflict.
+                    payload = str(existing[2])
+                else:
+                    allowed = existing[0] == "collecting" and status in {
+                        "qualified_for_manual_approval",
+                        "failed",
+                    }
+                    allowed = allowed or (
+                        existing[0] == "qualified_for_manual_approval" and status == "expired"
+                    )
+                    if not allowed or existing[1] != str(qualification["dataset_hash"]):
+                        raise ValueError(
+                            "provider qualification transition conflicts with evidence"
+                        )
+                    connection.execute(
+                        "UPDATE provider_qualifications SET status=?, recorded_at=?, report_json=? "
+                        "WHERE source=? AND through_date=?",
+                        (status, recorded_at, payload, *key),
+                    )
+            if qualification_id:
+                row = connection.execute(
+                    "SELECT source, through_date, status, window_hash, report_json "
+                    "FROM provider_qualification_reports WHERE qualification_id = ?",
+                    (qualification_id,),
+                ).fetchone()
+                values = (str(qualification["source"]), key[1], status, window_hash, payload)
+                if row is None:
+                    connection.execute(
+                        "INSERT INTO provider_qualification_reports VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (qualification_id, *values, recorded_at),
+                    )
+                elif tuple(row) != values:
+                    if row[0:2] != values[0:2] or row[3] != window_hash:
+                        raise ValueError("provider qualification report is immutable")
+                    connection.execute(
+                        "UPDATE provider_qualification_reports SET status=?, report_json=? "
+                        "WHERE qualification_id=?",
+                        (status, payload, qualification_id),
+                    )
+
+    def get_provider_qualification(self, source: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT report_json FROM provider_qualifications WHERE source = ? "
+                "ORDER BY through_date DESC LIMIT 1",
+                (source,),
+            ).fetchone()
+        return None if row is None else json.loads(str(row[0]))
+
+    def get_provider_review_attestation(self, qualification_id: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT window_hash, terms_confirmed, attested_at FROM "
+                "provider_qualification_review_attestations WHERE qualification_id = ?",
+                (qualification_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "qualification_id": qualification_id,
+            "window_hash": str(row[0]),
+            "terms_confirmed": bool(row[1]),
+            "attested_at": str(row[2]),
+        }
+
+    def record_provider_attestation(
+        self, *, source: str, through_date: date, dataset_hash: str
+    ) -> dict[str, object]:
+        result = {
+            "source": source,
+            "through_date": through_date.isoformat(),
+            "dataset_hash": dataset_hash,
+            "attested_at": datetime.now(UTC).isoformat(),
+        }
+        with self._idempotent_write_connection() as connection:
+            report = connection.execute(
+                "SELECT qualification_id, window_hash FROM provider_qualification_reports "
+                "WHERE source=? AND through_date=? ORDER BY created_at DESC LIMIT 1",
+                (source, through_date.isoformat()),
+            ).fetchone()
+            if report is None or report[1] != dataset_hash:
+                raise ValueError("recorded provider qualification report is required")
+            existing = connection.execute(
+                "SELECT dataset_hash, attested_at FROM provider_attestations "
+                "WHERE source = ? AND through_date = ?",
+                (source, through_date.isoformat()),
+            ).fetchone()
+            if existing is not None and existing[0] != dataset_hash:
+                raise ValueError("provider attestation is immutable; conflicting evidence")
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO provider_attestations VALUES (?, ?, ?, ?)",
+                    (source, through_date.isoformat(), dataset_hash, result["attested_at"]),
+                )
+            else:
+                result["attested_at"] = str(existing[1])
+            connection.execute(
+                "INSERT OR IGNORE INTO provider_qualification_review_attestations("
+                "qualification_id, window_hash, terms_confirmed, attested_at) "
+                "VALUES (?, ?, 1, ?)",
+                (str(report[0]), dataset_hash, result["attested_at"]),
+            )
+            result["qualification_id"] = str(report[0])
+        return result
+
+    def approve_provider_source(
+        self, *, source: str, through_date: date, dataset_hash: str
+    ) -> dict[str, object]:
+        with self._idempotent_write_connection() as connection:
+            qualification = connection.execute(
+                "SELECT status, dataset_hash FROM provider_qualifications "
+                "WHERE source = ? AND through_date = ?",
+                (source, through_date.isoformat()),
+            ).fetchone()
+            attested = connection.execute(
+                "SELECT dataset_hash FROM provider_attestations "
+                "WHERE source = ? AND through_date = ?",
+                (source, through_date.isoformat()),
+            ).fetchone()
+            if qualification != ("qualified_for_manual_approval", dataset_hash) or attested != (
+                dataset_hash,
+            ):
+                raise ValueError("provider qualification and review attestation are required")
+            approved_at = datetime.now(UTC).isoformat()
+            existing = connection.execute(
+                "SELECT dataset_hash, approved_at FROM provider_approvals "
+                "WHERE source = ? AND through_date = ?",
+                (source, through_date.isoformat()),
+            ).fetchone()
+            if existing is not None and existing[0] != dataset_hash:
+                raise ValueError("provider approval is immutable; conflicting evidence")
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO provider_approvals VALUES (?, ?, ?, ?)",
+                    (source, through_date.isoformat(), dataset_hash, approved_at),
+                )
+            else:
+                approved_at = str(existing[1])
+        return {
+            "source": source,
+            "through_date": through_date.isoformat(),
+            "dataset_hash": dataset_hash,
+            "approved_at": approved_at,
+        }
+
+    def register_provider_source(
+        self,
+        *,
+        source: str,
+        through_date: date,
+        dataset_hash: str,
+        capabilities: Iterable[str] = ("enrichment", "backup_price"),
+    ) -> str:
+        normalized = tuple(sorted(set(capabilities)))
+        if not normalized or not set(normalized).issubset({"enrichment", "backup_price"}):
+            raise ValueError("unsupported provider capability")
+        with self._idempotent_write_connection() as connection:
+            approval = connection.execute(
+                "SELECT dataset_hash FROM provider_approvals WHERE source = ? AND through_date = ?",
+                (source, through_date.isoformat()),
+            ).fetchone()
+            if approval != (dataset_hash,):
+                return "approval_required"
+            payload = self._json(list(normalized))
+            existing = connection.execute(
+                "SELECT qualification_id, capabilities_json FROM provider_registry "
+                "WHERE source = ?",
+                (source,),
+            ).fetchone()
+            qualification_id = f"{source}:{through_date.isoformat()}:{dataset_hash[:12]}"
+            if existing is not None and existing != (qualification_id, payload):
+                raise ValueError("provider registry is immutable; conflicting activation")
+            connection.execute(
+                "INSERT OR IGNORE INTO provider_registry("
+                "source, qualification_id, capabilities_json, "
+                "activated_at) VALUES (?, ?, ?, ?)",
+                (source, qualification_id, payload, datetime.now(UTC).isoformat()),
+            )
+        return "registered"
+
+    def load_sina_backfill_checkpoint(
+        self, *, run_id: str, symbol: str
+    ) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT checkpoint_json FROM sina_backfill_checkpoints "
+                "WHERE run_id = ? AND symbol = ?",
+                (run_id, symbol),
+            ).fetchone()
+        return None if row is None else json.loads(str(row[0]))
+
+    def save_sina_backfill_checkpoint(self, checkpoint: dict[str, object]) -> None:
+        key = (str(checkpoint["run_id"]), str(checkpoint["symbol"]))
+        encoded = self._jsonable_json(checkpoint)
+        with self._idempotent_write_connection() as connection:
+            self._immutable_composite_insert(
+                connection,
+                "sina_backfill_checkpoints",
+                ("run_id", "symbol"),
+                key,
+                ("status", "checkpoint_json"),
+                (str(checkpoint["status"]), encoded),
+            )
+
+    def save_v4_dataset_manifest(self, manifest: dict[str, object]) -> dict[str, object]:
+        manifest_hash = str(manifest.get("manifest_hash", ""))
+        self._validate_sha256(manifest_hash, "v4 manifest")
+        if (
+            manifest.get("schema") != "v4-manifest-v1"
+            or manifest.get("source") != "tushare"
+            or manifest.get("share_capital_source") != "sina"
+            or manifest.get("status_source") != "baostock"
+        ):
+            raise ValueError("v4 manifest provider provenance is invalid")
+        canonical = dict(manifest)
+        canonical.pop("manifest_hash", None)
+        computed = hashlib.sha256(self._json(canonical).encode()).hexdigest()
+        if computed != manifest_hash:
+            raise ValueError("v4 manifest hash does not match its canonical content")
+        encoded = self._jsonable_json(manifest)
+        with self._idempotent_write_connection() as connection:
+            self._immutable_insert(
+                connection,
+                "v4_dataset_manifests",
+                "manifest_hash",
+                manifest_hash,
+                ("manifest_json", "price_source", "created_at"),
+                (
+                    encoded,
+                    str(manifest.get("source", manifest.get("price_source", ""))),
+                    str(manifest.get("created_at", datetime.now(UTC).isoformat())),
+                ),
+            )
+        return dict(manifest)
+
+    def get_v4_dataset_manifest(self, manifest_hash: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT manifest_json FROM v4_dataset_manifests WHERE manifest_hash = ?",
+                (manifest_hash,),
+            ).fetchone()
+        return None if row is None else json.loads(str(row[0]))
+
+    def create_v4_study_run(
+        self,
+        *,
+        manifest_hash: str,
+        idempotency_key: str,
+        arms: Iterable[dict[str, object]],
+    ) -> dict[str, object]:
+        operation = "v4:start_research"
+        request = {"manifest_hash": manifest_hash}
+        request_hash = self._request_hash(operation, request)
+        with self._idempotent_write_connection() as connection:
+            cached = self._idempotent_result(connection, operation, idempotency_key, request_hash)
+            if cached is not None:
+                return dict(cached)
+            if (
+                connection.execute(
+                    "SELECT 1 FROM v4_dataset_manifests WHERE manifest_hash = ?", (manifest_hash,)
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("unknown v4 dataset manifest")
+            study_id = f"v4-study-{uuid4().hex}"
+            created_at = datetime.now(UTC).isoformat()
+            input_hash = hashlib.sha256(
+                self._json({"schema": "v4-input-v1", "manifest_hash": manifest_hash}).encode()
+            ).hexdigest()
+            connection.execute(
+                "INSERT INTO v4_study_runs("
+                "study_id, manifest_hash, status, input_hash, created_at) "
+                "VALUES (?, ?, 'queued', ?, ?)",
+                (study_id, manifest_hash, input_hash, created_at),
+            )
+            for arm in arms:
+                connection.execute(
+                    "INSERT INTO v4_study_arms(study_id, arm_id, parameters_json, "
+                    "parameters_hash, parent_version, unique_difference, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'queued')",
+                    (
+                        study_id,
+                        str(arm["arm_id"]),
+                        self._jsonable_json(arm["parameters"]),
+                        str(arm["parameters_hash"]),
+                        str(arm.get("parent_version") or ""),
+                        str(arm["change"]),
+                    ),
+                )
+            result = {
+                "study_id": study_id,
+                "replay_id": study_id,
+                "manifest_hash": manifest_hash,
+                "status": "queued",
+                "certified": False,
+                "active": False,
+                "outcome_hash_schema": "v4-outcome-v2",
+                "created_at": created_at,
+            }
+            self._save_idempotent_result(
+                connection, operation, idempotency_key, request_hash, result
+            )
+        return result
+
+    def get_v4_study_run(self, study_id: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT study_id, manifest_hash, status, input_hash, result_hash, report_json, "
+                "error, created_at, started_at, completed_at FROM v4_study_runs WHERE study_id = ?",
+                (study_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._v4_study_run_from_row(row)
+
+    @staticmethod
+    def _v4_study_run_from_row(row: sqlite3.Row | tuple[object, ...]) -> dict[str, object]:
+        return {
+            "study_id": str(row[0]),
+            "replay_id": str(row[0]),
+            "manifest_hash": str(row[1]),
+            "status": str(row[2]),
+            "input_hash": str(row[3]),
+            "result_hash": None if row[4] is None else str(row[4]),
+            "report": None if row[5] is None else json.loads(str(row[5])),
+            "error": None if row[6] is None else str(row[6]),
+            "created_at": str(row[7]),
+            "started_at": None if row[8] is None else str(row[8]),
+            "completed_at": None if row[9] is None else str(row[9]),
+            "outcome_hash_schema": "v4-outcome-v2",
+            "certified": False,
+            "active": False,
+        }
+
+    def list_v4_study_arms(self, study_id: str) -> tuple[dict[str, object], ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT arm_id, parameters_json, parameters_hash, parent_version, "
+                "unique_difference, status FROM v4_study_arms WHERE study_id = ? ORDER BY arm_id",
+                (study_id,),
+            ).fetchall()
+        return tuple(
+            {
+                "arm_id": str(row[0]),
+                "parameters": json.loads(str(row[1])),
+                "parameters_hash": str(row[2]),
+                "parent_version": str(row[3]),
+                "change": str(row[4]),
+                "status": str(row[5]),
+            }
+            for row in rows
+        )
+
+    def list_v4_study_days(
+        self, *, study_id: str, arm_id: str, after_signal_date: date | None, limit: int
+    ) -> tuple[dict[str, object], ...]:
+        after = "0001-01-01" if after_signal_date is None else after_signal_date.isoformat()
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT signal_date, result_json, result_hash FROM v4_study_days "
+                "WHERE study_id = ? AND arm_id = ? AND signal_date > ? "
+                "ORDER BY signal_date LIMIT ?",
+                (study_id, arm_id, after, limit),
+            ).fetchall()
+        return tuple(
+            {
+                "signal_date": str(row[0]),
+                "result": json.loads(str(row[1])),
+                "result_hash": str(row[2]),
+            }
+            for row in rows
+        )
+
+    def requeue_interrupted_v4_studies(self) -> int:
+        """Make interrupted research work claimable after a process restart."""
+
+        with self._idempotent_write_connection() as connection:
+            cursor = connection.execute(
+                "UPDATE v4_study_runs SET status = 'queued', error = NULL WHERE status = 'running'"
+            )
+            return int(cursor.rowcount)
+
+    def claim_next_v4_study(self) -> dict[str, object] | None:
+        """Atomically claim the oldest queued study."""
+
+        with self._idempotent_write_connection() as connection:
+            row = connection.execute(
+                "SELECT study_id, status FROM v4_study_runs "
+                "WHERE status IN ('running', 'queued') "
+                "ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, "
+                "created_at, study_id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            study_id = str(row[0])
+            started_at = datetime.now(UTC).isoformat()
+            if str(row[1]) == "queued":
+                cursor = connection.execute(
+                    "UPDATE v4_study_runs SET status = 'running', "
+                    "started_at = COALESCE(started_at, ?), error = NULL "
+                    "WHERE study_id = ? AND status = 'queued'",
+                    (started_at, study_id),
+                )
+                if cursor.rowcount != 1:
+                    return None
+            claimed = connection.execute(
+                "SELECT study_id, manifest_hash, status, input_hash, result_hash, "
+                "report_json, error, created_at, started_at, completed_at "
+                "FROM v4_study_runs WHERE study_id = ?",
+                (study_id,),
+            ).fetchone()
+        if claimed is None:
+            return None
+        return self._v4_study_run_from_row(claimed)
+
+    def save_v4_study_step(self, *, study_id: str, step: dict[str, object]) -> None:
+        """Persist one immutable, typed research step.
+
+        Only the daily-result step is accepted until the complete v4 outcome and
+        statistics executor is wired.  Rejecting unknown shapes prevents a
+        partial worker from manufacturing apparent progress.
+        """
+
+        if step.get("kind") != "day":
+            raise ValueError("unsupported v4 study step kind")
+        arm_id = str(step.get("arm_id", ""))
+        signal_date = str(step.get("signal_date", ""))
+        result = step.get("result")
+        if not arm_id or not signal_date or not isinstance(result, dict):
+            raise ValueError("v4 day step is incomplete")
+        try:
+            date.fromisoformat(signal_date)
+        except ValueError as error:
+            raise ValueError("v4 signal_date is invalid") from error
+        encoded = self._jsonable_json(result)
+        result_hash = hashlib.sha256(
+            self._json(
+                {
+                    "schema": "v4-result-v1",
+                    "study_id": study_id,
+                    "arm_id": arm_id,
+                    "signal_date": signal_date,
+                    "result": result,
+                }
+            ).encode()
+        ).hexdigest()
+        with self._idempotent_write_connection() as connection:
+            run = connection.execute(
+                "SELECT status FROM v4_study_runs WHERE study_id = ?", (study_id,)
+            ).fetchone()
+            if run is None or str(run[0]) != "running":
+                raise ValueError("v4 study is not running")
+            if (
+                connection.execute(
+                    "SELECT 1 FROM v4_study_arms WHERE study_id = ? AND arm_id = ?",
+                    (study_id, arm_id),
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("unknown v4 study arm")
+            existing = connection.execute(
+                "SELECT result_json, result_hash FROM v4_study_days "
+                "WHERE study_id = ? AND arm_id = ? AND signal_date = ?",
+                (study_id, arm_id, signal_date),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != encoded or str(existing[1]) != result_hash:
+                    raise ValueError("immutable v4 study day conflict")
+                return
+            connection.execute(
+                "INSERT INTO v4_study_days(study_id, arm_id, signal_date, result_json, "
+                "result_hash) VALUES (?, ?, ?, ?, ?)",
+                (study_id, arm_id, signal_date, encoded, result_hash),
+            )
+
+    def complete_v4_study(self, *, study_id: str, report: dict[str, object]) -> None:
+        """Commit an immutable terminal report for a running study."""
+
+        encoded = self._jsonable_json(report)
+        result_hash = hashlib.sha256(
+            self._json({"schema": "v4-statistics-v1", "report": report}).encode()
+        ).hexdigest()
+        completed_at = datetime.now(UTC).isoformat()
+        with self._idempotent_write_connection() as connection:
+            row = connection.execute(
+                "SELECT status, result_hash, report_json FROM v4_study_runs WHERE study_id = ?",
+                (study_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("unknown v4 study")
+            if str(row[0]) == "completed":
+                if str(row[1]) != result_hash or str(row[2]) != encoded:
+                    raise ValueError("immutable v4 study report conflict")
+                return
+            if str(row[0]) != "running":
+                raise ValueError("v4 study is not running")
+            connection.execute(
+                "UPDATE v4_study_runs SET status = 'completed', result_hash = ?, "
+                "report_json = ?, error = NULL, completed_at = ? WHERE study_id = ?",
+                (result_hash, encoded, completed_at, study_id),
+            )
+            connection.execute(
+                "UPDATE v4_study_arms SET status = 'completed' WHERE study_id = ?",
+                (study_id,),
+            )
+
+    def fail_v4_study(self, *, study_id: str, error: str) -> None:
+        """Persist a safe terminal failure without overwriting completed work."""
+
+        if not error or len(error) > 512:
+            raise ValueError("v4 study failure summary is invalid")
+        with self._idempotent_write_connection() as connection:
+            row = connection.execute(
+                "SELECT status, error FROM v4_study_runs WHERE study_id = ?", (study_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("unknown v4 study")
+            if str(row[0]) == "failed":
+                if str(row[1]) != error:
+                    raise ValueError("immutable v4 study failure conflict")
+                return
+            if str(row[0]) != "running":
+                raise ValueError("v4 study is not running")
+            connection.execute(
+                "UPDATE v4_study_runs SET status = 'failed', error = ?, completed_at = ? "
+                "WHERE study_id = ?",
+                (error, datetime.now(UTC).isoformat(), study_id),
+            )
+            connection.execute(
+                "UPDATE v4_study_arms SET status = 'failed' WHERE study_id = ?",
+                (study_id,),
+            )
+
+    def activate_provider_source(
+        self,
+        *,
+        source: str,
+        qualification_id: str,
+        capabilities: tuple[str, ...],
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        normalized_capabilities = tuple(sorted(set(capabilities)))
+        if normalized_capabilities != ("backup_price", "enrichment"):
+            raise ValueError("both frozen provider capabilities are required")
+        operation = "provider:activate"
+        request = {
+            "source": source,
+            "qualification_id": qualification_id,
+            "capabilities": list(normalized_capabilities),
+        }
+        request_hash = self._request_hash(operation, request)
+        with self._idempotent_write_connection() as connection:
+            cached = self._idempotent_result(connection, operation, idempotency_key, request_hash)
+            if cached is not None:
+                return dict(cached)
+            approval = connection.execute(
+                "SELECT capabilities_json, consumed_at FROM provider_source_approvals "
+                "WHERE qualification_id = ?",
+                (qualification_id,),
+            ).fetchone()
+            expected = self._json(list(normalized_capabilities))
+            if approval is None or approval[0] != expected or approval[1] is not None:
+                raise ValueError("unconsumed host provider approval is required")
+            report = connection.execute(
+                "SELECT source, status, window_hash FROM provider_qualification_reports "
+                "WHERE qualification_id = ?",
+                (qualification_id,),
+            ).fetchone()
+            attestation = connection.execute(
+                "SELECT window_hash, terms_confirmed FROM "
+                "provider_qualification_review_attestations WHERE qualification_id = ?",
+                (qualification_id,),
+            ).fetchone()
+            if (
+                report is None
+                or report[0] != source
+                or report[1] != "qualified_for_manual_approval"
+                or attestation != (report[2], 1)
+            ):
+                raise ValueError("current qualified provider evidence and attestation are required")
+            activated_at = datetime.now(UTC).isoformat()
+            connection.execute(
+                "INSERT INTO provider_source_registry(source, qualification_id, capabilities_json, "
+                "activated_at) VALUES (?, ?, ?, ?) ON CONFLICT(source) DO UPDATE SET "
+                "qualification_id=excluded.qualification_id, "
+                "capabilities_json=excluded.capabilities_json, "
+                "activated_at=excluded.activated_at",
+                (source, qualification_id, expected, activated_at),
+            )
+            connection.execute(
+                "UPDATE provider_source_approvals SET consumed_at = ? WHERE qualification_id = ?",
+                (activated_at, qualification_id),
+            )
+            result = {
+                "source": source,
+                "qualification_id": qualification_id,
+                "capabilities": list(normalized_capabilities),
+                "activated_at": activated_at,
+            }
+            self._save_idempotent_result(
+                connection, operation, idempotency_key, request_hash, result
+            )
+        return result
+
+    def approve_provider_source_capabilities(
+        self, *, qualification_id: str, capabilities: tuple[str, ...]
+    ) -> dict[str, object]:
+        normalized = tuple(sorted(set(capabilities)))
+        if normalized != ("backup_price", "enrichment"):
+            raise ValueError("host approval requires both frozen provider capabilities")
+        encoded = self._json(list(normalized))
+        approved_at = datetime.now(UTC).isoformat()
+        with self._idempotent_write_connection() as connection:
+            report = connection.execute(
+                "SELECT status, window_hash FROM provider_qualification_reports "
+                "WHERE qualification_id = ?",
+                (qualification_id,),
+            ).fetchone()
+            attestation = connection.execute(
+                "SELECT window_hash, terms_confirmed FROM "
+                "provider_qualification_review_attestations WHERE qualification_id = ?",
+                (qualification_id,),
+            ).fetchone()
+            if (
+                report is None
+                or report[0] != "qualified_for_manual_approval"
+                or attestation != (report[1], 1)
+            ):
+                raise ValueError("qualified and attested provider report is required")
+            row = connection.execute(
+                "SELECT capabilities_json, approved_at, consumed_at FROM provider_source_approvals "
+                "WHERE qualification_id = ?",
+                (qualification_id,),
+            ).fetchone()
+            if row is not None and row[0] != encoded:
+                raise ValueError("provider source approval is immutable")
+            if row is None:
+                connection.execute(
+                    "INSERT INTO provider_source_approvals(qualification_id, capabilities_json, "
+                    "approved_at) VALUES (?, ?, ?)",
+                    (qualification_id, encoded, approved_at),
+                )
+            else:
+                approved_at = str(row[1])
+        return {
+            "qualification_id": qualification_id,
+            "capabilities": list(normalized),
+            "approved_at": approved_at,
+        }
+
     def _save_market_snapshot(
         self, connection: sqlite3.Connection, snapshot: MarketSnapshot
     ) -> None:
@@ -628,9 +1584,12 @@ class Database:
             raise ValueError("only proposed strategy versions can be registered")
         parameters_json = self._json(strategy.parameters)
         with self._idempotent_write_connection() as connection:
-            if connection.execute(
-                "SELECT 1 FROM strategy_versions WHERE version = ?", (predecessor,)
-            ).fetchone() is None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM strategy_versions WHERE version = ?", (predecessor,)
+                ).fetchone()
+                is None
+            ):
                 raise ValueError("strategy relation predecessor does not exist")
             existing = connection.execute(
                 "SELECT status, parameters_json FROM strategy_versions WHERE version = ?",
@@ -672,12 +1631,8 @@ class Database:
             "daily_price_limits", "fact_json", trade_date, source, limits
         )
 
-    def load_daily_price_limits(
-        self, trade_date: date, *, source: str
-    ) -> dict[str, object]:
-        return self._load_v3_fact_batch(
-            "daily_price_limits", "fact_json", trade_date, source
-        )
+    def load_daily_price_limits(self, trade_date: date, *, source: str) -> dict[str, object]:
+        return self._load_v3_fact_batch("daily_price_limits", "fact_json", trade_date, source)
 
     def save_v3_snapshot_features(
         self, *, trade_date: date, source: str, features: dict[str, object]
@@ -688,12 +1643,8 @@ class Database:
             "v3_snapshot_features", "feature_json", trade_date, source, features
         )
 
-    def load_v3_snapshot_features(
-        self, trade_date: date, *, source: str
-    ) -> dict[str, object]:
-        return self._load_v3_fact_batch(
-            "v3_snapshot_features", "feature_json", trade_date, source
-        )
+    def load_v3_snapshot_features(self, trade_date: date, *, source: str) -> dict[str, object]:
+        return self._load_v3_fact_batch("v3_snapshot_features", "feature_json", trade_date, source)
 
     def _save_v3_fact_batch(
         self,
@@ -902,10 +1853,13 @@ class Database:
                     (job_id,),
                 ).fetchall()
             }
-            certified = connection.execute(
-                "SELECT 1 FROM strategy_replay_attestations WHERE job_id = ?",
-                (job_id,),
-            ).fetchone() is not None
+            certified = (
+                connection.execute(
+                    "SELECT 1 FROM strategy_replay_attestations WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()
+                is not None
+            )
         return self._strategy_replay_job(row, completed_dates, certified)
 
     def bind_strategy_replay_start_idempotency(
@@ -927,13 +1881,14 @@ class Database:
         }
         request_hash = self._request_hash(operation, request)
         with self._idempotent_write_connection() as connection:
-            cached = self._idempotent_result(
-                connection, operation, idempotency_key, request_hash
-            )
+            cached = self._idempotent_result(connection, operation, idempotency_key, request_hash)
             if cached is None:
-                if connection.execute(
-                    "SELECT 1 FROM strategy_replay_jobs WHERE job_id = ?", (job_id,)
-                ).fetchone() is None:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM strategy_replay_jobs WHERE job_id = ?", (job_id,)
+                    ).fetchone()
+                    is None
+                ):
                     raise ValueError(f"unknown strategy replay job: {job_id}")
                 self._save_idempotent_result(
                     connection,
@@ -1335,9 +2290,7 @@ class Database:
             or len(sessions) != 727
         ):
             raise ValueError("v3 strategy replay requires the fixed 727-session dataset")
-        if is_v3 and (
-            job.get("outcome_status") != "completed" or job.get("outcome_hash") is None
-        ):
+        if is_v3 and (job.get("outcome_status") != "completed" or job.get("outcome_hash") is None):
             raise ValueError("v3 strategy replay outcome evidence is incomplete")
         values = (
             job["strategy_version"],
@@ -1398,9 +2351,7 @@ class Database:
             raise RuntimeError("strategy replay attestation was not persisted")
         return attestation
 
-    def get_strategy_replay_attestation(
-        self, strategy_version: str
-    ) -> dict[str, object] | None:
+    def get_strategy_replay_attestation(self, strategy_version: str) -> dict[str, object] | None:
         with self.connect() as connection:
             row = connection.execute(
                 """
@@ -1447,9 +2398,7 @@ class Database:
         strategy = self.load_strategy_version(strategy_version)
         if strategy is None:
             raise ValueError(f"unknown strategy version: {strategy_version}")
-        stored_hash = hashlib.sha256(
-            self._json(strategy.parameters).encode("utf-8")
-        ).hexdigest()
+        stored_hash = hashlib.sha256(self._json(strategy.parameters).encode("utf-8")).hexdigest()
         if stored_hash != parameters_hash:
             raise ValueError("strategy replay parameters hash does not match the stored version")
         job_id = f"verified-{strategy_version}"
@@ -1687,9 +2636,8 @@ class Database:
             if approval is None or approval[0] != parameters_hash:
                 return "operator_approval_required"
             parameters = json.loads(str(strategy[0]))
-            is_v3 = (
-                parameters.get("rule_engine_version") == 3
-                or version.startswith(("v3", "v0.3-"))
+            is_v3 = parameters.get("rule_engine_version") == 3 or version.startswith(
+                ("v3", "v0.3-")
             )
             replay = connection.execute(
                 """
@@ -1798,9 +2746,7 @@ class Database:
                 (predecessor, successor, relation, datetime.now(UTC).isoformat()),
             )
 
-    def list_strategy_version_relations(
-        self, successor: str
-    ) -> tuple[dict[str, str], ...]:
+    def list_strategy_version_relations(self, successor: str) -> tuple[dict[str, str], ...]:
         with self.connect() as connection:
             rows = connection.execute(
                 """
@@ -2607,9 +3553,87 @@ class Database:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     @staticmethod
+    def _iso(value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, date | datetime):
+            return value.isoformat()
+        return str(value)
+
+    @staticmethod
+    def _mapping(value: object) -> dict[str, object]:
+        if isinstance(value, dict):
+            return dict(value)
+        fields = getattr(value, "__dataclass_fields__", None)
+        if fields is None:
+            raise TypeError("provider fact must be a mapping or dataclass")
+        return {name: getattr(value, name) for name in fields}
+
+    @classmethod
+    def _jsonable(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return {str(key): cls._jsonable(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [cls._jsonable(item) for item in value]
+        if isinstance(value, date | datetime):
+            return value.isoformat()
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        fields = getattr(value, "__dataclass_fields__", None)
+        if fields is not None:
+            return {name: cls._jsonable(getattr(value, name)) for name in fields}
+        return str(value)
+
+    @classmethod
+    def _jsonable_json(cls, value: object) -> str:
+        return json.dumps(
+            cls._jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+
+    @staticmethod
+    def _immutable_insert(
+        connection: sqlite3.Connection,
+        table: str,
+        key_column: str,
+        key: object,
+        value_columns: tuple[str, ...],
+        values: tuple[object, ...],
+    ) -> None:
+        Database._immutable_composite_insert(
+            connection, table, (key_column,), (key,), value_columns, values
+        )
+
+    @staticmethod
+    def _immutable_composite_insert(
+        connection: sqlite3.Connection,
+        table: str,
+        key_columns: tuple[str, ...],
+        keys: tuple[object, ...],
+        value_columns: tuple[str, ...],
+        values: tuple[object, ...],
+    ) -> None:
+        where = " AND ".join(f"{name} = ?" for name in key_columns)
+        selected = ", ".join(value_columns)
+        existing = connection.execute(
+            f"SELECT {selected} FROM {table} WHERE {where}", keys
+        ).fetchone()
+        if existing is not None:
+            if tuple(existing) != values:
+                raise ValueError(f"{table} fact is immutable; conflicting content")
+            return
+        columns = (*key_columns, *value_columns)
+        placeholders = ", ".join("?" for _ in columns)
+        connection.execute(
+            f"INSERT INTO {table}({', '.join(columns)}) VALUES ({placeholders})",
+            (*keys, *values),
+        )
+
+    @staticmethod
     def _validate_sha256(value: object, label: str) -> None:
-        if not isinstance(value, str) or len(value) != 64 or any(
-            character not in "0123456789abcdef" for character in value
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
         ):
             raise ValueError(f"strategy replay {label} hash must be lowercase SHA-256")
 
@@ -2838,9 +3862,7 @@ class Database:
             self._ensure_column(
                 connection, "strategy_replay_jobs", "industry_mapping_sha256", "TEXT"
             )
-            self._ensure_column(
-                connection, "strategy_replay_attestations", "outcome_hash", "TEXT"
-            )
+            self._ensure_column(connection, "strategy_replay_attestations", "outcome_hash", "TEXT")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS daily_price_limits (
@@ -2893,6 +3915,138 @@ class Database:
                     FOREIGN KEY (version) REFERENCES strategy_versions(version)
                 );
                 PRAGMA user_version = 10;
+                """
+            )
+        if version < 11:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS provider_fetch_evidence (
+                    fetch_id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL, endpoint_kind TEXT NOT NULL,
+                    request_key TEXT NOT NULL, trade_date TEXT, http_date TEXT,
+                    retrieved_at TEXT NOT NULL, http_status INTEGER,
+                    byte_length INTEGER NOT NULL, payload_sha256 TEXT NOT NULL,
+                    adapter_version TEXT NOT NULL, status TEXT NOT NULL,
+                    error_class TEXT
+                );
+                CREATE TABLE IF NOT EXISTS provider_backfill_runs (
+                    run_id TEXT PRIMARY KEY, source TEXT NOT NULL,
+                    manifest_hash TEXT NOT NULL, manifest_json TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS sina_backfill_checkpoints (
+                    run_id TEXT NOT NULL, symbol TEXT NOT NULL, status TEXT NOT NULL,
+                    checkpoint_json TEXT NOT NULL, PRIMARY KEY(run_id, symbol)
+                );
+                CREATE TABLE IF NOT EXISTS provider_backfill_checkpoints (
+                    run_id TEXT NOT NULL, request_key TEXT NOT NULL, status TEXT NOT NULL,
+                    checkpoint_json TEXT NOT NULL, PRIMARY KEY(run_id, request_key)
+                );
+                CREATE TABLE IF NOT EXISTS share_capital_facts (
+                    symbol TEXT NOT NULL, effective_date TEXT NOT NULL, source TEXT NOT NULL,
+                    outstanding_shares INTEGER NOT NULL, source_timestamp TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    PRIMARY KEY(symbol, effective_date, source)
+                );
+                CREATE TABLE IF NOT EXISTS daily_security_status (
+                    symbol TEXT NOT NULL, trade_date TEXT NOT NULL, source TEXT NOT NULL,
+                    tradestatus TEXT NOT NULL, is_st INTEGER NOT NULL,
+                    source_timestamp TEXT NOT NULL, batch_sha256 TEXT NOT NULL,
+                    PRIMARY KEY(symbol, trade_date, source)
+                );
+                CREATE TABLE IF NOT EXISTS provider_daily_metrics (
+                    symbol TEXT NOT NULL, trade_date TEXT NOT NULL,
+                    price_source TEXT NOT NULL, capital_source TEXT NOT NULL,
+                    upstream_market_cap_fen INTEGER, derived_market_cap_fen INTEGER,
+                    upstream_turnover_rate TEXT, derived_turnover_rate TEXT,
+                    evidence_sha256 TEXT NOT NULL,
+                    PRIMARY KEY(symbol, trade_date, price_source, capital_source)
+                );
+                CREATE TABLE IF NOT EXISTS provider_spot_batches (
+                    trade_date TEXT NOT NULL, source TEXT NOT NULL, metrics_json TEXT NOT NULL,
+                    PRIMARY KEY(trade_date, source)
+                );
+                CREATE TABLE IF NOT EXISTS provider_shadow_runs (
+                    source TEXT NOT NULL, trade_date TEXT NOT NULL,
+                    adapter_version TEXT NOT NULL, run_json TEXT NOT NULL,
+                    status TEXT NOT NULL, dataset_hash TEXT NOT NULL,
+                    PRIMARY KEY(source, trade_date, adapter_version)
+                );
+                CREATE TABLE IF NOT EXISTS provider_qualifications (
+                    source TEXT NOT NULL, through_date TEXT NOT NULL, status TEXT NOT NULL,
+                    dataset_hash TEXT NOT NULL, recorded_at TEXT NOT NULL,
+                    report_json TEXT NOT NULL, PRIMARY KEY(source, through_date)
+                );
+                CREATE TABLE IF NOT EXISTS provider_qualification_reports (
+                    qualification_id TEXT PRIMARY KEY, source TEXT NOT NULL,
+                    through_date TEXT NOT NULL, status TEXT NOT NULL,
+                    window_hash TEXT NOT NULL, report_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS provider_attestations (
+                    source TEXT NOT NULL, through_date TEXT NOT NULL,
+                    dataset_hash TEXT NOT NULL, attested_at TEXT NOT NULL,
+                    PRIMARY KEY(source, through_date)
+                );
+                CREATE TABLE IF NOT EXISTS provider_qualification_review_attestations (
+                    qualification_id TEXT PRIMARY KEY, window_hash TEXT NOT NULL,
+                    terms_confirmed INTEGER NOT NULL, attested_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS provider_approvals (
+                    source TEXT NOT NULL, through_date TEXT NOT NULL,
+                    dataset_hash TEXT NOT NULL, approved_at TEXT NOT NULL,
+                    PRIMARY KEY(source, through_date)
+                );
+                CREATE TABLE IF NOT EXISTS provider_source_approvals (
+                    qualification_id TEXT PRIMARY KEY, capabilities_json TEXT NOT NULL,
+                    approved_at TEXT NOT NULL, consumed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS provider_registry (
+                    source TEXT PRIMARY KEY, qualification_id TEXT NOT NULL,
+                    capabilities_json TEXT NOT NULL, activated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS provider_source_registry (
+                    source TEXT PRIMARY KEY, qualification_id TEXT NOT NULL,
+                    capabilities_json TEXT NOT NULL, activated_at TEXT NOT NULL,
+                    expires_on_failure INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS v4_dataset_manifests (
+                    manifest_hash TEXT PRIMARY KEY, manifest_json TEXT NOT NULL,
+                    price_source TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS v4_study_runs (
+                    study_id TEXT PRIMARY KEY, manifest_hash TEXT NOT NULL,
+                    status TEXT NOT NULL, input_hash TEXT NOT NULL,
+                    result_hash TEXT, report_json TEXT, error TEXT,
+                    created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS v4_study_arms (
+                    study_id TEXT NOT NULL, arm_id TEXT NOT NULL,
+                    parameters_json TEXT NOT NULL, parameters_hash TEXT NOT NULL,
+                    parent_version TEXT NOT NULL, unique_difference TEXT NOT NULL,
+                    status TEXT NOT NULL, PRIMARY KEY(study_id, arm_id)
+                );
+                CREATE TABLE IF NOT EXISTS v4_study_days (
+                    study_id TEXT NOT NULL, arm_id TEXT NOT NULL, signal_date TEXT NOT NULL,
+                    result_json TEXT NOT NULL, result_hash TEXT NOT NULL,
+                    PRIMARY KEY(study_id, arm_id, signal_date)
+                );
+                CREATE TABLE IF NOT EXISTS v4_study_candidate_outcomes (
+                    study_id TEXT NOT NULL, arm_id TEXT NOT NULL,
+                    candidate_id TEXT NOT NULL, outcome_json TEXT NOT NULL,
+                    outcome_hash TEXT NOT NULL, PRIMARY KEY(study_id, arm_id, candidate_id)
+                );
+                CREATE TABLE IF NOT EXISTS v4_study_statistics (
+                    study_id TEXT NOT NULL, arm_id TEXT NOT NULL,
+                    statistics_json TEXT NOT NULL, statistics_hash TEXT NOT NULL,
+                    PRIMARY KEY(study_id, arm_id)
+                );
+                CREATE TABLE IF NOT EXISTS v4_study_proposal_artifacts (
+                    artifact_hash TEXT PRIMARY KEY, study_id TEXT NOT NULL,
+                    arm_id TEXT NOT NULL, version TEXT NOT NULL,
+                    artifact_json TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 11;
                 """
             )
 

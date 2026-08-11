@@ -153,17 +153,122 @@ class StockMcpApplication:
         strategy_registry: Any,
         *,
         replay: Any | None = None,
+        v4_research: Any | None = None,
     ) -> None:
         self._repository = repository
         self._quote_provider = quote_provider
         self._strategy_registry = strategy_registry
         self._replay = replay
+        self._v4_research = v4_research
         self._strategy_write_results: dict[tuple[str, str], Result] = {}
         self._strategy_write_requests: dict[tuple[str, str], Mapping[str, Any]] = {}
         # Repository sets deliberately do not prescribe presentation order.
         # Preserve the user's explicit order in this process while the durable
         # repository remains responsible for membership and idempotency.
         self._watchlist_order: dict[str, list[str]] = {}
+
+    def start_v4_research(self, *, manifest_hash: str, idempotency_key: str) -> Result:
+        coordinator = getattr(self, "_v4_research", None)
+        if coordinator is None:
+            return _error("v4_research_unavailable", "v4 research is unavailable")
+        try:
+            run = coordinator.start_v4_research(
+                manifest_hash=manifest_hash, idempotency_key=idempotency_key
+            )
+        except ValueError as error:
+            return _error("v4_research_rejected", str(error))
+        return _ok(dict(run))
+
+    def get_v4_research(self, *, study_id: str) -> Result:
+        coordinator = getattr(self, "_v4_research", None)
+        if coordinator is None:
+            return _error("v4_research_unavailable", "v4 research is unavailable")
+        run = coordinator.get_v4_research(study_id=study_id)
+        return (
+            _error("v4_research_not_found", "v4 research does not exist")
+            if run is None
+            else _ok(dict(run))
+        )
+
+    def get_v4_research_arms(self, *, study_id: str) -> Result:
+        coordinator = getattr(self, "_v4_research", None)
+        if coordinator is None:
+            return _error("v4_research_unavailable", "v4 research is unavailable")
+        return _ok(
+            {
+                "study_id": study_id,
+                "arms": [
+                    dict(item) for item in coordinator.get_v4_research_arms(study_id=study_id)
+                ],
+            }
+        )
+
+    def get_v4_research_days(
+        self,
+        *,
+        study_id: str,
+        arm_id: str,
+        after_signal_date: date | None = None,
+        limit: int = 20,
+    ) -> Result:
+        coordinator = getattr(self, "_v4_research", None)
+        if coordinator is None:
+            return _error("v4_research_unavailable", "v4 research is unavailable")
+        days = coordinator.get_v4_research_days(
+            study_id=study_id,
+            arm_id=arm_id,
+            after_signal_date=after_signal_date,
+            limit=limit,
+        )
+        return _ok({"study_id": study_id, "arm_id": arm_id, "days": [dict(item) for item in days]})
+
+    def get_v4_research_report(self, *, study_id: str) -> Result:
+        coordinator = getattr(self, "_v4_research", None)
+        if coordinator is None:
+            return _error("v4_research_unavailable", "v4 research is unavailable")
+        report = coordinator.get_v4_research_report(study_id=study_id)
+        return (
+            _error("v4_research_not_found", "v4 research does not exist")
+            if report is None
+            else _ok(dict(report))
+        )
+
+    def get_provider_qualification(self, *, source: str) -> Result:
+        qualification = self._repository.get_provider_qualification(source)
+        if qualification is None:
+            return _error(
+                "provider_qualification_not_found", "provider qualification does not exist"
+            )
+        return _ok(dict(qualification))
+
+    def activate_provider_source(
+        self,
+        *,
+        source: str,
+        qualification_id: str,
+        capabilities: list[str],
+        confirmed: bool,
+        idempotency_key: str,
+    ) -> Result:
+        if not confirmed:
+            return _error("confirmation_required", "explicit confirmation is required")
+        if tuple(sorted(set(capabilities))) != ("backup_price", "enrichment"):
+            return _error(
+                "provider_activation_rejected", "both frozen provider capabilities are required"
+            )
+        activate = getattr(self._repository, "activate_provider_source", None)
+        if not callable(activate):
+            return _error("provider_activation_unavailable", "provider activation is unavailable")
+        try:
+            result = activate(
+                source=source,
+                qualification_id=qualification_id,
+                capabilities=tuple(capabilities),
+                idempotency_key=idempotency_key,
+            )
+        except ValueError as error:
+            return _error("provider_activation_rejected", str(error))
+        return _ok(dict(result))
 
     def get_daily_review(self, *, trade_date: date) -> Result:
         get_status = getattr(self._repository, "get_publication_status", None)
@@ -414,14 +519,11 @@ class StockMcpApplication:
             return _error("replay_unavailable", "strategy replay is unavailable")
         try:
             persisted_compare = getattr(self._replay, "compare_completed_replays", None)
-            if (
-                callable(persisted_compare)
-                and (
-                    left_version.startswith("v3")
-                    or left_strategy.parameters.get("rule_engine_version") == 3
-                    or right_version.startswith("v3")
-                    or right_strategy.parameters.get("rule_engine_version") == 3
-                )
+            if callable(persisted_compare) and (
+                left_version.startswith("v3")
+                or left_strategy.parameters.get("rule_engine_version") == 3
+                or right_version.startswith("v3")
+                or right_strategy.parameters.get("rule_engine_version") == 3
             ):
                 comparison = persisted_compare(left_version, right_version, start, end)
             else:
@@ -474,9 +576,7 @@ class StockMcpApplication:
             return _error("strategy_replay_not_found", "strategy replay does not exist")
         return _ok(dict(replay))
 
-    def list_strategy_replays(
-        self, *, version: str | None = None, limit: int = 20
-    ) -> Result:
+    def list_strategy_replays(self, *, version: str | None = None, limit: int = 20) -> Result:
         if self._replay is None:
             return _error("replay_unavailable", "strategy replay is unavailable")
         replays = self._replay.list_strategy_replays(version=version, limit=limit)
@@ -562,20 +662,14 @@ class StockMcpApplication:
 
                 expected_policy = 1 if version.endswith("-1") else 2
                 if dict(validated) != v3_proposal_parameters(expected_policy):
-                    raise ValueError(
-                        f"{version} is reserved for the frozen v3 policy template"
-                    )
+                    raise ValueError(f"{version} is reserved for the frozen v3 policy template")
             strategy = StrategyVersion(version=version, status="proposed", parameters=validated)
             if supersedes_version is not None:
                 if self._get_strategy(supersedes_version) is None:
                     raise ValueError("superseded strategy version does not exist")
-                atomic_propose = getattr(
-                    self._strategy_registry, "propose_with_relation", None
-                )
+                atomic_propose = getattr(self._strategy_registry, "propose_with_relation", None)
                 if callable(atomic_propose):
-                    persisted = atomic_propose(
-                        strategy, supersedes_version=supersedes_version
-                    )
+                    persisted = atomic_propose(strategy, supersedes_version=supersedes_version)
                 else:
                     relation_writer = getattr(
                         self._repository, "save_strategy_version_relation", None

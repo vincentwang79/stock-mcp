@@ -216,9 +216,7 @@ class BuildV3FactsContractTest(unittest.TestCase):
         mapping_hash = load_industry_reference(formal).mapping_sha256
         self.assertEqual("银行", features["600001.SH"]["industry"])
         self.assertEqual("recorded-sina-industry", features["600001.SH"]["industry_standard"])
-        self.assertEqual(
-            "retrospective_current_mapping", features["600001.SH"]["industry_mode"]
-        )
+        self.assertEqual("retrospective_current_mapping", features["600001.SH"]["industry_mode"])
         self.assertEqual("2026-08-07", features["600001.SH"]["industry_as_of"])
         self.assertEqual(mapping_hash, features["600001.SH"]["industry_mapping_sha256"])
         self.assertNotEqual("3" * 64, mapping_hash, "declared hashes are not a trust anchor")
@@ -248,9 +246,7 @@ class BuildV3FactsContractTest(unittest.TestCase):
     def test_v3_input_does_not_substitute_an_older_bar_for_a_missing_market_session(self) -> None:
         from stock_mcp.v3_facts import load_v3_market_input
 
-        market = load_v3_market_input(
-            _SuspendedHistoryRepository(), TRADE_DATE, source=SOURCE
-        )
+        market = load_v3_market_input(_SuspendedHistoryRepository(), TRADE_DATE, source=SOURCE)
 
         self.assertEqual(1, market.breadth.eligible_count)
         self.assertNotEqual(
@@ -282,9 +278,7 @@ class _SuspendedHistoryRepository:
         first_dates = all_prior[1:]
         second_dates = (*all_prior[:59], all_prior[60])
         bars = []
-        for security, sessions in zip(
-            self.securities, (first_dates, second_dates), strict=True
-        ):
+        for security, sessions in zip(self.securities, (first_dates, second_dates), strict=True):
             bars.extend(self._bar(security.symbol, session) for session in sessions)
             bars.append(self._bar(security.symbol, TRADE_DATE))
         self.bars = tuple(bars)

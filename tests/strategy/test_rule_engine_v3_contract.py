@@ -487,9 +487,7 @@ class RuleEngineV3ScreeningContractTest(unittest.TestCase):
         self.assertEqual("strong_pullback", candidates[pullback.security.symbol].setup_type)
         self.assertEqual("volume_breakout", candidates[breakout.security.symbol].setup_type)
         for candidate in candidates.values():
-            contributions = {
-                item.metric: item.score_contribution for item in candidate.evidence
-            }
+            contributions = {item.metric: item.score_contribution for item in candidate.evidence}
             self.assertEqual(40, contributions["primary_percentile_bps"])
             self.assertEqual(30, contributions["amount_percentile_bps"])
             self.assertEqual(30, contributions["liquidity_percentile_bps"])

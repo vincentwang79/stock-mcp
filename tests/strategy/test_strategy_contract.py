@@ -65,9 +65,7 @@ def _bar(
     )
 
 
-def _strategy(
-    *, version: str = "v0.1-proposed", rule_engine_version: int = 1
-) -> StrategyVersion:
+def _strategy(*, version: str = "v0.1-proposed", rule_engine_version: int = 1) -> StrategyVersion:
     """One public, deliberately conservative v0.1 parameter set."""
     return StrategyVersion(
         version=version,
@@ -312,9 +310,7 @@ class StrategyScreeningContractTest(unittest.TestCase):
         )
         evidence_by_symbol = {
             candidate.symbol: next(
-                item
-                for item in candidate.evidence
-                if item.metric == "industry_strength_bps"
+                item for item in candidate.evidence if item.metric == "industry_strength_bps"
             )
             for candidate in informational.candidates
         }

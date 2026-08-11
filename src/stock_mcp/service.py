@@ -28,6 +28,7 @@ from .production import LazyAKShareQuoteProvider, ProductionPostMarketTask
 from .replay_jobs import StrategyReplayCoordinator
 from .storage import Database
 from .strategy import DatabaseStrategyRegistry
+from .v4_research import V4ResearchCoordinator
 
 _LOOPBACK_HOST = "127.0.0.1"
 _MCP_PATH = "/mcp"
@@ -165,11 +166,13 @@ def _default_dependencies(settings: Settings) -> dict[str, object]:
         strategy_registry,
         allowed=is_strategy_replay_allowed,
     )
+    v4_research = V4ResearchCoordinator(database)
     application = StockMcpApplication(
         database,
         LazyAKShareQuoteProvider(),
         strategy_registry,
         replay=replay_runner,
+        v4_research=v4_research,
     )
 
     scheduler = _make_scheduler()

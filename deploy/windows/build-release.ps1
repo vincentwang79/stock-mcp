@@ -24,6 +24,21 @@ $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $lock = Join-Path $repo 'uv.lock'
 if (-not (Test-Path -LiteralPath $lock -PathType Leaf)) { throw 'uv.lock is required; run uv lock before a release.' }
 $manifest = Get-ToolManifest $ToolsManifest
+$uv = Join-Path $ToolsDirectory $manifest.tools.uv.path
+if (-not (Test-Path -LiteralPath $uv -PathType Leaf)) { throw "Verified uv is required for release preflight: $uv" }
+Assert-Sha256 $uv $manifest.tools.uv.sha256
+& $uv lock --check --project $repo
+if ($LASTEXITCODE -ne 0) { throw 'uv.lock is stale.' }
+& $uv run --project $repo ruff check .
+if ($LASTEXITCODE -ne 0) { throw 'Ruff release gate failed.' }
+& $uv run --project $repo pytest -q
+if ($LASTEXITCODE -ne 0) { throw 'Test release gate failed.' }
+& git -C $repo diff --check
+if ($LASTEXITCODE -ne 0) { throw 'Git whitespace release gate failed.' }
+$secretHits = Get-ChildItem -LiteralPath $repo -Recurse -File |
+    Where-Object { $_.FullName -notmatch '[\\/](\.git|\.venv|dist|build)[\\/]' } |
+    Select-String -Pattern 'sk-(?:proj-)?[A-Za-z0-9_-]{20,}|TUSHARE_TOKEN\s*=\s*[^<\s][^\s]{20,}'
+if ($secretHits) { throw 'Potential production secret detected in release inputs.' }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ('stock-mcp-release-' + [guid]::NewGuid().ToString('N'))
 $releaseRoot = Join-Path $work 'stock-mcp-windows-x64'

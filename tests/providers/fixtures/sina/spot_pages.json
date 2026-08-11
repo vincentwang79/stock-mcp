@@ -1,0 +1,8 @@
+{
+  "recorded_at": "2026-08-07T08:30:00+00:00",
+  "count": "2",
+  "pages": {
+    "1": [{"symbol": "sh600001", "name": "样本沪市", "trade": "10.25", "settlement": "10.00", "open": "10.00", "high": "10.30", "low": "9.90", "volume": "1000", "amount": "10250", "ticktime": "15:00:00", "mktcap": "12345.67", "nmc": "10000.01", "turnoverratio": "0.08"}],
+    "2": [{"symbol": "sz000001", "name": "样本深市", "trade": "12.60", "settlement": "12.30", "open": "12.34", "high": "12.80", "low": "12.20", "volume": "2000", "amount": "25200", "ticktime": "15:00:00", "mktcap": "23456.78", "nmc": "20000.02", "turnoverratio": "0.16"}]
+  }
+}

@@ -151,9 +151,7 @@ class ServiceRuntimeContractTest(unittest.TestCase):
 
         with TemporaryDirectory() as temporary:
             database = _Database()
-            payload = _mcp_route_health(
-                self._settings(Path(temporary), configured=True), database
-            )
+            payload = _mcp_route_health(self._settings(Path(temporary), configured=True), database)
 
         self.assertEqual({"healthz": "healthy", "readyz": "ready"}, payload)
         self.assertEqual(1, database.readiness_checks)

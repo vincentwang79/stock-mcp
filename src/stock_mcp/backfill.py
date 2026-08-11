@@ -10,7 +10,7 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Any, Protocol
 
-from .domain import MarketSnapshot, Security
+from .domain import DailyBar, MarketSnapshot, Security
 from .providers.metadata import normalize_baostock_trading_calendar
 from .providers.normalization import ProviderNormalizationError, _parse_date
 from .providers.runtime import BaoStockTradingCalendar, TushareDailyProvider
@@ -60,6 +60,116 @@ class TushareSnapshotProvider(Protocol):
 class BackfillResult:
     published_dates: tuple[date, ...]
     incomplete_dates: tuple[date, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SinaBackfillResult:
+    completed_symbols: tuple[str, ...]
+    verified_symbols: tuple[str, ...]
+    failed_symbols: tuple[str, ...]
+
+
+class SinaBackfillService:
+    """Checkpointed, single-provider Sina history and share-capital backfill."""
+
+    def __init__(self, *, database: Any, provider: Any, manifest: Mapping[str, object]) -> None:
+        if getattr(provider, "source", None) != "sina":
+            raise ValueError("Sina backfill cannot use another provider")
+        if manifest.get("adapter_version") != "sina-adapter-v1":
+            raise ValueError("Sina backfill manifest adapter version is unsupported")
+        symbols = tuple(str(value) for value in manifest.get("symbols", ()))
+        if not symbols or len(symbols) != len(set(symbols)):
+            raise ValueError("Sina backfill manifest requires unique symbols")
+        if not isinstance(manifest.get("start"), date) or not isinstance(manifest.get("end"), date):
+            raise ValueError("Sina backfill manifest requires date bounds")
+        self._database = database
+        self._provider = provider
+        self._manifest = dict(manifest)
+        self._symbols = symbols
+
+    def backfill(self) -> SinaBackfillResult:
+        completed: list[str] = []
+        verified: list[str] = []
+        failed: list[str] = []
+        run_id = str(self._manifest["run_id"])
+        start = self._manifest["start"]
+        end = self._manifest["end"]
+        assert isinstance(start, date) and isinstance(end, date)
+        for symbol in self._symbols:
+            checkpoint = self._database.load_sina_backfill_checkpoint(run_id=run_id, symbol=symbol)
+            if checkpoint is not None:
+                if checkpoint.get("status") != "completed":
+                    failed.append(symbol)
+                else:
+                    verified.append(symbol)
+                continue
+            try:
+                history_loader = getattr(self._provider, "fetch_history_with_evidence", None)
+                if callable(history_loader):
+                    history, history_evidence = history_loader(symbol, start=start, end=end)
+                else:
+                    history = tuple(self._provider.fetch_history(symbol, start=start, end=end))
+                    history_evidence = None
+                capital_loader = getattr(self._provider, "fetch_share_capital_with_evidence", None)
+                if callable(capital_loader):
+                    capital, capital_evidence = capital_loader(symbol)
+                else:
+                    capital = tuple(self._provider.fetch_share_capital(symbol))
+                    capital_evidence = None
+                bars = tuple(self._daily_bar(row) for row in history)
+                if any(bar.source != "sina" for bar in bars):
+                    raise ValueError("Sina backfill history contains another source")
+                history_hashes = {str(row.get("payload_sha256")) for row in history}
+                capital_hashes = {str(row.get("payload_sha256")) for row in capital}
+                if len(history_hashes) != 1 or len(capital_hashes) != 1:
+                    raise ValueError("Sina backfill payload hash is incomplete")
+                checkpoint = {
+                    "run_id": run_id,
+                    "symbol": symbol,
+                    "status": "completed",
+                    "history_payload_sha256": next(iter(history_hashes)),
+                    "capital_payload_sha256": next(iter(capital_hashes)),
+                    "first_date": bars[0].trade_date if bars else None,
+                    "last_date": bars[-1].trade_date if bars else None,
+                    "session_count": len(bars),
+                }
+                atomic_save = getattr(self._database, "save_sina_backfill_symbol", None)
+                if callable(atomic_save):
+                    atomic_save(
+                        bars=bars,
+                        capital_facts=capital,
+                        fetch_evidence=tuple(
+                            evidence
+                            for evidence in (history_evidence, capital_evidence)
+                            if evidence is not None
+                        ),
+                        checkpoint=checkpoint,
+                    )
+                else:
+                    raise ValueError("atomic Sina backfill persistence is unavailable")
+                completed.append(symbol)
+            except Exception as error:
+                evidence = getattr(error, "evidence", None)
+                if isinstance(evidence, Mapping):
+                    self._database.save_provider_fetch_evidence(dict(evidence))
+                failed.append(symbol)
+        return SinaBackfillResult(tuple(completed), tuple(verified), tuple(failed))
+
+    @staticmethod
+    def _daily_bar(row: Mapping[str, object]) -> DailyBar:
+        return DailyBar(
+            symbol=str(row["symbol"]),
+            trade_date=row["trade_date"],
+            open_1e4=int(row["open_1e4"]),
+            high_1e4=int(row["high_1e4"]),
+            low_1e4=int(row["low_1e4"]),
+            close_1e4=int(row["close_1e4"]),
+            pre_close_1e4=int(row["pre_close_1e4"]),
+            volume_shares=int(row["volume_shares"]),
+            amount_fen=int(row["amount_fen"]),
+            source=str(row["source"]),
+            source_timestamp=row["source_timestamp"],
+        )
 
 
 class TushareDailyBackfillService:
@@ -393,9 +503,7 @@ def _query_baostock_universe_with_reconnect(
 ) -> tuple[dict[str, object], ...]:
     for attempt in range(MAX_BAOSTOCK_UNIVERSE_ATTEMPTS):
         try:
-            return _baostock_rows(
-                _call_baostock(client, "query_all_stock", day=target.isoformat())
-            )
+            return _baostock_rows(_call_baostock(client, "query_all_stock", day=target.isoformat()))
         except Exception:
             if attempt == MAX_BAOSTOCK_UNIVERSE_ATTEMPTS - 1:
                 raise

@@ -36,3 +36,9 @@
 ## 非目标
 
 Docker、WSL、Git、Node、系统 Python、入站防火墙规则、默认启用 S3。
+
+## v0.4 外部门禁
+
+升级自动迁移 Schema v11 并保留 v1–v3 事实和证明。新浪设置位于非密钥 `config\app.toml`，默认 `shadow_enabled=false`；安装和升级不自动访问新浪。诊断包只收集脱敏的 backfill checkpoint、shadow、资格、最近失败和 v4 研究摘要。
+
+静态测试不能替代 Windows 实机上的 KLC/JSONP/spot 解码、限速、断点续跑、16:35 盘后 shadow 和 20 个交易日资格观察。未完成这些外部门禁时，不得批准或激活 `sina`。

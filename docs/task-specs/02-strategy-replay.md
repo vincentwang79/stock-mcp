@@ -74,3 +74,11 @@ MCP 固定提供 `start_strategy_replay`、`get_strategy_replay`、`list_strateg
 ## 非目标
 
 收益承诺、黑箱新闻评分、自动选参、自动激活策略。
+
+## v0.4 预注册研究
+
+v4 使用独立 `v4-input-v1`、`v4-result-v1`、`v4-outcome-v2`、`v4-benchmark-v1` 和 `v4-statistics-v1`，不得改写 v3 黄金输出。主 manifest 使用完整 Tushare 价格、新浪点时流通股本、BaoStock 状态和版本化行业映射；最后 25 个会话只用于确认、入场和 outcome，不产生信号。
+
+研究固定一条 v0.3-policy-1 基线及六个单因素 challenger，不做网格、组合赢家或自动调参。统计固定 20 会话圆形 moving-block bootstrap、10,000 次和 White Reality Check。没有 challenger 同时通过多重检验、CI、完整性、可执行率和新浪复制门禁时，合法结论是保留 v0.3。
+
+研究服务不得仅创建 `queued` 记录后永久搁置。完整逐日 worker、market-cap-matched benchmark、全终态 outcome、重启恢复和新浪复制门禁尚未可用时，`start_v4_research` 必须显式拒绝；读取接口仍可审计已经持久化的证据。该失败关闭行为不等于研究功能已通过验收。

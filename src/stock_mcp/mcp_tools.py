@@ -138,6 +138,39 @@ class ActivateStrategyVersionInput(_IdempotentWrite):
     confirmed: bool
 
 
+class StartV4ResearchInput(_IdempotentWrite):
+    manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class GetV4ResearchInput(_Dto):
+    study_id: str = Field(min_length=1, max_length=100)
+
+
+class GetV4ResearchArmsInput(GetV4ResearchInput):
+    pass
+
+
+class GetV4ResearchDaysInput(GetV4ResearchInput):
+    arm_id: str = Field(min_length=1, max_length=100)
+    after_signal_date: date | None = None
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class GetV4ResearchReportInput(GetV4ResearchInput):
+    pass
+
+
+class GetProviderQualificationInput(_Dto):
+    source: Literal["sina"]
+
+
+class ActivateProviderSourceInput(_IdempotentWrite):
+    source: Literal["sina"]
+    qualification_id: str = Field(min_length=1, max_length=200)
+    capabilities: list[Literal["enrichment", "backup_price"]] = Field(min_length=2, max_length=2)
+    confirmed: bool
+
+
 class ToolError(_Dto):
     code: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=1_000)
@@ -146,6 +179,33 @@ class ToolError(_Dto):
 class ToolResult(_Dto):
     """The common envelope for both successful and business-error results."""
 
+    ok: bool
+    data: dict[str, Any] | None = None
+    error: ToolError | None = None
+
+
+class V4ResearchOutput(_Dto):
+    study_id: str | None = None
+    replay_id: str | None = None
+    status: str
+    manifest_hash: str | None = None
+    outcome_hash_schema: str | None = "v4-outcome-v2"
+    outcome_through: date | None = None
+    bootstrap_method: str | None = None
+    multiple_testing_method: str | None = None
+    winner: dict[str, Any] | None = None
+    completeness_status: str | None = None
+    certified: bool = False
+    active: bool = False
+
+
+class V4ResearchResult(_Dto):
+    ok: bool
+    data: V4ResearchOutput | dict[str, Any] | None = None
+    error: ToolError | None = None
+
+
+class ProviderQualificationResult(_Dto):
     ok: bool
     data: dict[str, Any] | None = None
     error: ToolError | None = None
@@ -577,6 +637,13 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         ("certify_strategy_replay", CertifyStrategyReplayInput, False, False, False),
         ("create_strategy_proposal", CreateStrategyProposalInput, False, False, False),
         ("activate_strategy_version", ActivateStrategyVersionInput, False, True, False),
+        ("start_v4_research", StartV4ResearchInput, False, False, False),
+        ("get_v4_research", GetV4ResearchInput, True, False, False),
+        ("get_v4_research_arms", GetV4ResearchArmsInput, True, False, False),
+        ("get_v4_research_days", GetV4ResearchDaysInput, True, False, False),
+        ("get_v4_research_report", GetV4ResearchReportInput, True, False, False),
+        ("get_provider_qualification", GetProviderQualificationInput, True, False, False),
+        ("activate_provider_source", ActivateProviderSourceInput, False, True, False),
     )
     output_models: dict[str, type[_Dto]] = {
         "get_daily_review": GetDailyReviewResult,
@@ -599,6 +666,13 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         "certify_strategy_replay": StrategyReplayResult,
         "create_strategy_proposal": StrategyVersionResult,
         "activate_strategy_version": StrategyVersionResult,
+        "start_v4_research": V4ResearchResult,
+        "get_v4_research": V4ResearchResult,
+        "get_v4_research_arms": V4ResearchResult,
+        "get_v4_research_days": V4ResearchResult,
+        "get_v4_research_report": V4ResearchResult,
+        "get_provider_qualification": ProviderQualificationResult,
+        "activate_provider_source": ProviderQualificationResult,
     }
     return tuple(
         ToolDefinition(

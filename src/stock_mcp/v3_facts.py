@@ -174,9 +174,7 @@ def build_v3_facts(
     snapshot_date_set = set(snapshot_dates)
     expected_date_set = set(expected_dates)
     data_gap_dates = tuple(day for day in expected_dates if day not in snapshot_date_set)
-    unexpected_snapshot_dates = tuple(
-        day for day in snapshot_dates if day not in expected_date_set
-    )
+    unexpected_snapshot_dates = tuple(day for day in snapshot_dates if day not in expected_date_set)
     price_limits_written = 0
     snapshot_features_written = 0
     limit_policy_exceptions = 0
@@ -187,9 +185,7 @@ def build_v3_facts(
         snapshot = database.load_market_snapshot(trade_date, source=source, history_limit=1)
         limits, features, day_unavailable = _facts_for_snapshot(snapshot, reference.industries)
         limit_policy_exceptions += sum(
-            bool(fact["policy_exception"])
-            for fact in limits.values()
-            if isinstance(fact, Mapping)
+            bool(fact["policy_exception"]) for fact in limits.values() if isinstance(fact, Mapping)
         )
         observed_symbols.update(features)
         classified_symbols.update(
@@ -245,9 +241,7 @@ def build_v3_facts(
         "expected_dates": tuple(day.isoformat() for day in expected_dates),
         "processed_dates": tuple(day.isoformat() for day in snapshot_dates),
         "data_gap_dates": tuple(day.isoformat() for day in data_gap_dates),
-        "unexpected_snapshot_dates": tuple(
-            day.isoformat() for day in unexpected_snapshot_dates
-        ),
+        "unexpected_snapshot_dates": tuple(day.isoformat() for day in unexpected_snapshot_dates),
         "warmup_dates": warmup_count,
         "assessable_dates": max(0, len(expected_dates) - warmup_count),
         "price_limits_written": price_limits_written,
@@ -270,14 +264,9 @@ def _facts_for_snapshot(
     trade_date = snapshot.trade_date
     source = snapshot.source
     securities = {security.symbol: security for security in snapshot.securities}
-    target_bars = tuple(
-        bar
-        for bar in snapshot.bars
-        if bar.trade_date == trade_date
-    )
-    if (
-        len(target_bars) != len(securities)
-        or {bar.symbol for bar in target_bars} != set(securities)
+    target_bars = tuple(bar for bar in snapshot.bars if bar.trade_date == trade_date)
+    if len(target_bars) != len(securities) or {bar.symbol for bar in target_bars} != set(
+        securities
     ):
         raise ValueError("recorded market snapshot has incomplete target-day bars")
     if any(bar.source != source for bar in target_bars):

@@ -49,9 +49,7 @@ def load_industry_reference(path: Path | str) -> RecordedIndustryReference:
     mapping_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return RecordedIndustryReference(
         standard=standard or "recorded-symbol-map-v1",
-        mode=mode or (
-            "retrospective_current_mapping" if formal_reference else "recorded"
-        ),
+        mode=mode or ("retrospective_current_mapping" if formal_reference else "recorded"),
         as_of=as_of,
         mapping_sha256=mapping_sha256,
         industries=industries,
@@ -121,9 +119,7 @@ def _required_industry(value: object) -> str | None:
 def _symbol_from_code_exchange(code: object, exchange: object) -> str:
     if not isinstance(code, str) or len(code) != 6 or not code.isdigit():
         raise ValueError("recorded industry code must be a six-digit string")
-    suffix = {"SSE": "SH", "SH": "SH", "SZSE": "SZ", "SZ": "SZ"}.get(
-        str(exchange).strip().upper()
-    )
+    suffix = {"SSE": "SH", "SH": "SH", "SZSE": "SZ", "SZ": "SZ"}.get(str(exchange).strip().upper())
     if suffix is None:
         raise ValueError("recorded industry exchange must be SSE or SZSE")
     return f"{code}.{suffix}"

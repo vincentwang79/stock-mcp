@@ -10,6 +10,10 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from fractions import Fraction
 
+from .outcomes_v2 import evaluate_v4_candidate_outcomes
+
+__all__ = ["evaluate_v3_candidate_outcomes", "evaluate_v4_candidate_outcomes"]
+
 OUTCOME_HASH_SCHEMA = "v3-outcome-v1"
 _HORIZONS = (5, 10, 20)
 _CONDITION = re.compile(r"close\s*(>=|<=|>|<|==)\s*([1-9][0-9]*)\Z")
@@ -103,7 +107,10 @@ def _evaluate_one(
     )
     evidence: dict[str, object] = {
         "availability": (
-            "complete" if same_complete_calendar else "partial" if candidate_path and benchmark_path
+            "complete"
+            if same_complete_calendar
+            else "partial"
+            if candidate_path and benchmark_path
             else "unavailable"
         ),
         "path_status": "unavailable" if not candidate_path else "pending",

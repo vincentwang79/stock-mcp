@@ -65,7 +65,7 @@ class V3StorageContractTest(unittest.TestCase):
         self.database = Database(self.path)
         self.database.initialize()
 
-    def test_v9_database_migrates_to_v10_with_v3_fact_and_governance_tables(self) -> None:
+    def test_v9_database_migrates_through_v10_to_current_schema(self) -> None:
         legacy = Path(self.temporary.name) / "legacy-v9.sqlite3"
         with sqlite3.connect(legacy) as connection:
             connection.execute("CREATE TABLE retained_v9_evidence (value TEXT NOT NULL)")
@@ -75,12 +75,10 @@ class V3StorageContractTest(unittest.TestCase):
         Database(legacy).initialize()
 
         with sqlite3.connect(legacy) as connection:
-            self.assertEqual(10, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(11, connection.execute("PRAGMA user_version").fetchone()[0])
             tables = {
                 row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
             self.assertTrue(
                 {
@@ -157,8 +155,9 @@ class V3StorageContractTest(unittest.TestCase):
         create = self._require("create_strategy_replay_job")
         complete = self._require("complete_strategy_replay")
         self.assertTrue(
-            {"pipeline_version", "input_hash", "warmup_sessions"}
-            .issubset(signature(create).parameters),
+            {"pipeline_version", "input_hash", "warmup_sessions"}.issubset(
+                signature(create).parameters
+            ),
             "v3 replay creation must bind its pipeline, input, and warmup evidence",
         )
         self.assertTrue(
@@ -283,9 +282,7 @@ class V3StorageContractTest(unittest.TestCase):
 
         self.assertEqual(
             "replay_attestation_required",
-            self.database.activate_strategy_version_with_grants(
-                V3, _parameters_hash(strategy)
-            ),
+            self.database.activate_strategy_version_with_grants(V3, _parameters_hash(strategy)),
         )
 
     def test_official_v03_name_cannot_bypass_v3_gates_with_legacy_parameters(self) -> None:
@@ -333,9 +330,7 @@ class V3StorageContractTest(unittest.TestCase):
         proposal = _strategy(V3)
 
         with self.assertRaisesRegex(ValueError, "predecessor|does not exist"):
-            self.database.save_strategy_proposal_with_relation(
-                proposal, predecessor="missing-v2"
-            )
+            self.database.save_strategy_proposal_with_relation(proposal, predecessor="missing-v2")
 
         self.assertIsNone(self.database.load_strategy_version(V3))
         self.assertEqual((), self.database.list_strategy_version_relations(V3))
@@ -397,10 +392,7 @@ class V3StorageContractTest(unittest.TestCase):
     def _seed_v3_proof(self, strategy: StrategyVersion) -> None:
         start = date(2023, 8, 8)
         end = date(2026, 8, 7)
-        sessions = tuple(
-            start + timedelta(days=round(index * 1_095 / 726))
-            for index in range(727)
-        )
+        sessions = tuple(start + timedelta(days=round(index * 1_095 / 726)) for index in range(727))
         job = self.database.create_strategy_replay_job(
             strategy_version=strategy.version,
             parameters_hash=_parameters_hash(strategy),

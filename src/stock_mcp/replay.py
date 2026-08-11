@@ -9,6 +9,105 @@ from typing import Any
 from .domain import DailyReview, MarketSnapshot, StrategyVersion
 from .review import generate_daily_review
 
+V4_MANIFEST_SCHEMA = "v4-manifest-v1"
+
+
+def validate_v4_manifest_universe(
+    *,
+    expected_session_count: int,
+    price_day_count: int,
+    snapshot_day_count: int,
+    missing_price_rows: int,
+    orphan_price_rows: int,
+) -> None:
+    """Reject a manifest whose daily price universe is incomplete or self-inconsistent."""
+
+    if (
+        price_day_count != expected_session_count
+        or snapshot_day_count != expected_session_count
+        or missing_price_rows != 0
+        or orphan_price_rows != 0
+    ):
+        raise ValueError("v4 manifest price universe is not complete")
+
+
+def build_v4_replay_manifest(
+    *,
+    source: str,
+    sessions: tuple[date, ...],
+    bar_start: date,
+    signal_start: date,
+    signal_end: date,
+    outcome_through: date,
+    prices_hash: str,
+    statuses_hash: str,
+    share_capital_hash: str,
+    industry_mapping_hash: str,
+) -> dict[str, object]:
+    if source != "tushare":
+        raise ValueError("v4 primary research manifest requires the Tushare price source")
+    if not sessions or sessions != tuple(sorted(set(sessions))):
+        raise ValueError("v4 manifest sessions must be unique and increasing")
+    if len(sessions) < 86:
+        raise ValueError("v4 manifest requires 60 warmup and 25 outcome-only sessions")
+    if (
+        bar_start != sessions[0]
+        or signal_start != sessions[60]
+        or signal_end != sessions[-26]
+        or outcome_through != sessions[-1]
+    ):
+        raise ValueError("v4 manifest boundaries must match the frozen session windows")
+    for label, value in (
+        ("prices", prices_hash),
+        ("statuses", statuses_hash),
+        ("share capital", share_capital_hash),
+        ("industry", industry_mapping_hash),
+    ):
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError(f"v4 manifest {label} hash must be lowercase SHA-256")
+    payload: dict[str, object] = {
+        "schema": V4_MANIFEST_SCHEMA,
+        "source": source,
+        "price_adapter_version": "tushare-lock-v1",
+        "status_source": "baostock",
+        "status_adapter_version": "baostock-lock-v1",
+        "share_capital_source": "sina",
+        "share_capital_adapter_version": "sina-adapter-v1",
+        "bar_start": bar_start.isoformat(),
+        "warmup_sessions": 60,
+        "signal_start": signal_start.isoformat(),
+        "signal_end": signal_end.isoformat(),
+        "confirmation_window_sessions": 5,
+        "outcome_horizon_sessions": 20,
+        "outcome_through": outcome_through.isoformat(),
+        "sessions": [value.isoformat() for value in sessions],
+        "calendar_hash": hashlib.sha256(
+            "|".join(value.isoformat() for value in sessions).encode()
+        ).hexdigest(),
+        "prices_hash": prices_hash,
+        "statuses_hash": statuses_hash,
+        "share_capital_hash": share_capital_hash,
+        "industry_mapping_hash": industry_mapping_hash,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload["manifest_hash"] = hashlib.sha256(encoded.encode()).hexdigest()
+    return payload
+
+
+def validate_v4_replay_certification(replay: dict[str, object]) -> None:
+    outcomes = replay.get("outcomes")
+    if not isinstance(outcomes, dict) or not outcomes:
+        raise ValueError("v4 outcome evidence is incomplete")
+    if any(
+        not isinstance(item, dict)
+        or item.get("status") in {"unavailable", "partial"}
+        or item.get("completeness_status") in {"incomplete", "unavailable"}
+        for item in outcomes.values()
+    ):
+        raise ValueError("v4 outcome evidence is incomplete")
+    if replay.get("benchmark_completeness") != "complete":
+        raise ValueError("v4 benchmark evidence must be complete")
+
 
 def walk_forward(
     snapshots: Iterable[MarketSnapshot],

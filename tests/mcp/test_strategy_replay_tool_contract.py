@@ -17,9 +17,7 @@ REPLAY_TOOLS = frozenset(
         "certify_strategy_replay",
     }
 )
-READ_TOOLS = frozenset(
-    {"get_strategy_replay", "list_strategy_replays", "get_strategy_replay_days"}
-)
+READ_TOOLS = frozenset({"get_strategy_replay", "list_strategy_replays", "get_strategy_replay_days"})
 
 
 class _ReplayApplication:

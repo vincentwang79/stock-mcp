@@ -21,8 +21,7 @@ TRADING_DAYS = (date(2026, 8, 6), date(2026, 8, 7))
 GOVERNANCE_START = date(2023, 8, 7)
 GOVERNANCE_END = date(2026, 8, 7)
 GOVERNANCE_SESSIONS = tuple(
-    GOVERNANCE_START
-    + timedelta(days=(GOVERNANCE_END - GOVERNANCE_START).days * ordinal // 599)
+    GOVERNANCE_START + timedelta(days=(GOVERNANCE_END - GOVERNANCE_START).days * ordinal // 599)
     for ordinal in range(600)
 )
 DATASET_HASH = "b" * 64
@@ -91,7 +90,7 @@ class StrategyReplayPersistenceContractTest(unittest.TestCase):
         list_jobs = self._require(migrated, "list_strategy_replay_jobs")
         self.assertEqual((job,), list_jobs())
         with sqlite3.connect(legacy_path) as connection:
-            self.assertEqual(10, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(11, connection.execute("PRAGMA user_version").fetchone()[0])
 
     def test_replay_day_is_idempotent_only_for_the_same_immutable_input_and_output(self) -> None:
         job = self._create_job()

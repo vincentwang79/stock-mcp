@@ -12,6 +12,8 @@
 - Windows 通过一个发布 ZIP、PowerShell 安装器和两个 WinSW 服务部署。
 - v3 研究事实在本机 SQLite 中以 Schema v10 不可变保存；`build-v3-facts` 只读取已记录日线和随发布包提供的行业 JSON，不访问实时网络。
 - v3 策略激活依赖 727 个交易日回放、60 个交易日预热、异步 outcome 证据、主机一次性批准和用户明确确认；v3 取代 v0.2 时以原子事务写入 `superseded`，历史证据保留。
+- Schema v11 在不改变 v0.3 生产行为的前提下加入 `sina-adapter-v1`。新浪股本只能从生效日向后用于 v4 解释与研究；新浪价格只有在 20 日 shadow、差异/条款审阅、Windows 实机验证、主机批准和用户确认全部完成后，才可作为完整同源备用，永不与 Tushare 价格拼接。
+- v4 研究使用 `pipeline-v0.3` 和不可变 `v4-manifest-v1`。冻结 v0.3-policy-1 为基线，六个 challenger 每次只改变一个因素；研究和数据源治理均不会自动创建、认证或激活策略。
 
 ## 测试边界
 

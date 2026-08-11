@@ -150,6 +150,22 @@ class DailyReviewPipeline:
     def _publish_ready(self, snapshot: MarketSnapshot, attempts: int) -> PipelineRun:
         insufficient = self._symbols_without_required_history(snapshot)
         if insufficient:
+            if snapshot.source == "sina":
+                degraded = PipelineRun(
+                    trade_date=snapshot.trade_date,
+                    pipeline_version=self._pipeline_version,
+                    status="degraded_no_screen",
+                    attempts=attempts,
+                    snapshot=snapshot,
+                    review=None,
+                    error=(
+                        f"Sina backup requires {self._required_prior_sessions} complete "
+                        f"same-source prior sessions; insufficient history for "
+                        f"{len(insufficient)} securities"
+                    ),
+                )
+                self._repository.save_run(degraded)
+                return degraded
             observation = PipelineRun(
                 trade_date=snapshot.trade_date,
                 pipeline_version=self._pipeline_version,
@@ -233,13 +249,17 @@ class DailyReviewPipeline:
             if bar.trade_date == snapshot.trade_date and bar.symbol in eligible_symbols
         }
         prior_dates: dict[str, set[date]] = {symbol: set() for symbol in target_symbols}
+        market_prior_dates: set[date] = set()
         for bar in snapshot.bars:
             if bar.symbol in prior_dates and bar.trade_date < snapshot.trade_date:
                 prior_dates[bar.symbol].add(bar.trade_date)
+                market_prior_dates.add(bar.trade_date)
+        expected_dates = set(sorted(market_prior_dates)[-self._required_prior_sessions :])
         return tuple(
             symbol
             for symbol in sorted(target_symbols)
-            if len(prior_dates[symbol]) < self._required_prior_sessions
+            if len(expected_dates) < self._required_prior_sessions
+            or not expected_dates.issubset(prior_dates[symbol])
         )
 
     def _validate_snapshot(self, snapshot: MarketSnapshot, requested_date: date) -> None:

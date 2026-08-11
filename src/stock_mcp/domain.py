@@ -166,3 +166,72 @@ class V3MarketInput:
 class EligibilityDecision:
     eligible: bool
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFetchEvidence:
+    fetch_id: str
+    source: str
+    endpoint_kind: str
+    request_key: str
+    trade_date: date | None
+    http_date: str | None
+    retrieved_at: datetime
+    http_status: int | None
+    byte_length: int
+    payload_sha256: str
+    adapter_version: str
+    status: str
+    error_class: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ShareCapitalFact:
+    symbol: str
+    effective_date: date
+    source: str
+    outstanding_shares: int
+    source_timestamp: datetime
+    payload_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class DailySecurityStatus:
+    symbol: str
+    trade_date: date
+    source: str
+    tradestatus: str
+    is_st: bool
+    source_timestamp: datetime
+    batch_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderDailyMetric:
+    symbol: str
+    trade_date: date
+    price_source: str
+    capital_source: str
+    upstream_market_cap_fen: int | None
+    derived_market_cap_fen: int | None
+    upstream_turnover_rate: str | None
+    derived_turnover_rate: str | None
+    evidence_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class V4DatasetManifest:
+    manifest_hash: str
+    price_source: str
+    bar_start: date
+    warmup_sessions: int
+    signal_start: date
+    signal_end: date
+    outcome_through: date
+    calendar_hash: str
+    price_hash: str
+    status_hash: str
+    capital_hash: str
+    industry_hash: str
+    adapter_version: str
+    schema: str = "v4-manifest-v1"

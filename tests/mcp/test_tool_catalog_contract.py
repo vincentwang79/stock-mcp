@@ -28,6 +28,13 @@ EXPECTED_TOOL_NAMES = frozenset(
         "list_strategy_replays",
         "get_strategy_replay_days",
         "certify_strategy_replay",
+        "start_v4_research",
+        "get_v4_research",
+        "get_v4_research_arms",
+        "get_v4_research_days",
+        "get_v4_research_report",
+        "get_provider_qualification",
+        "activate_provider_source",
     }
 )
 
@@ -44,6 +51,11 @@ READ_TOOL_NAMES = frozenset(
         "get_strategy_replay",
         "list_strategy_replays",
         "get_strategy_replay_days",
+        "get_v4_research",
+        "get_v4_research_arms",
+        "get_v4_research_days",
+        "get_v4_research_report",
+        "get_provider_qualification",
     }
 )
 WRITE_TOOL_NAMES = EXPECTED_TOOL_NAMES - READ_TOOL_NAMES
@@ -148,7 +160,12 @@ class ToolCatalogContractTests(unittest.TestCase):
             annotations = tool.annotations
             self.assertEqual(name in READ_TOOL_NAMES, _value(annotations, "readOnlyHint"), name)
             self.assertEqual(
-                name in {"remove_watchlist_items", "activate_strategy_version"},
+                name
+                in {
+                    "remove_watchlist_items",
+                    "activate_strategy_version",
+                    "activate_provider_source",
+                },
                 _value(annotations, "destructiveHint"),
                 name,
             )

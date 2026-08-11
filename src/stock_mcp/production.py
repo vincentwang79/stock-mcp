@@ -8,15 +8,18 @@ and scheduling state live in the same SQLite backup boundary as market facts.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Callable
-from datetime import date, datetime
+from dataclasses import asdict
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .backup import BackupManager
 from .config import Settings
-from .domain import Security
+from .domain import DailyBar, MarketSnapshot, Security
 from .pipeline import DailyReviewPipeline, PipelineRun
 from .providers.metadata import normalize_baostock_securities
 from .providers.runtime import (
@@ -25,6 +28,7 @@ from .providers.runtime import (
     BaoStockTradingCalendar,
     TushareDailyProvider,
 )
+from .providers.sina_normalization import derive_sina_share_metrics, normalize_sina_spot
 from .scheduler import PostMarketCoordinator, ScheduleOutcome
 from .strategy import DatabaseStrategyRegistry
 
@@ -41,6 +45,207 @@ class LazyAKShareQuoteProvider:
         return AKShareQuoteProvider(
             client=akshare, clock=lambda: datetime.now(_SHANGHAI)
         ).fetch_quote(symbol)
+
+
+class SinaShadowTask:
+    """Normalize and atomically publish one complete, non-production Sina spot shadow."""
+
+    def __init__(self, database: Any, spot_provider: Any) -> None:
+        self._database = database
+        self._spot_provider = spot_provider
+
+    def run(self, trade_date: date) -> dict[str, object]:
+        batch = self._spot_provider.fetch_pages(trade_date)
+        if batch.trade_date != trade_date:
+            raise ValueError("Sina shadow batch date does not match the requested date")
+        source_snapshot = self._database.load_market_snapshot(
+            trade_date, source="tushare", history_limit=1
+        )
+        securities = tuple(
+            security for security in source_snapshot.securities if security.board == "MAIN"
+        )
+        expected_symbols = {security.symbol for security in securities}
+        timestamp = max(item.retrieved_at for item in batch.evidence)
+        records = normalize_sina_spot(batch.rows, trade_date=trade_date, source_timestamp=timestamp)
+        by_symbol = {
+            record.symbol: record for record in records if record.symbol in expected_symbols
+        }
+        missing = expected_symbols - set(by_symbol)
+        if missing:
+            raise ValueError("Sina shadow batch does not match the expected main-board universe")
+        bars = tuple(
+            DailyBar(
+                record.symbol,
+                trade_date,
+                record.open_1e4,
+                record.high_1e4,
+                record.low_1e4,
+                record.close_1e4,
+                record.pre_close_1e4,
+                record.volume_shares,
+                record.amount_fen,
+                "sina",
+                record.source_timestamp,
+            )
+            for record in sorted(by_symbol.values(), key=lambda item: item.symbol)
+        )
+        prior_dates = tuple(
+            self._database.load_expected_trading_days(
+                trade_date - timedelta(days=180), trade_date - timedelta(days=1), source="tushare"
+            )
+        )[-60:]
+        histories: dict[str, tuple[DailyBar, ...]] = {}
+        same_source_history = len(prior_dates) == 60
+        for security in securities:
+            history = tuple(
+                self._database.load_symbol_history(
+                    security.symbol,
+                    end_date=trade_date - timedelta(days=1),
+                    source="sina",
+                    limit=60,
+                )
+            )
+            histories[security.symbol] = history
+            same_source_history = (
+                same_source_history and tuple(bar.trade_date for bar in history) == prior_dates
+            )
+        with self._database.connect() as connection:
+            statuses = {
+                str(row[0]): (str(row[1]), bool(row[2]))
+                for row in connection.execute(
+                    "SELECT symbol, tradestatus, is_st FROM daily_security_status "
+                    "WHERE source='baostock' AND trade_date=?",
+                    (trade_date.isoformat(),),
+                ).fetchall()
+                if str(row[0]) in expected_symbols
+            }
+        status_coverage_bps = (
+            len(statuses) * 10_000 // len(expected_symbols) if expected_symbols else 0
+        )
+        daily_metrics: list[dict[str, object]] = []
+        missing_capital = 0
+        for bar in bars:
+            capital = self._database.load_share_capital_fact(bar.symbol, on_date=trade_date)
+            if capital is None:
+                missing_capital += 1
+                continue
+            record = by_symbol[bar.symbol]
+            derived = derive_sina_share_metrics(
+                close_1e4=bar.close_1e4,
+                volume_shares=bar.volume_shares,
+                outstanding_shares=int(capital["outstanding_shares"]),
+            )
+            metric_evidence = {
+                "symbol": bar.symbol,
+                "trade_date": trade_date.isoformat(),
+                "close_1e4": bar.close_1e4,
+                "outstanding_shares": capital["outstanding_shares"],
+                "upstream_nmc": record.upstream_circulating_market_cap_fen,
+                "upstream_turnover": None
+                if record.upstream_turnover_rate is None
+                else str(record.upstream_turnover_rate),
+            }
+            daily_metrics.append(
+                {
+                    "symbol": bar.symbol,
+                    "trade_date": trade_date,
+                    "price_source": "sina",
+                    "capital_source": "sina",
+                    "upstream_market_cap_fen": record.upstream_circulating_market_cap_fen,
+                    "derived_market_cap_fen": derived.market_cap_fen,
+                    "upstream_turnover_rate": record.upstream_turnover_rate,
+                    "derived_turnover_rate": derived.turnover_rate,
+                    "evidence_sha256": hashlib.sha256(
+                        json.dumps(metric_evidence, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                }
+            )
+        advances = sum(bar.close_1e4 > bar.pre_close_1e4 for bar in bars)
+        ma20_eligible = 0
+        above_ma20 = 0
+        for bar in bars:
+            history = histories[bar.symbol]
+            closes = tuple(item.close_1e4 for item in history[-19:]) + (bar.close_1e4,)
+            if len(closes) != 20:
+                continue
+            ma20_eligible += 1
+            above_ma20 += bar.close_1e4 > sum(closes) / 20
+        snapshot = MarketSnapshot(
+            trade_date,
+            "sina",
+            timestamp,
+            securities,
+            bars,
+            advances * 10_000 // len(bars),
+            above_ma20 * 10_000 // ma20_eligible if ma20_eligible else 0,
+        )
+        evidence_records = []
+        for item in batch.evidence:
+            evidence = asdict(item)
+            evidence["fetch_id"] = (
+                f"sina:{item.endpoint_kind}:"
+                + hashlib.sha256(
+                    f"{item.request_key}|{item.retrieved_at.isoformat()}|"
+                    f"{item.payload_sha256}".encode()
+                ).hexdigest()[:24]
+            )
+            evidence["trade_date"] = trade_date
+            evidence_records.append(evidence)
+        dataset_payload = {
+            "adapter": "sina-adapter-v1",
+            "trade_date": trade_date.isoformat(),
+            "bars": [
+                (
+                    bar.symbol,
+                    bar.open_1e4,
+                    bar.high_1e4,
+                    bar.low_1e4,
+                    bar.close_1e4,
+                    bar.pre_close_1e4,
+                    bar.volume_shares,
+                    bar.amount_fen,
+                )
+                for bar in bars
+            ],
+            "fetches": [item.payload_sha256 for item in batch.evidence],
+            "status_coverage_bps": status_coverage_bps,
+            "same_source_history_ok": same_source_history,
+        }
+        dataset_hash = hashlib.sha256(
+            json.dumps(dataset_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        success = (
+            same_source_history
+            and status_coverage_bps == 10_000
+            and missing_capital == 0
+            and len(bars) == len(expected_symbols)
+        )
+        run = {
+            "source": "sina",
+            "trade_date": trade_date,
+            "adapter_version": "sina-adapter-v1",
+            "expected_security_count": len(expected_symbols),
+            "actual_security_count": len(bars),
+            "expected_page_count": len(batch.evidence) - 1,
+            "actual_page_count": len(batch.evidence) - 1,
+            "missing_count": len(missing),
+            "duplicate_count": 0,
+            "invalid_count": missing_capital,
+            "field_coverage_bps": 10_000 if missing_capital == 0 else 0,
+            "status_coverage_bps": status_coverage_bps,
+            "same_source_history_ok": same_source_history,
+            "fetch_evidence_complete": True,
+            "dataset_hash": dataset_hash,
+            "status": "success" if success else "failed",
+        }
+        self._database.save_sina_spot_batch(
+            snapshot=snapshot,
+            fetch_evidence=evidence_records,
+            metrics=dataset_payload,
+            daily_metrics=daily_metrics,
+            shadow_run=run,
+        )
+        return run
 
 
 class SQLitePipelineRepository:
@@ -249,3 +454,65 @@ def _baostock_rows(result: Any) -> tuple[dict[str, object], ...]:
         values = result.get_row_data()
         rows.append(dict(zip(fields, values, strict=True)))
     return tuple(rows)
+
+
+class SinaShadowCoordinator:
+    """Resume a bounded, page-oriented shadow capture without publishing candidates."""
+
+    def __init__(
+        self, *, store: Any, fetch_page: Callable[[int], bytes], page_count: Callable[[], int]
+    ) -> None:
+        self._store = store
+        self._fetch_page = fetch_page
+        self._page_count = page_count
+
+    def run(self, *, trade_date: str) -> dict[str, object]:
+        count = int(self._page_count())
+        if count < 1:
+            raise ValueError("Sina shadow page count must be positive")
+        completed = self._store.completed_pages
+        for page in range(1, count + 1):
+            if page in completed:
+                continue
+            payload = self._fetch_page(page)
+            completed[page] = hashlib.sha256(payload).hexdigest()
+        if set(completed) != set(range(1, count + 1)):
+            raise ValueError("Sina shadow pagination is incomplete")
+        encoded = "|".join(f"{page}:{completed[page]}" for page in sorted(completed))
+        return {
+            "trade_date": trade_date,
+            "status": "completed",
+            "adapter_version": "sina-adapter-v1",
+            "dataset_hash": hashlib.sha256(encoded.encode()).hexdigest(),
+            "source_active": False,
+        }
+
+
+def evaluate_sina_provider_qualification(
+    shadow_runs: list[dict[str, object]],
+) -> dict[str, object]:
+    ordered = sorted(shadow_runs, key=lambda item: str(item.get("trade_date", "")))
+    complete = len(ordered) >= 20 and all(
+        run.get("status") in {"completed", "success"}
+        and bool(run.get("dataset_hash"))
+        and run.get("fetch_evidence_complete") is True
+        and run.get("same_source_history") is True
+        and run.get("status_coverage_bps") == 10_000
+        and run.get("manual_difference_reviewed") is True
+        for run in ordered[-20:]
+    )
+    status = "qualified_for_manual_approval" if complete else "collecting"
+    payload = "|".join(str(run.get("dataset_hash")) for run in ordered[-20:])
+    return {
+        "source": "sina",
+        "status": status,
+        "window_days": min(len(ordered), 20),
+        "window_hash": hashlib.sha256(payload.encode()).hexdigest() if payload else None,
+        "source_active": False,
+        "manual_approval_required": True,
+    }
+
+
+def is_v4_research_allowed(now: datetime) -> bool:
+    local = now.astimezone(_SHANGHAI)
+    return not ((16, 20) <= (local.hour, local.minute) <= (18, 10))

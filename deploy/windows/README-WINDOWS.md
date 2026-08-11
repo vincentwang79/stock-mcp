@@ -2,6 +2,8 @@
 
 本项目采用原生 Windows x64 部署，不要求 Docker、WSL、Git、Node、系统 Python 或独立数据库服务器。MCP 进程只监听 `127.0.0.1:8765/mcp`；Secure MCP Tunnel 作为独立服务，仅建立出站 HTTPS 连接，因此不需要配置入站防火墙规则。正式服务器的默认入口是可信发布 ZIP 中的一条 `install.ps1` 命令；密钥配置仍单独进行安全交互，不能合并为命令行参数。下文“源码直接安装”只适用于已受控 Git 工作区的维护升级，不是无 Git 服务器的前置条件。
 
+Schema v11 加入可选新浪数据链路和 v0.4 研究表，但默认不启动新浪网络任务。`config\app.toml` 的 `[sina] shadow_enabled=false` 是安全默认值；安装、配置和升级均不会自动回填新浪、启动 20 日 shadow、激活数据源、创建 v0.4 策略或改变当前 v0.3 日报。
+
 所有安装和运维操作都必须遵守仓库根目录的[项目基本规则](../../GROUND_RULES.md)。
 
 > **重要：源码仓库不包含 `stock-mcp-windows-x64.zip`。**
@@ -113,7 +115,9 @@ Test-NetConnection api.openai.com -Port 443
 
 配置脚本通过安全交互提示采集生产密钥，并只将其保存到 ACL 保护的主机配置文件。它完成数据权限检查、三年历史回填、Tunnel 自检、MCP 本地就绪检查和 Tunnel 服务身份就绪检查后，才启动 `StockMcpService` 与 `StockMcpTunnel`。
 
-## 发布 ZIP 安装（无 Git 或离线环境）
+## 发布 ZIP 安装（无 Git；仍需出站 HTTPS）
+
+当前 ZIP 包含应用、固定工具和锁文件，但不包含完整 Python/wheel 离线缓存。安装仍需出站 HTTPS 以获取固定 Python 与锁定依赖；它不是完全离线安装包。
 
 1. 从可信发布渠道获取 `stock-mcp-windows-x64.zip`，并通过独立渠道获取对应的 `.sha256` 摘要。**在解压 ZIP 或执行任何脚本之前**，先运行以下命令，并将结果与发布摘要逐字符比较：
 
@@ -218,6 +222,29 @@ git pull --ff-only
 运行 `diagnose.ps1` 可生成脱敏诊断 ZIP，其中包含系统和服务状态、最近日志、版本信息、备份清单、数据库完整性以及应用和 Tunnel 自检结果。脚本会排除 `secrets.env` 和密钥文件，对所有外部命令输出执行脱敏，并在压缩前扫描裸密钥、认证头、URL 凭证和查询参数密钥模式。
 
 运行 `uninstall.ps1` 会删除服务和程序运行环境，但默认保留配置、数据、日志和备份。只有显式运行 `uninstall.ps1 -PurgeData` 并完成第二次确认后，才会删除保留的数据。
+
+## v0.4 新浪数据与研究门禁
+
+升级到 Schema v11 不会自动访问新浪，也不会改变当前 v0.3 日报。`config\app.toml` 中 `[sina].shadow_enabled` 默认保持 `false`。只有在独立测试窗口中，才按以下顺序操作：生成并人工核对 manifest、低速回填、验证 checkpoint/事实哈希、启用当日 16:35 后 shadow、累计 20 个完整收盘交易日、审阅差异和非商业用途条款、生成资格报告、主机批准，最后才允许用户通过 MCP 明确登记 provider 能力。该登记只写入治理 registry；当前 v0.3 不读取新浪，只有以后显式兼容 Sina 的 v4 生产组合才可消费该登记。
+
+```powershell
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  prepare-sina-backfill-manifest --root E:\StockMcp `
+  --start 2023-08-08 --end 2026-08-07 `
+  --manifest E:\StockMcp\config\sina-backfill-manifest.json
+
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  backfill-sina --root E:\StockMcp `
+  --manifest E:\StockMcp\config\sina-backfill-manifest.json
+
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  verify-sina-backfill --root E:\StockMcp `
+  --manifest E:\StockMcp\config\sina-backfill-manifest.json
+```
+
+压缩 KLC 已由纯 Python 位流解码器和固定录制夹具覆盖，但真实端点单位人工对照、Windows 断点续跑和 20 日 shadow 仍是外部门禁。任何 KLC 完整性校验失败都必须终止，不能改用远端复权脚本、执行 JavaScript 或拿 Tushare 填补新浪缺口。资格未达到 `qualified_for_manual_approval` 时，不得执行 `approve-provider-source` 或 `activate_provider_source`。
+
+v4 研究入口和查询 DTO 已公开，但研究启动在完整 outcome/benchmark worker 未安装时会明确返回 `v4_research_rejected`，不会留下永远停在 `queued` 的假作业。不得将 Schema、CLI 或 DTO 存在描述为已完成研究、Sina replication、proposal、认证或激活。
 
 ## 构建发布包
 

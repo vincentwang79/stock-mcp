@@ -350,9 +350,7 @@ def generate_v3_daily_review(market: V3MarketInput, strategy: StrategyVersion) -
         raise ValueError("v3 market input requires exactly sixty prior sessions")
     if (
         market.breadth.eligible_count <= 0
-        or market.breadth.ma20_eligible_count * 10_000
-        // market.breadth.eligible_count
-        < 9_700
+        or market.breadth.ma20_eligible_count * 10_000 // market.breadth.eligible_count < 9_700
     ):
         raise ValueError("v3 market input requires at least 9700 bps ma20 coverage")
     if any(item.target_bar.trade_date != market.trade_date for item in market.securities):

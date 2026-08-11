@@ -47,6 +47,8 @@ def _is_v3_strategy(version: object, parameters: Mapping[str, object]) -> bool:
         or name.startswith("v3")
         or name.startswith("v0.3-")
     )
+
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -174,9 +176,7 @@ class StrategyReplayCoordinator:
             standard = "新浪财经行业分类"
             mode = "retrospective_current_mapping"
             classification_as_of = date(2026, 8, 10)
-            mapping_hash = (
-                "829fb6481d3269a59a2f679b09c2d2d93ada2ffd0db54931f2ec61b646ac1c1a"
-            )
+            mapping_hash = "829fb6481d3269a59a2f679b09c2d2d93ada2ffd0db54931f2ec61b646ac1c1a"
             if strategy.parameters.get("rule_engine_version") == 3:
                 loader = getattr(self._database, "load_v3_snapshot_features", None)
                 if not callable(loader):
@@ -224,9 +224,7 @@ class StrategyReplayCoordinator:
                 and existing["end_date"] == end_date
                 and existing["status"] != "failed"
             ):
-                bind = getattr(
-                    self._database, "bind_strategy_replay_start_idempotency", None
-                )
+                bind = getattr(self._database, "bind_strategy_replay_start_idempotency", None)
                 if callable(bind):
                     existing = bind(
                         str(existing["job_id"]),
@@ -290,15 +288,10 @@ class StrategyReplayCoordinator:
                 job.get("input_hash_schema") == INPUT_HASH_SCHEMA
                 or str(job.get("version", "")).startswith(("v3", "v0.3-"))
             )
-            and (
-                job.get("outcome_status") != "completed"
-                or job.get("outcome_hash") is None
-            )
+            and (job.get("outcome_status") != "completed" or job.get("outcome_hash") is None)
         ):
             raise ValueError("v3 outcome evidence must complete before certification")
-        self._database.certify_strategy_replay(
-            replay_id, idempotency_key=idempotency_key
-        )
+        self._database.certify_strategy_replay(replay_id, idempotency_key=idempotency_key)
         refreshed = self._database.get_strategy_replay_job(replay_id)
         return None if refreshed is None else self._public_job(refreshed)
 
@@ -323,11 +316,7 @@ class StrategyReplayCoordinator:
         else:
             jobs = self._database.list_strategy_replay_jobs(limit=200)
             job = next(
-                (
-                    item
-                    for item in reversed(jobs)
-                    if item["status"] in {"queued", "running"}
-                ),
+                (item for item in reversed(jobs) if item["status"] in {"queued", "running"}),
                 None,
             )
         if job is None:
@@ -368,9 +357,7 @@ class StrategyReplayCoordinator:
                     job.get("industry_mapping_sha256"),
                 )
                 if recorded_reference != job_reference:
-                    raise ValueError(
-                        "v3 industry classification reference changed during replay"
-                    )
+                    raise ValueError("v3 industry classification reference changed during replay")
                 input_hash = canonical_v3_market_input_hash(market)
                 review = generate_v3_daily_review(market, strategy)
                 result: dict[str, object] = {
@@ -406,9 +393,7 @@ class StrategyReplayCoordinator:
                 else:
                     review = walk_forward((snapshot,), strategy)[0]
                     result = {"warmup": False, **_review_result(review)}
-                output_hash = _result_hash(
-                    [{"trade_date": next_trade_date.isoformat(), **result}]
-                )
+                output_hash = _result_hash([{"trade_date": next_trade_date.isoformat(), **result}])
             self._database.save_strategy_replay_day(
                 job_id,
                 trade_date=next_trade_date,
@@ -427,9 +412,7 @@ class StrategyReplayCoordinator:
         return True
 
     def _resume_pending_v3_outcome(self) -> bool:
-        get_pending = getattr(
-            self._database, "get_next_pending_strategy_replay_outcome_job", None
-        )
+        get_pending = getattr(self._database, "get_next_pending_strategy_replay_outcome_job", None)
         if not callable(get_pending):
             return False
         job = get_pending()
@@ -453,9 +436,7 @@ class StrategyReplayCoordinator:
                 now = datetime.now(_SHANGHAI)
                 worked = self._allowed(now) and self.run_next_session()
             except Exception as error:
-                _LOGGER.warning(
-                    "strategy replay worker recovered from %s", type(error).__name__
-                )
+                _LOGGER.warning("strategy replay worker recovered from %s", type(error).__name__)
                 worked = False
             if not worked:
                 self._stop.wait(self._poll_seconds)
@@ -524,9 +505,7 @@ class StrategyReplayCoordinator:
             str(job["job_id"]), outcome=outcomes, outcome_hash=str(hashed["outcome_hash"])
         )
 
-    def _equal_weight_benchmark(
-        self, job: Mapping[str, object]
-    ) -> tuple[dict[str, object], ...]:
+    def _equal_weight_benchmark(self, job: Mapping[str, object]) -> tuple[dict[str, object], ...]:
         source = str(job["source"])
         level = 100_000
         result: list[dict[str, object]] = []
@@ -612,8 +591,7 @@ class StrategyReplayCoordinator:
                     result.get("industry_classification_standard") or "新浪财经行业分类"
                 ),
                 industry_classification_mode=(
-                    result.get("industry_classification_mode")
-                    or "retrospective_current_mapping"
+                    result.get("industry_classification_mode") or "retrospective_current_mapping"
                 ),
                 industry_classification_as_of=(
                     result.get("industry_classification_as_of") or date(2026, 8, 10)
@@ -671,10 +649,7 @@ class StrategyReplayCoordinator:
 
 
 def _ordered_hash(days: tuple[dict[str, object], ...], field: str) -> str:
-    payload = [
-        {"trade_date": day["trade_date"].isoformat(), field: day[field]}
-        for day in days
-    ]
+    payload = [{"trade_date": day["trade_date"].isoformat(), field: day[field]} for day in days]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

@@ -8,5 +8,14 @@ timezone = "Asia/Shanghai"
 database = "__INSTALL_ROOT__\\data\\stock-mcp.sqlite3"
 backup_directory = "__INSTALL_ROOT__\\backups"
 
+[sina]
+# 默认关闭；开启只允许每天盘后一次 shadow，不会在安装时联网。
+shadow_enabled = false
+connect_timeout_seconds = 5
+read_timeout_seconds = 20
+max_retries = 2
+history_rate_per_second = 0.5
+spot_rate_per_second = 1.0
+
 [secrets]
 environment_file = "__INSTALL_ROOT__\\config\\secrets.env"
