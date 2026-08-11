@@ -32,6 +32,16 @@ def main() -> int:
             "WHERE run_id = ? ORDER BY symbol",
             (run_id,),
         ).fetchall()
+        recorded_fetches, failed_fetches = connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) "
+            "FROM provider_fetch_evidence WHERE source = 'sina'"
+        ).fetchone()
+        latest_failure_row = connection.execute(
+            "SELECT endpoint_kind, request_key, retrieved_at, http_status, error_class "
+            "FROM provider_fetch_evidence "
+            "WHERE source = 'sina' AND status = 'failed' "
+            "ORDER BY retrieved_at DESC, fetch_id DESC LIMIT 1"
+        ).fetchone()
     manifest_symbols = set(symbols)
     if any(str(row[0]) not in manifest_symbols for row in rows):
         parser.error("checkpoint contains a symbol outside the manifest")
@@ -44,6 +54,19 @@ def main() -> int:
         "pending_symbols": total - len(completed),
         "progress_bps": len(completed) * 10_000 // total,
         "last_completed_symbol": completed[-1] if completed else None,
+        "recorded_fetches": int(recorded_fetches),
+        "failed_fetches": int(failed_fetches),
+        "latest_failure": (
+            None
+            if latest_failure_row is None
+            else {
+                "endpoint_kind": str(latest_failure_row[0]),
+                "request_key": str(latest_failure_row[1]),
+                "retrieved_at": str(latest_failure_row[2]),
+                "http_status": latest_failure_row[3],
+                "error_class": latest_failure_row[4],
+            }
+        ),
     }
     print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
     return 0

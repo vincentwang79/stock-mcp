@@ -39,6 +39,22 @@ class SinaBackfillRunnerContractTest(unittest.TestCase):
                         "INSERT INTO sina_backfill_checkpoints VALUES (?, ?, 'completed', ?)",
                         ("sina-backfill-fixture", symbol, json.dumps({"symbol": symbol})),
                     )
+                connection.execute(
+                    "CREATE TABLE provider_fetch_evidence("
+                    "fetch_id TEXT PRIMARY KEY, source TEXT, endpoint_kind TEXT, "
+                    "request_key TEXT, retrieved_at TEXT, http_status INTEGER, "
+                    "status TEXT, error_class TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO provider_fetch_evidence VALUES "
+                    "('fetch-ok', 'sina', 'history', 'sz000001', "
+                    "'2026-08-11T08:00:00Z', 200, 'success', NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO provider_fetch_evidence VALUES "
+                    "('fetch-failed', 'sina', 'share_capital', 'sz000003', "
+                    "'2026-08-11T08:05:00Z', 502, 'failed', 'HTTPError')"
+                )
 
             completed = subprocess.run(
                 [
@@ -63,6 +79,15 @@ class SinaBackfillRunnerContractTest(unittest.TestCase):
                 "pending_symbols": 1,
                 "progress_bps": 6666,
                 "last_completed_symbol": "000002.SZ",
+                "recorded_fetches": 2,
+                "failed_fetches": 1,
+                "latest_failure": {
+                    "endpoint_kind": "share_capital",
+                    "request_key": "sz000003",
+                    "retrieved_at": "2026-08-11T08:05:00Z",
+                    "http_status": 502,
+                    "error_class": "HTTPError",
+                },
             },
             json.loads(completed.stdout),
         )
