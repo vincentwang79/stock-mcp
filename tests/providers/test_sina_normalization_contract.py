@@ -135,6 +135,18 @@ class SinaNormalizationContractTest(unittest.TestCase):
             12_345,
         )
 
+    def test_share_capital_accepts_the_recorded_object_shape(self) -> None:
+        normalizer = _normalization()
+
+        facts = normalizer.normalize_sina_share_capital(  # type: ignore[attr-defined]
+            [{"date": "2024-12-31", "amount": 1940557.185}],
+            symbol="000001.SZ",
+            source_timestamp=TIMESTAMP,
+        )
+
+        self.assertEqual(facts[0].effective_date, date(2024, 12, 31))
+        self.assertEqual(facts[0].outstanding_shares, 19_405_571_850)
+
     def test_spot_keeps_provider_fields_and_derives_fen_market_cap_with_half_up_rounding(
         self,
     ) -> None:

@@ -18,12 +18,18 @@ def parse_jsonp_assignment(payload: bytes, *, assignment: str) -> Any:
         text = payload.decode("utf-8-sig").strip()
     except UnicodeDecodeError as error:
         raise SinaDecodeError("JSONP payload is not UTF-8") from error
+    safe_prefix = "/*<script>location.href='//sina.com';</script>*/"
+    if text.startswith(safe_prefix):
+        text = text[len(safe_prefix) :].lstrip()
     pattern = rf"(?:var\s+)?{re.escape(assignment)}\s*=\s*(.+?)\s*;?\s*\Z"
     match = re.fullmatch(pattern, text, flags=re.DOTALL)
     if match is None:
         raise SinaDecodeError("JSONP assignment or trailing payload is invalid")
+    encoded = match.group(1).strip()
+    if encoded.startswith("(") and encoded.endswith(")"):
+        encoded = encoded[1:-1].strip()
     try:
-        return json.loads(match.group(1))
+        return json.loads(encoded)
     except json.JSONDecodeError as error:
         raise SinaDecodeError("JSONP assignment value is not strict JSON") from error
 

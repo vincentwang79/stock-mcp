@@ -59,6 +59,22 @@ class SinaDecodeContractTest(unittest.TestCase):
 
         self.assertEqual(value, [["2026-08-06", "1.2345"]])
 
+    def test_recorded_share_capital_wrapper_is_decoded_as_inert_json(self) -> None:
+        decoder = _decoder()
+        payload = FIXTURES.joinpath("recorded_share_capital.js").read_bytes()
+
+        value = decoder.parse_jsonp_assignment(  # type: ignore[attr-defined]
+            payload, assignment="KKE_ShareAmount_sz000001"
+        )
+
+        self.assertEqual(
+            value,
+            [
+                {"date": "2024-06-30", "amount": 1940561.7528},
+                {"date": "2024-12-31", "amount": 1940557.185},
+            ],
+        )
+
     def test_jsonp_rejects_trailing_statements_instead_of_executing_them(self) -> None:
         decoder = _decoder()
         payload = FIXTURES.joinpath("corrupt_klc_kl.js").read_bytes()

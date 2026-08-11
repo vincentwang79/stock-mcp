@@ -85,7 +85,7 @@ def normalize_sina_history(
 
 
 def normalize_sina_share_capital(
-    rows: Sequence[Sequence[object]],
+    rows: Sequence[Sequence[object] | Mapping[str, object]],
     *,
     symbol: str,
     source_timestamp: datetime,
@@ -97,13 +97,21 @@ def normalize_sina_share_capital(
     facts: list[ShareCapitalFact] = []
     seen: set[date] = set()
     for row in rows:
-        if len(row) < 2:
+        if isinstance(row, Mapping):
+            effective_value = row.get("date")
+            amount_value = row.get("amount")
+        else:
+            if len(row) < 2:
+                raise SinaNormalizationError("share-capital row is incomplete")
+            effective_value = row[0]
+            amount_value = row[1]
+        if effective_value in (None, "") or amount_value in (None, ""):
             raise SinaNormalizationError("share-capital row is incomplete")
-        effective = _date(row[0], "effective_date")
+        effective = _date(effective_value, "effective_date")
         if effective in seen or (facts and effective <= facts[-1].effective_date):
             raise SinaNormalizationError("share-capital dates must be unique and increasing")
         seen.add(effective)
-        shares = _decimal_int(row[1], Decimal(10_000), "outstanding_share")
+        shares = _decimal_int(amount_value, Decimal(10_000), "outstanding_share")
         if shares <= 0:
             raise SinaNormalizationError("outstanding shares must be positive")
         facts.append(
