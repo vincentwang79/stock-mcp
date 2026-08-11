@@ -193,7 +193,6 @@ $env:TUSHARE_TOKEN = $tushareValue
 $tushareValue = $null
 try {
     $servicePython = Join-Path $InstallRoot 'current\.venv\Scripts\python.exe'
-    $cli = Join-Path $InstallRoot 'current\.venv\Scripts\stock-mcp.exe'
     if (-not (Test-Path -LiteralPath $servicePython)) { throw 'Isolated application Python is missing.' }
     & $servicePython -m stock_mcp.cli doctor --root $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw 'Data permissions/configuration probe failed.' }

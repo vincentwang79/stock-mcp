@@ -12,6 +12,18 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertTrue(path.is_file(), f"missing deployment artifact: {path}")
         return path.read_text(encoding="utf-8")
 
+    def test_windows_current_junction_never_uses_generated_cli_launcher(self) -> None:
+        """The pip/uv ``.exe`` launcher cannot reliably resolve the current junction."""
+        readme = self._read_required("README-WINDOWS.md")
+        diagnose = self._read_required("diagnose.ps1")
+
+        self.assertNotIn(r"current\.venv\Scripts\stock-mcp.exe", readme)
+        self.assertNotIn(r"current\.venv\Scripts\stock-mcp.exe", diagnose)
+        self.assertIn(r"current\.venv\Scripts\python.exe", readme)
+        self.assertIn("-m stock_mcp.cli build-v3-facts", readme)
+        self.assertIn("-m stock_mcp.cli approve-strategy", readme)
+        self.assertIn("-m stock_mcp.cli doctor", diagnose)
+
     def test_governance_replay_docs_describe_the_durable_mcp_and_windows_gates(self) -> None:
         """Published Chinese docs keep the replay governance boundary auditable."""
         root = ROOT

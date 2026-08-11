@@ -25,7 +25,7 @@
 - `uv` 安装固定 Python 3.12；服务直接执行版本虚拟环境中的 Python。
 - `StockMcpService` 和 `StockMcpTunnel` 使用低权限服务账户。
 - 所有二进制和发布文件必须在使用前校验 SHA-256。
-- 发布包在应用目录中携带版本化行业 JSON；部署后由管理员显式运行 `stock-mcp build-v3-facts --root E:\\StockMcp --start 2023-08-08 --end 2026-08-07`。该离线步骤失败、数据有缺口或事实冲突时，禁止开始 v3 回放、认证或激活。
+- 发布包在应用目录中携带版本化行业 JSON；部署后由管理员显式运行 `E:\\StockMcp\\current\\.venv\\Scripts\\python.exe -m stock_mcp.cli build-v3-facts --root E:\\StockMcp --start 2023-08-08 --end 2026-08-07`。禁止使用生成的 `stock-mcp.exe`，因为它不能可靠解析 `current` 目录联接。该离线步骤失败、数据有缺口或事实冲突时，禁止开始 v3 回放、认证或激活。
 - 安装、配置和升级不自动创建策略提案、不自动认证、不自动激活。727 个交易日回放、60 个交易日预热、outcome 审阅、主机批准和用户确认仍须按治理流程人工完成。
 
 ## 测试决策

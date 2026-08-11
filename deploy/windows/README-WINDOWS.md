@@ -168,7 +168,7 @@ git pull --ff-only
 随后先在 Windows 主机上执行离线事实构建；这一步成功只是事实就绪，**不是**提案、回放、认证或激活。
 
 ```powershell
-& 'E:\StockMcp\current\.venv\Scripts\stock-mcp.exe' build-v3-facts `
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli build-v3-facts `
   --root E:\StockMcp `
   --start 2023-08-08 `
   --end 2026-08-07
@@ -185,7 +185,7 @@ git pull --ff-only
 5. 认证成功后，管理员在本机运行下列命令，并在提示中再次完整键入同一版本号：
 
 ```powershell
-& 'E:\StockMcp\current\.venv\Scripts\stock-mcp.exe' approve-strategy `
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli approve-strategy `
   --root E:\StockMcp `
   --version v0.3-policy-1
 ```

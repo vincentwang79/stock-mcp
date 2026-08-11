@@ -121,9 +121,12 @@ try {
             & $python -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('PRAGMA integrity_check').fetchone()[0])" $database
         }
     }
-    $cli = Join-Path $InstallRoot 'current\.venv\Scripts\stock-mcp.exe'
-    if (Test-Path -LiteralPath $cli) {
-        Write-RedactedCommandOutput (Join-Path $stage 'doctor.txt') { & $cli doctor --root $InstallRoot 2>&1 | Out-String }
+    if (Test-Path -LiteralPath $python) {
+        # Invoke the module directly: the generated stock-mcp.exe launcher can
+        # fail to resolve the versioned ``current`` directory junction.
+        Write-RedactedCommandOutput (Join-Path $stage 'doctor.txt') {
+            & $python -m stock_mcp.cli doctor --root $InstallRoot 2>&1 | Out-String
+        }
     }
     $tunnel = Join-Path $InstallRoot 'runtime\tools\tunnel-client.exe'
     $tunnelConfig = Join-Path $InstallRoot 'config\tunnel-client.yaml'
