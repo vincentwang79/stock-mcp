@@ -22,6 +22,11 @@ class DoctorReport:
     checks: dict[str, str]
 
 
+def _print_sina_backfill_progress(event: dict[str, object]) -> None:
+    encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    print(f"stock-mcp: sina-backfill-stage {encoded}", flush=True)
+
+
 def doctor(settings: Settings) -> DoctorReport:
     """Return redacted readiness facts; never include secret values."""
     missing = settings.missing_secrets
@@ -350,6 +355,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             database=database,
             provider=SinaProvider(transport=transport, clock=lambda: datetime.now(UTC)),
             manifest=manifest,
+            progress=_print_sina_backfill_progress,
         ).backfill()
         print(json.dumps(asdict(result), ensure_ascii=False))
         return 0 if not result.failed_symbols else 2

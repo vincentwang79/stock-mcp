@@ -255,6 +255,24 @@ git pull --ff-only
   --manifest E:\StockMcp\config\sina-backfill-manifest.json
 ```
 
+长时间回填应通过 `start-sina-backfill.ps1` 启动。新版 worker 会把脱敏的
+`sina-backfill-stage` JSON 事件立即写入本轮 `run.log`，记录每只证券的
+checkpoint、历史请求、股本请求、转换和数据库写入阶段及耗时，不记录响应正文、
+凭证或来源时间戳。可随时只读汇总当前日志：
+
+```powershell
+$runRoot = 'E:\StockMcp\state\sina-backfill-runs'
+$runDir = (Get-Content (Join-Path $runRoot 'latest-run.txt') -Raw).Trim()
+
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' `
+  E:\code\stock-mcp\scripts\sina_backfill_stage_summary.py `
+  --log (Join-Path $runDir 'run.log')
+```
+
+如果汇总中的 `last_event` 长时间停在某个 `event=start`，该 `stage` 就是当前
+阻塞位置。回填期间不要并行启动第二个 worker；网络故障恢复后应保留旧 evidence，
+使用同一 manifest 重新启动以从 checkpoint 续跑。
+
 压缩 KLC 已由纯 Python 位流解码器和固定录制夹具覆盖，但真实端点单位人工对照、Windows 断点续跑和 20 日 shadow 仍是外部门禁。任何 KLC 完整性校验失败都必须终止，不能改用远端复权脚本、执行 JavaScript 或拿 Tushare 填补新浪缺口。资格未达到 `qualified_for_manual_approval` 时，不得执行 `approve-provider-source` 或 `activate_provider_source`。
 
 v4 研究入口和查询 DTO 已公开，但研究启动在完整 outcome/benchmark worker 未安装时会明确返回 `v4_research_rejected`，不会留下永远停在 `queued` 的假作业。不得将 Schema、CLI 或 DTO 存在描述为已完成研究、Sina replication、proposal、认证或激活。

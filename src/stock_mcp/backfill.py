@@ -72,7 +72,14 @@ class SinaBackfillResult:
 class SinaBackfillService:
     """Checkpointed, single-provider Sina history and share-capital backfill."""
 
-    def __init__(self, *, database: Any, provider: Any, manifest: Mapping[str, object]) -> None:
+    def __init__(
+        self,
+        *,
+        database: Any,
+        provider: Any,
+        manifest: Mapping[str, object],
+        progress: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
         if getattr(provider, "source", None) != "sina":
             raise ValueError("Sina backfill cannot use another provider")
         if manifest.get("adapter_version") != "sina-adapter-v1":
@@ -86,6 +93,29 @@ class SinaBackfillService:
         self._provider = provider
         self._manifest = dict(manifest)
         self._symbols = symbols
+        self._progress = progress or (lambda _event: None)
+
+    def _emit_progress(
+        self,
+        *,
+        symbol: str,
+        ordinal: int,
+        stage: str,
+        event: str,
+        elapsed_seconds: float | None = None,
+        **facts: object,
+    ) -> None:
+        payload: dict[str, object] = {
+            "symbol": symbol,
+            "ordinal": ordinal,
+            "total_symbols": len(self._symbols),
+            "stage": stage,
+            "event": event,
+        }
+        if elapsed_seconds is not None:
+            payload["elapsed_seconds"] = round(elapsed_seconds, 6)
+        payload.update(facts)
+        self._progress(payload)
 
     def backfill(self) -> SinaBackfillResult:
         completed: list[str] = []
@@ -95,27 +125,95 @@ class SinaBackfillService:
         start = self._manifest["start"]
         end = self._manifest["end"]
         assert isinstance(start, date) and isinstance(end, date)
-        for symbol in self._symbols:
-            checkpoint = self._database.load_sina_backfill_checkpoint(run_id=run_id, symbol=symbol)
+        for ordinal, symbol in enumerate(self._symbols, start=1):
+            symbol_started = monotonic()
+            self._emit_progress(
+                symbol=symbol, ordinal=ordinal, stage="symbol", event="start"
+            )
+            checkpoint_started = monotonic()
+            self._emit_progress(
+                symbol=symbol, ordinal=ordinal, stage="checkpoint", event="start"
+            )
+            checkpoint = self._database.load_sina_backfill_checkpoint(
+                run_id=run_id, symbol=symbol
+            )
+            self._emit_progress(
+                symbol=symbol,
+                ordinal=ordinal,
+                stage="checkpoint",
+                event="complete",
+                elapsed_seconds=monotonic() - checkpoint_started,
+                checkpoint_found=checkpoint is not None,
+            )
             if checkpoint is not None:
                 if checkpoint.get("status") != "completed":
                     failed.append(symbol)
+                    status = "failed"
                 else:
                     verified.append(symbol)
+                    status = "verified"
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage="symbol",
+                    event="complete",
+                    elapsed_seconds=monotonic() - symbol_started,
+                    status=status,
+                )
                 continue
+            current_stage = "history_fetch"
+            stage_started = monotonic()
             try:
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="start",
+                )
                 history_loader = getattr(self._provider, "fetch_history_with_evidence", None)
                 if callable(history_loader):
                     history, history_evidence = history_loader(symbol, start=start, end=end)
                 else:
                     history = tuple(self._provider.fetch_history(symbol, start=start, end=end))
                     history_evidence = None
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="complete",
+                    elapsed_seconds=monotonic() - stage_started,
+                    row_count=len(history),
+                )
+                current_stage = "capital_fetch"
+                stage_started = monotonic()
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="start",
+                )
                 capital_loader = getattr(self._provider, "fetch_share_capital_with_evidence", None)
                 if callable(capital_loader):
                     capital, capital_evidence = capital_loader(symbol)
                 else:
                     capital = tuple(self._provider.fetch_share_capital(symbol))
                     capital_evidence = None
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="complete",
+                    elapsed_seconds=monotonic() - stage_started,
+                    row_count=len(capital),
+                )
+                current_stage = "transform"
+                stage_started = monotonic()
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="start",
+                )
                 bars = tuple(self._daily_bar(row) for row in history)
                 if any(bar.source != "sina" for bar in bars):
                     raise ValueError("Sina backfill history contains another source")
@@ -133,6 +231,23 @@ class SinaBackfillService:
                     "last_date": bars[-1].trade_date if bars else None,
                     "session_count": len(bars),
                 }
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="complete",
+                    elapsed_seconds=monotonic() - stage_started,
+                    bar_count=len(bars),
+                    capital_fact_count=len(capital),
+                )
+                current_stage = "database_write"
+                stage_started = monotonic()
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="start",
+                )
                 atomic_save = getattr(self._database, "save_sina_backfill_symbol", None)
                 if callable(atomic_save):
                     atomic_save(
@@ -147,8 +262,39 @@ class SinaBackfillService:
                     )
                 else:
                     raise ValueError("atomic Sina backfill persistence is unavailable")
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="complete",
+                    elapsed_seconds=monotonic() - stage_started,
+                )
                 completed.append(symbol)
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage="symbol",
+                    event="complete",
+                    elapsed_seconds=monotonic() - symbol_started,
+                    status="completed",
+                )
             except Exception as error:
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage=current_stage,
+                    event="failed",
+                    elapsed_seconds=monotonic() - stage_started,
+                    error_class=type(error).__name__,
+                )
+                self._emit_progress(
+                    symbol=symbol,
+                    ordinal=ordinal,
+                    stage="symbol",
+                    event="failed",
+                    elapsed_seconds=monotonic() - symbol_started,
+                    error_class=type(error).__name__,
+                )
                 evidence = getattr(error, "evidence", None)
                 if isinstance(evidence, Mapping):
                     self._database.save_provider_fetch_evidence(dict(evidence))

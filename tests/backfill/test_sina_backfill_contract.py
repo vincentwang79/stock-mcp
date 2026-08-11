@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 import tempfile
 import unittest
 from datetime import UTC, date, datetime
@@ -59,6 +61,62 @@ class RecordedSinaProvider:
 
 
 class SinaBackfillContractTest(unittest.TestCase):
+    def test_each_stage_emits_redacted_timing_events_for_live_diagnosis(self) -> None:
+        from stock_mcp.backfill import SinaBackfillService
+
+        self.assertIn(
+            "progress",
+            inspect.signature(SinaBackfillService).parameters,
+            "the real backfill worker must expose redacted stage progress",
+        )
+        if "progress" not in inspect.signature(SinaBackfillService).parameters:
+            return
+        events: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "research.sqlite3")
+            database.initialize()
+            service = SinaBackfillService(
+                database=database,
+                provider=RecordedSinaProvider(),
+                manifest={
+                    "run_id": "recorded-sina-backfill-timing",
+                    "symbols": ("600000.SH",),
+                    "start": TRADE_DATE,
+                    "end": TRADE_DATE,
+                    "adapter_version": "sina-adapter-v1",
+                    "rate_limit_per_second": 1,
+                },
+                progress=events.append,
+            )
+
+            service.backfill()
+
+        self.assertEqual(
+            [
+                ("symbol", "start"),
+                ("checkpoint", "start"),
+                ("checkpoint", "complete"),
+                ("history_fetch", "start"),
+                ("history_fetch", "complete"),
+                ("capital_fetch", "start"),
+                ("capital_fetch", "complete"),
+                ("transform", "start"),
+                ("transform", "complete"),
+                ("database_write", "start"),
+                ("database_write", "complete"),
+                ("symbol", "complete"),
+            ],
+            [(event["stage"], event["event"]) for event in events],
+        )
+        self.assertTrue(all(event["symbol"] == "600000.SH" for event in events))
+        self.assertTrue(all(event["ordinal"] == 1 for event in events))
+        self.assertTrue(all(event["total_symbols"] == 1 for event in events))
+        completed = [event for event in events if event["event"] == "complete"]
+        self.assertTrue(all(float(event["elapsed_seconds"]) >= 0 for event in completed))
+        encoded = json.dumps(events)
+        self.assertNotIn("payload_sha256", encoded)
+        self.assertNotIn("source_timestamp", encoded)
+
     def test_each_security_checkpoint_is_recoverable_and_replay_verifies_hash_without_refetch(
         self,
     ) -> None:
