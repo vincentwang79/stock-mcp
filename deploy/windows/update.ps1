@@ -69,6 +69,28 @@ function Wait-DatabaseExclusiveAccess {
     throw "Database is still in use after services stopped: $Path"
 }
 
+function Suspend-StockServicesForUpdate {
+    param([Parameter(Mandatory = $true)][string] $Root)
+
+    # WinSW service definitions intentionally restart crashed processes.  Make
+    # that recovery policy inert throughout migration and rollback so a delayed
+    # restart cannot reacquire SQLite after the first exclusive-access check.
+    foreach ($name in @('StockMcpTunnel', 'StockMcpService')) {
+        if ($null -ne (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
+            Set-Service -Name $name -StartupType Disabled
+        }
+    }
+    Stop-StockServices -InstallRoot $Root
+}
+
+function Restore-StockServiceStartup {
+    foreach ($name in @('StockMcpService', 'StockMcpTunnel')) {
+        if ($null -ne (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
+            Set-Service -Name $name -StartupType Automatic
+        }
+    }
+}
+
 function New-WinSWServiceDefinitions {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -165,7 +187,7 @@ try {
     & $oldPython -m stock_mcp.cli backup --root $InstallRoot --destination $databaseBackup
     if ($LASTEXITCODE -ne 0) { throw 'Verified online database backup failed.' }
     $servicesStopped = $true
-    Stop-StockServices -InstallRoot $InstallRoot
+    Suspend-StockServicesForUpdate -Root $InstallRoot
     Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\stock-mcp.sqlite3')
     Copy-Item -LiteralPath $oldTarget -Destination (Join-Path $backupRoot 'previous-release') -Recurse -Force
     if (Test-Path -LiteralPath $toolsDestination) {
@@ -253,6 +275,7 @@ try {
     if (Test-Path -LiteralPath $customCa -PathType Leaf) {
         Set-PrivateFileAcl $customCa -Reader StockMcpService -SharedWithOtherService
     }
+    Restore-StockServiceStartup
     if ($doctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready') {
         Set-UpdateState 'configuration_required'
         Write-Host "Updated to $version. Configuration is still required. Backup: $backupRoot"
@@ -270,7 +293,7 @@ try {
     Write-Warning "Update failed; Rollback is starting: $($failure.Exception.Message)"
     if ($servicesStopped) {
         try {
-            Stop-StockServices -InstallRoot $InstallRoot
+            Suspend-StockServicesForUpdate -Root $InstallRoot
             Wait-DatabaseExclusiveAccess (Join-Path $InstallRoot 'data\stock-mcp.sqlite3')
             if ($oldTarget -and (Test-Path -LiteralPath $oldTarget)) { New-CurrentJunction $InstallRoot $oldTarget }
             if ($databaseBackup -and (Test-Path -LiteralPath $databaseBackup)) {
@@ -290,6 +313,7 @@ try {
             $oldWinSw = Join-Path $toolsDestination 'WinSW.exe'
             if (-not (Test-Path -LiteralPath $oldWinSw -PathType Leaf)) { throw 'Rollback WinSW executable is missing.' }
             Refresh-WinSWServiceDefinitions $servicesDirectory $oldWinSw
+            Restore-StockServiceStartup
             $rollbackDoctorStatus = Invoke-UpdateDoctor $oldPython $InstallRoot
             if ($rollbackDoctorStatus -eq 'configuration_required' -or $configurationState -ne 'ready') {
                 Set-UpdateState 'configuration_required'

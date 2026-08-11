@@ -169,6 +169,7 @@ def _boolean(value: str) -> bool:
 def _read_toml(path: Path) -> dict[str, object]:
     if not path.is_file():
         return {}
-    with path.open("rb") as stream:
-        value = tomllib.load(stream)
+    # Windows PowerShell 5.1 commonly writes UTF-8 text with a BOM.  TOML does
+    # not treat U+FEFF as whitespace, so decode with utf-8-sig before parsing.
+    value = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     return dict(value)

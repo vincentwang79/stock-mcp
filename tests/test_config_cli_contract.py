@@ -69,6 +69,22 @@ class ConfigAndCliContractTest(unittest.TestCase):
 
         self.assertEqual("file-token", settings.tushare_token)
 
+    def test_windows_utf8_bom_app_toml_is_accepted(self) -> None:
+        config = self.root / "config"
+        config.mkdir(parents=True)
+        (config / "app.toml").write_bytes(
+            b"\xef\xbb\xbf[service]\n"
+            b"bind_host = \"127.0.0.1\"\n"
+            b"bind_port = 9876\n"
+            b"\n[sina]\n"
+            b"shadow_enabled = false\n"
+        )
+
+        settings = Settings.load(root=self.root, environ={})
+
+        self.assertEqual(9876, settings.port)
+        self.assertFalse(settings.sina_shadow_enabled)
+
     def test_cli_creates_and_verifies_online_database_backup(self) -> None:
         self.assertEqual(0, main(["migrate", "--root", str(self.root)]))
         destination = self.root / "backups" / "stock-mcp-before-update.sqlite3"

@@ -306,6 +306,23 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("PurgeData", uninstall)
         self.assertIn("ShouldContinue", uninstall)
 
+    def test_update_suspends_service_restarts_while_database_may_be_restored(self) -> None:
+        update = self._read_required("update.ps1")
+
+        self.assertIn("function Suspend-StockServicesForUpdate", update)
+        self.assertIn("Set-Service -Name $name -StartupType Disabled", update)
+        self.assertIn("function Restore-StockServiceStartup", update)
+        self.assertIn("Set-Service -Name $name -StartupType Automatic", update)
+        first_suspend = update.index("Suspend-StockServicesForUpdate -Root $InstallRoot")
+        self.assertLess(
+            first_suspend,
+            update.index("Wait-DatabaseExclusiveAccess", first_suspend),
+        )
+        self.assertLess(
+            update.rindex("Suspend-StockServicesForUpdate -Root $InstallRoot"),
+            update.index("stock_mcp.cli restore"),
+        )
+
     def test_release_is_self_contained_and_emits_an_external_digest(self) -> None:
         build = self._read_required("build-release.ps1")
 
@@ -688,7 +705,10 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         update = self._read_required("update.ps1")
         library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")
 
-        self.assertGreaterEqual(update.count("Stop-StockServices -InstallRoot $InstallRoot"), 2)
+        self.assertGreaterEqual(
+            update.count("Suspend-StockServicesForUpdate -Root $InstallRoot"), 2
+        )
+        self.assertIn("Stop-StockServices -InstallRoot $Root", update)
         self.assertIn("[string] $InstallRoot", library)
         self.assertIn("Get-CimInstance Win32_Process", library)
         self.assertIn("ExecutablePath", library)
