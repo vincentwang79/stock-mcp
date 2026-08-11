@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from argparse import ArgumentParser
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -42,6 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "command",
         choices=(
             "doctor",
+            "inspect-database",
             "migrate",
             "backup",
             "restore",
@@ -92,6 +94,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         Database(settings.database_path).initialize()
         print("stock-mcp: database ready")
         return 0
+
+    if args.command == "inspect-database":
+        if not settings.database_path.is_file():
+            print("stock-mcp: database does not exist")
+            return 2
+        with sqlite3.connect(
+            f"file:{settings.database_path.as_posix()}?mode=ro", uri=True
+        ) as connection:
+            report = {
+                "schema": int(connection.execute("PRAGMA user_version").fetchone()[0]),
+                "integrity": str(connection.execute("PRAGMA integrity_check").fetchone()[0]),
+                "tushare_days": int(
+                    connection.execute(
+                        "SELECT COUNT(DISTINCT trade_date) FROM daily_bars WHERE source = ?",
+                        ("tushare",),
+                    ).fetchone()[0]
+                ),
+                "tushare_rows": int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM daily_bars WHERE source = ?", ("tushare",)
+                    ).fetchone()[0]
+                ),
+            }
+        print(json.dumps(report, ensure_ascii=False))
+        return 0 if report["integrity"] == "ok" else 2
 
     if args.command == "backup":
         from .backup import BackupManager

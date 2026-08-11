@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -75,6 +78,39 @@ class ConfigAndCliContractTest(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertTrue(destination.is_file())
         self.assertTrue(destination.with_suffix(".sqlite3.sha256").is_file())
+
+    def test_cli_inspects_database_without_python_command_string_quoting(self) -> None:
+        self.assertEqual(0, main(["migrate", "--root", str(self.root)]))
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["inspect-database", "--root", str(self.root)])
+
+        self.assertEqual(0, exit_code)
+        report = json.loads(output.getvalue())
+        self.assertEqual(11, report["schema"])
+        self.assertEqual("ok", report["integrity"])
+        self.assertEqual(0, report["tushare_days"])
+        self.assertEqual(0, report["tushare_rows"])
+
+    def test_standalone_database_inspector_works_before_source_install(self) -> None:
+        self.assertEqual(0, main(["migrate", "--root", str(self.root)]))
+        script = Path(__file__).resolve().parents[1] / "scripts" / "database_preflight.py"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--database",
+                str(self.root / "data" / "stock-mcp.sqlite3"),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(11, json.loads(completed.stdout)["schema"])
 
     def test_cli_runs_a_bounded_resumable_historical_backfill(self) -> None:
         config = self.root / "config"

@@ -88,6 +88,19 @@ notepad E:\StockMcp\config\configure-input.psd1
 
 `install-from-source.ps1` 不生成或解压发布 ZIP。它要求 Git 工作区没有已修改或未跟踪的文件，记录当前提交和远程地址，下载并验证固定版本的 `uv`、WinSW 与 `tunnel-client`，然后建立可回滚的 `E:\StockMcp\releases\<版本+提交>` 运行副本。每次 `git pull` 到新提交后，再次运行同一安装命令即可升级；失败时仍保留旧版本和数据库备份。
 
+Windows PowerShell 5.1 可能破坏传给原生 `python -c` 的嵌套引号。不要用长 `-c` 命令检查数据库。更新源码后、安装前使用独立只读脚本；安装后使用正式 CLI：
+
+```powershell
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' `
+  E:\code\stock-mcp\scripts\database_preflight.py `
+  --database E:\StockMcp\data\stock-mcp.sqlite3
+
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  inspect-database --root E:\StockMcp
+```
+
+两条命令都以只读模式打开 SQLite，返回 Schema、`integrity_check`、Tushare 交易日数和日线行数，不执行迁移或修改事实。
+
 如果 `Get-ExecutionPolicy -List` 显示 `MachinePolicy` 或 `UserPolicy` 已由组策略强制，当前窗口的设置也会被拒绝；此时应由 Windows Server 管理员为该受控仓库配置相应的脚本执行策略。不要将机器级策略设为 `Unrestricted`，也不要对不可信目录使用绕过命令。
 
 ### 工具下载故障排查
