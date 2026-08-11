@@ -89,6 +89,7 @@ class SinaBackfillRunnerContractTest(unittest.TestCase):
                         "http_status": 502,
                         "error_class": "HTTPError",
                         "count": 1,
+                        "sample_request_keys": ["sz000003"],
                     }
                 ],
                 "latest_failure": {

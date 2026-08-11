@@ -51,6 +51,13 @@ def main() -> int:
             "ORDER BY COUNT(*) DESC, endpoint_kind, http_status, error_class",
             evidence_parameters,
         ).fetchall()
+        failure_sample_rows = connection.execute(
+            "SELECT endpoint_kind, http_status, error_class, request_key "
+            "FROM provider_fetch_evidence "
+            f"WHERE {evidence_filter} AND status = 'failed' "
+            "ORDER BY endpoint_kind, http_status, error_class, request_key",
+            evidence_parameters,
+        ).fetchall()
         latest_failure_row = connection.execute(
             "SELECT endpoint_kind, request_key, retrieved_at, http_status, error_class "
             "FROM provider_fetch_evidence "
@@ -78,6 +85,13 @@ def main() -> int:
                 "http_status": row[1],
                 "error_class": row[2],
                 "count": int(row[3]),
+                "sample_request_keys": list(
+                    dict.fromkeys(
+                        str(sample[3])
+                        for sample in failure_sample_rows
+                        if sample[:3] == row[:3]
+                    )
+                )[:5],
             }
             for row in failure_rows
         ],
