@@ -115,6 +115,60 @@ class SinaRuntimeContractTest(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(sleeps, [])
 
+    def test_history_normalizes_only_the_requested_window_with_one_prior_close(self) -> None:
+        runtime = _runtime()
+        payload = json.dumps(
+            [
+                {
+                    "date": "1992-04-13",
+                    "prevclose": 0,
+                    "open": 22,
+                    "high": 26.55,
+                    "low": 22,
+                    "close": 24.3,
+                    "volume": 31_900,
+                    "amount": 3_781_000,
+                },
+                {
+                    "date": "2023-08-07",
+                    "open": 9.9,
+                    "high": 10.1,
+                    "low": 9.8,
+                    "close": 10,
+                    "volume": 100,
+                    "amount": 1_000,
+                },
+                {
+                    "date": "2023-08-08",
+                    "open": 10,
+                    "high": 10.3,
+                    "low": 9.9,
+                    "close": 10.2,
+                    "volume": 110,
+                    "amount": 1_100,
+                },
+                {
+                    "date": "2023-08-09",
+                    "open": 10.2,
+                    "high": 10.4,
+                    "low": 10.1,
+                    "close": 10.3,
+                    "volume": 120,
+                    "amount": 1_200,
+                },
+            ],
+            separators=(",", ":"),
+        ).encode()
+        transport, _client, _sleeps = self._transport([_Response(200, payload)])
+        provider = runtime.SinaProvider(transport=transport, clock=lambda: NOW)  # type: ignore[attr-defined]
+
+        rows = provider.fetch_history(  # type: ignore[attr-defined]
+            "000007.SZ", start=date(2023, 8, 8), end=date(2023, 8, 9)
+        )
+
+        self.assertEqual([date(2023, 8, 8), date(2023, 8, 9)], [row["trade_date"] for row in rows])
+        self.assertEqual(100_000, rows[0]["pre_close_1e4"])
+
     def test_5xx_retries_with_injected_deterministic_backoff_and_stops_at_bound(self) -> None:
         transport, client, sleeps = self._transport(
             [_Response(503, b"one"), _Response(503, b"two"), _Response(503, b"three")]

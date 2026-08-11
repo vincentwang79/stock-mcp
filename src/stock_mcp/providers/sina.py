@@ -292,6 +292,7 @@ class SinaProvider:
         )
         try:
             rows = decode_klc2(result.payload)
+            rows = _history_rows_for_range(rows, start=start, end=end)
             bars = normalize_sina_history(
                 rows, symbol=symbol, source_timestamp=result.evidence.retrieved_at
             )
@@ -300,7 +301,6 @@ class SinaProvider:
         normalized = tuple(
             {**asdict(bar), "payload_sha256": result.evidence.payload_sha256}
             for bar in bars
-            if start <= bar.trade_date <= end
         )
         return normalized, _evidence_record(result.evidence)
 
@@ -337,6 +337,33 @@ def _wire_symbol(symbol: str) -> str:
     if symbol.endswith(".SZ"):
         return "sz" + symbol[:6]
     raise ValueError("unsupported Sina symbol")
+
+
+def _history_rows_for_range(
+    rows: tuple[dict[str, Any], ...], *, start: date, end: date
+) -> tuple[dict[str, Any], ...]:
+    """Crop before normalization and seed the first retained pre-close from the same series."""
+
+    selected: list[dict[str, Any]] = []
+    prior_close: object | None = None
+    for raw in rows:
+        target = date.fromisoformat(str(raw.get("date")))
+        close = raw.get("close")
+        if target < start:
+            prior_close = close
+            continue
+        if target > end:
+            break
+        item = dict(raw)
+        supplied = item.get("prevclose")
+        if supplied in (None, "", 0, 0.0, "0", "0.0"):
+            if prior_close in (None, "", 0, 0.0, "0", "0.0"):
+                prior_close = close
+                continue
+            item["prevclose"] = prior_close
+        selected.append(item)
+        prior_close = close
+    return tuple(selected)
 
 
 def _retry_after(value: object, *, now: datetime | None = None) -> float | None:
