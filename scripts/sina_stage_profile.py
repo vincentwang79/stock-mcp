@@ -35,6 +35,24 @@ from stock_mcp.providers.sina_normalization import (
 from stock_mcp.storage import Database
 
 
+class _TrackingDatabase(Database):
+    """Track profiler-owned connections so Windows can remove the temp database."""
+
+    def __init__(self, path: str | Path) -> None:
+        super().__init__(path)
+        self.opened_connections: list[Any] = []
+
+    def connect(self) -> Any:
+        connection = super().connect()
+        self.opened_connections.append(connection)
+        return connection
+
+    def close_all(self) -> None:
+        for connection in reversed(self.opened_connections):
+            connection.close()
+        self.opened_connections.clear()
+
+
 @dataclass
 class _Timings:
     wall: dict[str, float]
@@ -213,31 +231,34 @@ def main() -> int:
     )
 
     with tempfile.TemporaryDirectory(prefix="stock-mcp-sina-profile-") as directory:
-        database = Database(Path(directory) / "profile.sqlite3")
-        timings.measure("sqlite_initialize", database.initialize)
-        checkpoint = {
-            "run_id": "sina-stage-profile",
-            "symbol": args.symbol,
-            "status": "completed",
-            "history_payload_sha256": history_result.evidence.payload_sha256,
-            "capital_payload_sha256": capital_result.evidence.payload_sha256,
-            "first_date": bars[0].trade_date if bars else None,
-            "last_date": bars[-1].trade_date if bars else None,
-            "session_count": len(bars),
-        }
-        timings.measure(
-            "sqlite_atomic_write",
-            lambda: database.save_sina_backfill_symbol(
-                bars=bars,
-                capital_facts=capital_facts,
-                fetch_evidence=(
-                    _evidence_record(history_result.evidence),
-                    _evidence_record(capital_result.evidence),
+        database = _TrackingDatabase(Path(directory) / "profile.sqlite3")
+        try:
+            timings.measure("sqlite_initialize", database.initialize)
+            checkpoint = {
+                "run_id": "sina-stage-profile",
+                "symbol": args.symbol,
+                "status": "completed",
+                "history_payload_sha256": history_result.evidence.payload_sha256,
+                "capital_payload_sha256": capital_result.evidence.payload_sha256,
+                "first_date": bars[0].trade_date if bars else None,
+                "last_date": bars[-1].trade_date if bars else None,
+                "session_count": len(bars),
+            }
+            timings.measure(
+                "sqlite_atomic_write",
+                lambda: database.save_sina_backfill_symbol(
+                    bars=bars,
+                    capital_facts=capital_facts,
+                    fetch_evidence=(
+                        _evidence_record(history_result.evidence),
+                        _evidence_record(capital_result.evidence),
+                    ),
+                    checkpoint=checkpoint,
                 ),
-                checkpoint=checkpoint,
-            ),
-        )
-        daily_bar_rows, share_capital_rows = _sqlite_counts(database)
+            )
+            daily_bar_rows, share_capital_rows = _sqlite_counts(database)
+        finally:
+            database.close_all()
 
     timings.set(
         "total",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import runpy
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,29 @@ FIXTURES = ROOT / "tests" / "providers" / "fixtures" / "sina"
 
 
 class SinaStageProfileContractTest(unittest.TestCase):
+    def test_profile_closes_every_connection_opened_by_repository_operations(self) -> None:
+        namespace = runpy.run_path(
+            str(ROOT / "scripts" / "sina_stage_profile.py"),
+            run_name="sina_stage_profile_connection_contract",
+        )
+        tracking_database = namespace.get("_TrackingDatabase")
+        self.assertIsNotNone(
+            tracking_database, "the profiler must track repository-created SQLite connections"
+        )
+        if tracking_database is None:
+            return
+        with tempfile.TemporaryDirectory() as directory:
+            database = tracking_database(Path(directory) / "profile.sqlite3")
+            database.initialize()
+            opened = tuple(database.opened_connections)
+            self.assertGreater(len(opened), 0)
+
+            database.close_all()
+
+            for connection in opened:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    connection.execute("SELECT 1")
+
     def test_sqlite_profile_connection_is_explicitly_closed_for_windows_cleanup(self) -> None:
         namespace = runpy.run_path(
             str(ROOT / "scripts" / "sina_stage_profile.py"),
