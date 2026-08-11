@@ -176,6 +176,32 @@ class DatabaseContractTest(unittest.TestCase):
 
         self.assertEqual(self.database.load_daily_bars(TRADE_DATE, SOURCE), bars)
 
+    def test_immutable_bar_check_filters_in_sql_by_the_smaller_incoming_dimension(self) -> None:
+        target = _bars()[0]
+        prior = replace(target, trade_date=date(2026, 8, 6))
+        connection = self.database.connect()
+        self.addCleanup(connection.close)
+        statements: list[str] = []
+        connection.set_trace_callback(statements.append)
+
+        self.database._save_daily_bars(connection, (prior, target))
+
+        checks = [
+            statement
+            for statement in statements
+            if "SELECT symbol, trade_date" in statement and "FROM daily_bars" in statement
+        ]
+        self.assertTrue(checks)
+        self.assertTrue(
+            all(
+                "WHERE symbol =" in statement
+                and "source =" in statement
+                and "trade_date IN" in statement
+                for statement in checks
+            ),
+            "multi-day single-symbol checks must not scan every market row for every date",
+        )
+
     def test_symbol_history_is_cut_off_at_the_requested_date(self) -> None:
         bars = _bars()
         prior = replace(bars[0], trade_date=date(2026, 8, 6))

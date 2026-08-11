@@ -205,6 +205,40 @@ class SinaBackfillRunnerContractTest(unittest.TestCase):
             report["failures"],
         )
 
+    def test_stage_summary_reads_windows_powershell_utf16_logs(self) -> None:
+        script = ROOT / "scripts" / "sina_backfill_stage_summary.py"
+        event = {
+            "symbol": "000060.SZ",
+            "ordinal": 36,
+            "total_symbols": 3087,
+            "stage": "database_write",
+            "event": "start",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "run.log"
+            log.write_text(
+                "stock-mcp: sina-backfill-stage " + json.dumps(event) + "\n",
+                encoding="utf-16",
+            )
+            completed = subprocess.run(
+                [sys.executable, str(script), "--log", str(log)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(event, json.loads(completed.stdout)["last_event"])
+
+    def test_runner_appends_worker_output_with_explicit_utf8_encoding(self) -> None:
+        runner = (ROOT / "deploy" / "windows" / "start-sina-backfill.ps1").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("[IO.File]::AppendAllText", runner)
+        self.assertIn("[Text.UTF8Encoding]::new($false)", runner)
+        self.assertNotIn("Tee-Object -FilePath $log", runner)
+
     def test_powershell_runner_is_detached_observable_and_single_instance(self) -> None:
         runner = ROOT / "deploy" / "windows" / "start-sina-backfill.ps1"
         self.assertTrue(runner.is_file(), "the durable Sina backfill runner must exist")

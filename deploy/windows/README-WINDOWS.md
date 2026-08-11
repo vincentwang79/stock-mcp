@@ -273,6 +273,11 @@ $runDir = (Get-Content (Join-Path $runRoot 'latest-run.txt') -Raw).Trim()
 阻塞位置。回填期间不要并行启动第二个 worker；网络故障恢复后应保留旧 evidence，
 使用同一 manifest 重新启动以从 checkpoint 续跑。
 
+新浪按证券写入多年日线时，不可变冲突检查会按证券和传入日期直接命中 SQLite
+主键；不会再逐日读取该日全市场数据后在 Python 中过滤。若阶段日志显示
+`database_write` 持续达到数十秒，应停止回填并保留日志，不能通过提高并发规避
+数据库瓶颈。
+
 压缩 KLC 已由纯 Python 位流解码器和固定录制夹具覆盖，但真实端点单位人工对照、Windows 断点续跑和 20 日 shadow 仍是外部门禁。任何 KLC 完整性校验失败都必须终止，不能改用远端复权脚本、执行 JavaScript 或拿 Tushare 填补新浪缺口。资格未达到 `qualified_for_manual_approval` 时，不得执行 `approve-provider-source` 或 `activate_provider_source`。
 
 v4 研究入口和查询 DTO 已公开，但研究启动在完整 outcome/benchmark worker 未安装时会明确返回 `v4_research_rejected`，不会留下永远停在 `queued` 的假作业。不得将 Schema、CLI 或 DTO 存在描述为已完成研究、Sina replication、proposal、认证或激活。
@@ -291,6 +296,12 @@ v4 研究入口和查询 DTO 已公开，但研究启动在完整 outcome/benchm
 ```
 
 构建器会拒绝占位内容、缺失的 `uv.lock`，以及哈希与清单不一致的二进制文件。成功后生成固定文件名 `stock-mcp-windows-x64.zip`、需要独立发布的 `stock-mcp-windows-x64.zip.sha256`，以及压缩包内部的 `checksums.txt`。
+
+从源码重复安装时，uv、WinSW 和 tunnel-client 会缓存在
+`E:\StockMcp\cache\tools`。该目录仅允许 Administrators 和 SYSTEM 访问；每次复用前
+仍按 `tools-manifest.json` 校验最终可执行文件 SHA-256。首次启用缓存时会优先从当前
+`runtime\tools` 中播种哈希匹配的文件；只有缓存缺失、损坏或清单版本变化时才重新
+下载。缓存不会绕过发布包内部校验或依赖锁验证。
 
 外部发布的 SHA-256 才是信任根。`checksums.txt` 只能在 ZIP 已通过外部摘要验证后检测内部损坏，不能替代解压前的外部校验。
 

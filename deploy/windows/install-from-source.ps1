@@ -60,7 +60,30 @@ try {
     Copy-Item -LiteralPath (Join-Path $sourceWindows 'tools-manifest.json') -Destination (Join-Path $releaseRoot 'tools-manifest.json') -Force
 
     $tools = Join-Path $releaseRoot 'tools'
-    & (Join-Path $sourceWindows 'fetch-tools.ps1') -Manifest (Join-Path $sourceWindows 'tools-manifest.json') -OutputDirectory $tools
+    $toolCache = Join-Path $InstallRoot 'cache\tools'
+    . (Join-Path $sourceWindows 'deploy\lib.ps1')
+    Set-PrivateAcl $toolCache
+    $toolManifest = Get-ToolManifest (Join-Path $sourceWindows 'tools-manifest.json')
+    $installedTools = Join-Path $InstallRoot 'runtime\tools'
+    foreach ($name in @('uv', 'winsw', 'tunnel-client')) {
+        $entry = $toolManifest.tools.$name
+        $installed = Join-Path $installedTools $entry.path
+        $cached = Join-Path $toolCache $entry.path
+        if (
+            -not (Test-Path -LiteralPath $cached -PathType Leaf) -and
+            (Test-Path -LiteralPath $installed -PathType Leaf)
+        ) {
+            $actual = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -eq ([string] $entry.sha256).ToLowerInvariant()) {
+                Copy-Item -LiteralPath $installed -Destination $cached -Force
+                Write-Host "Seeded verified $name $($entry.version) from installed runtime."
+            }
+        }
+    }
+    & (Join-Path $sourceWindows 'fetch-tools.ps1') `
+        -Manifest (Join-Path $sourceWindows 'tools-manifest.json') `
+        -OutputDirectory $tools `
+        -CacheDirectory $toolCache
     if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the verified Windows tool payloads.' }
 
     [ordered]@{

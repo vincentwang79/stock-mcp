@@ -1370,7 +1370,8 @@ class Database:
     def _save_daily_bars(self, connection: sqlite3.Connection, bars: Iterable[DailyBar]) -> None:
         records = tuple(bars)
         incoming: dict[tuple[str, str, str], tuple[str | int, ...]] = {}
-        groups: dict[tuple[str, str], set[str]] = {}
+        date_groups: dict[tuple[str, str], set[str]] = {}
+        symbol_groups: dict[tuple[str, str], set[str]] = {}
         for bar in records:
             values = self._daily_bar_values(bar)
             key = (str(values[0]), str(values[1]), str(values[9]))
@@ -1378,23 +1379,57 @@ class Database:
             if previous is not None and previous != values:
                 raise ValueError("daily market bar is immutable")
             incoming[key] = values
-            groups.setdefault((key[1], key[2]), set()).add(key[0])
+            date_groups.setdefault((key[1], key[2]), set()).add(key[0])
+            symbol_groups.setdefault((key[0], key[2]), set()).add(key[1])
 
-        for (trade_date_value, source), symbols in groups.items():
-            stored = {
-                (str(row[0]), str(row[1]), str(row[9])): tuple(row)
-                for row in connection.execute(
-                    """
-                    SELECT symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4,
-                           pre_close_1e4, volume_shares, amount_fen, source, source_timestamp
-                    FROM daily_bars WHERE trade_date = ? AND source = ?
-                    """,
-                    (trade_date_value, source),
-                ).fetchall()
-                if str(row[0]) in symbols
-            }
-            if any(stored[key] != incoming[key] for key in stored):
-                raise ValueError("daily market bar is immutable")
+        stored: dict[tuple[str, str, str], tuple[object, ...]] = {}
+        chunk_size = 500
+        if len(date_groups) <= len(symbol_groups):
+            for (trade_date_value, source), symbols in date_groups.items():
+                ordered = sorted(symbols)
+                for offset in range(0, len(ordered), chunk_size):
+                    chunk = ordered[offset : offset + chunk_size]
+                    placeholders = ", ".join("?" for _item in chunk)
+                    rows = connection.execute(
+                        """
+                        SELECT symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4,
+                               pre_close_1e4, volume_shares, amount_fen, source,
+                               source_timestamp
+                        FROM daily_bars WHERE trade_date = ? AND source = ?
+                        """
+                        f" AND symbol IN ({placeholders})",
+                        (trade_date_value, source, *chunk),
+                    ).fetchall()
+                    stored.update(
+                        {
+                            (str(row[0]), str(row[1]), str(row[9])): tuple(row)
+                            for row in rows
+                        }
+                    )
+        else:
+            for (symbol, source), trade_dates in symbol_groups.items():
+                ordered = sorted(trade_dates)
+                for offset in range(0, len(ordered), chunk_size):
+                    chunk = ordered[offset : offset + chunk_size]
+                    placeholders = ", ".join("?" for _item in chunk)
+                    rows = connection.execute(
+                        """
+                        SELECT symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4,
+                               pre_close_1e4, volume_shares, amount_fen, source,
+                               source_timestamp
+                        FROM daily_bars WHERE symbol = ? AND source = ?
+                        """
+                        f" AND trade_date IN ({placeholders})",
+                        (symbol, source, *chunk),
+                    ).fetchall()
+                    stored.update(
+                        {
+                            (str(row[0]), str(row[1]), str(row[9])): tuple(row)
+                            for row in rows
+                        }
+                    )
+        if any(stored[key] != incoming[key] for key in stored):
+            raise ValueError("daily market bar is immutable")
 
         connection.executemany(
             """

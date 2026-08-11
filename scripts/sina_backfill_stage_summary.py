@@ -13,18 +13,18 @@ PREFIX = "stock-mcp: sina-backfill-stage "
 
 def _events(path: Path) -> tuple[dict[str, Any], ...]:
     events: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
-        for line in handle:
-            marker = line.find(PREFIX)
-            if marker < 0:
-                continue
-            encoded = line[marker + len(PREFIX) :].strip()
-            try:
-                event = json.loads(encoded)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                events.append(event)
+    text = path.read_bytes().decode("utf-8-sig", errors="replace").replace("\x00", "")
+    for line in text.splitlines():
+        marker = line.find(PREFIX)
+        if marker < 0:
+            continue
+        encoded = line[marker + len(PREFIX) :].strip()
+        try:
+            event = json.loads(encoded)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
     return tuple(events)
 
 

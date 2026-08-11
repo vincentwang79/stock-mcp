@@ -126,6 +126,18 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("Expand-Archive", fetch)
         self.assertIn("Assert-Sha256 $destination $entry.sha256", fetch)
 
+    def test_source_install_reuses_a_persistent_hash_verified_tool_cache(self) -> None:
+        fetch = self._read_required("fetch-tools.ps1")
+        source_install = self._read_required("install-from-source.ps1")
+
+        self.assertIn("[string] $CacheDirectory", fetch)
+        self.assertIn("Assert-Sha256 $cached $entry.sha256", fetch)
+        self.assertIn("Reused verified", fetch)
+        self.assertIn("cache\\tools", source_install)
+        self.assertIn("runtime\\tools", source_install)
+        self.assertIn("-CacheDirectory $toolCache", source_install)
+        self.assertIn("Get-FileHash", source_install)
+
     def test_tunnel_client_includes_plain_http_mcp_oauth_discovery_fix(self) -> None:
         manifest = json.loads(self._read_required("tools-manifest.json"))
         tunnel = manifest["tools"]["tunnel-client"]

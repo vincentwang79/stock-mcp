@@ -40,13 +40,34 @@ if ($Worker) {
         $acquired = $mutex.WaitOne(0)
         if (-not $acquired) { throw 'Another Sina backfill worker is already running.' }
         $PID | Set-Content -LiteralPath (Join-Path $RunDirectory 'pid.txt') -Encoding ASCII
-        "RUN $(Get-Date -Format o)" | Set-Content -LiteralPath $log -Encoding UTF8
+        $utf8NoBom = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText(
+            $log,
+            "RUN $(Get-Date -Format o)$([Environment]::NewLine)",
+            $utf8NoBom
+        )
         & $python -m stock_mcp.cli backfill-sina --root $InstallRoot --manifest $Manifest 2>&1 |
-            Tee-Object -FilePath $log -Append
+            ForEach-Object {
+                $line = [string] $_
+                [IO.File]::AppendAllText(
+                    $log,
+                    $line + [Environment]::NewLine,
+                    $utf8NoBom
+                )
+                Write-Output $line
+            }
         $exitCode = $LASTEXITCODE
-        "RESULT exit_code=$exitCode $(Get-Date -Format o)" | Add-Content -LiteralPath $log -Encoding UTF8
+        [IO.File]::AppendAllText(
+            $log,
+            "RESULT exit_code=$exitCode $(Get-Date -Format o)$([Environment]::NewLine)",
+            $utf8NoBom
+        )
     } catch {
-        "FAIL $($_.Exception.Message)" | Add-Content -LiteralPath $log -Encoding UTF8
+        [IO.File]::AppendAllText(
+            $log,
+            "FAIL $($_.Exception.Message)$([Environment]::NewLine)",
+            [Text.UTF8Encoding]::new($false)
+        )
         $exitCode = 1
     } finally {
         $exitCode | Set-Content -LiteralPath $exitCodeFile -Encoding ASCII

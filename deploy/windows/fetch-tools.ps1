@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string] $Manifest = (Join-Path $PSScriptRoot 'tools-manifest.json'),
-    [string] $OutputDirectory = (Join-Path $PSScriptRoot 'tools-cache')
+    [string] $OutputDirectory = (Join-Path $PSScriptRoot 'tools-cache'),
+    [string] $CacheDirectory
 )
 
 Set-StrictMode -Version Latest
@@ -39,16 +40,41 @@ function Invoke-ToolDownload {
 }
 
 $tools = Get-ToolManifest $Manifest
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+if ([string]::IsNullOrWhiteSpace($CacheDirectory)) {
+    $CacheDirectory = $OutputDirectory
+}
+$CacheDirectory = [IO.Path]::GetFullPath($CacheDirectory)
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+New-Item -ItemType Directory -Path $CacheDirectory -Force | Out-Null
 foreach ($name in @('uv', 'winsw', 'tunnel-client')) {
     $entry = $tools.tools.$name
+    $destination = Join-Path $OutputDirectory $entry.path
+    $cached = Join-Path $CacheDirectory $entry.path
+    $cacheValid = $false
+    if (Test-Path -LiteralPath $cached -PathType Leaf) {
+        try {
+            Assert-Sha256 $cached $entry.sha256
+            $cacheValid = $true
+        } catch {
+            Remove-Item -LiteralPath $cached -Force
+            Write-Warning "Discarded invalid cached tool $name."
+        }
+    }
+    if ($cacheValid) {
+        if ([IO.Path]::GetFullPath($cached) -ne [IO.Path]::GetFullPath($destination)) {
+            Copy-Item -LiteralPath $cached -Destination $destination -Force
+        }
+        Assert-Sha256 $destination $entry.sha256
+        Write-Host "Reused verified $name $($entry.version)"
+        continue
+    }
     $temporary = Join-Path ([IO.Path]::GetTempPath()) ('stock-mcp-tool-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $temporary -Force | Out-Null
     try {
         $download = Join-Path $temporary 'asset'
         Invoke-ToolDownload $name $entry.url $download
         Assert-Sha256 $download $entry.archive_sha256
-        $destination = Join-Path $OutputDirectory $entry.path
         $archiveMember = ''
         if ($entry.PSObject.Properties['archive_member']) {
             $archiveMember = [string] $entry.archive_member
@@ -68,6 +94,10 @@ foreach ($name in @('uv', 'winsw', 'tunnel-client')) {
             Copy-Item -LiteralPath $member -Destination $destination -Force
         }
         Assert-Sha256 $destination $entry.sha256
+        if ([IO.Path]::GetFullPath($cached) -ne [IO.Path]::GetFullPath($destination)) {
+            Copy-Item -LiteralPath $destination -Destination $cached -Force
+            Assert-Sha256 $cached $entry.sha256
+        }
         Write-Host "Fetched verified $name $($entry.version)"
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
