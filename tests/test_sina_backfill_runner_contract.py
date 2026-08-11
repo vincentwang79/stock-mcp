@@ -64,6 +64,8 @@ class SinaBackfillRunnerContractTest(unittest.TestCase):
                     str(database),
                     "--manifest",
                     str(manifest),
+                    "--since",
+                    "2026-08-11T08:01:00Z",
                 ],
                 check=False,
                 capture_output=True,
@@ -79,8 +81,16 @@ class SinaBackfillRunnerContractTest(unittest.TestCase):
                 "pending_symbols": 1,
                 "progress_bps": 6666,
                 "last_completed_symbol": "000002.SZ",
-                "recorded_fetches": 2,
+                "recorded_fetches": 1,
                 "failed_fetches": 1,
+                "failure_breakdown": [
+                    {
+                        "endpoint_kind": "share_capital",
+                        "http_status": 502,
+                        "error_class": "HTTPError",
+                        "count": 1,
+                    }
+                ],
                 "latest_failure": {
                     "endpoint_kind": "share_capital",
                     "request_key": "sz000003",

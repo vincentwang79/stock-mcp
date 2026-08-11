@@ -12,6 +12,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--since")
     args = parser.parse_args()
     database = args.database.resolve()
     manifest_path = args.manifest.resolve()
@@ -32,15 +33,30 @@ def main() -> int:
             "WHERE run_id = ? ORDER BY symbol",
             (run_id,),
         ).fetchall()
+        evidence_filter = "source = 'sina'"
+        evidence_parameters: tuple[str, ...] = ()
+        if args.since:
+            evidence_filter += " AND retrieved_at >= ?"
+            evidence_parameters = (str(args.since),)
         recorded_fetches, failed_fetches = connection.execute(
             "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) "
-            "FROM provider_fetch_evidence WHERE source = 'sina'"
+            f"FROM provider_fetch_evidence WHERE {evidence_filter}",
+            evidence_parameters,
         ).fetchone()
+        failure_rows = connection.execute(
+            "SELECT endpoint_kind, http_status, error_class, COUNT(*) "
+            "FROM provider_fetch_evidence "
+            f"WHERE {evidence_filter} AND status = 'failed' "
+            "GROUP BY endpoint_kind, http_status, error_class "
+            "ORDER BY COUNT(*) DESC, endpoint_kind, http_status, error_class",
+            evidence_parameters,
+        ).fetchall()
         latest_failure_row = connection.execute(
             "SELECT endpoint_kind, request_key, retrieved_at, http_status, error_class "
             "FROM provider_fetch_evidence "
-            "WHERE source = 'sina' AND status = 'failed' "
-            "ORDER BY retrieved_at DESC, fetch_id DESC LIMIT 1"
+            f"WHERE {evidence_filter} AND status = 'failed' "
+            "ORDER BY retrieved_at DESC, fetch_id DESC LIMIT 1",
+            evidence_parameters,
         ).fetchone()
     manifest_symbols = set(symbols)
     if any(str(row[0]) not in manifest_symbols for row in rows):
@@ -56,6 +72,15 @@ def main() -> int:
         "last_completed_symbol": completed[-1] if completed else None,
         "recorded_fetches": int(recorded_fetches),
         "failed_fetches": int(failed_fetches),
+        "failure_breakdown": [
+            {
+                "endpoint_kind": str(row[0]),
+                "http_status": row[1],
+                "error_class": row[2],
+                "count": int(row[3]),
+            }
+            for row in failure_rows
+        ],
         "latest_failure": (
             None
             if latest_failure_row is None
