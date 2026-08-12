@@ -169,6 +169,36 @@ class SinaRuntimeContractTest(unittest.TestCase):
         self.assertEqual([date(2023, 8, 8), date(2023, 8, 9)], [row["trade_date"] for row in rows])
         self.assertEqual(100_000, rows[0]["pre_close_1e4"])
 
+    def test_share_capital_applies_the_required_window_and_null_is_structured_failure(
+        self,
+    ) -> None:
+        runtime = _runtime()
+        wire = "sh600054"
+        payload = (
+            f"var KKE_ShareAmount_{wire}="
+            '[{"date":"1996-11-22","amount":0},'
+            '{"date":"2019-02-13","amount":100}];'
+        ).encode()
+        transport, _client, _sleeps = self._transport([_Response(200, payload)])
+        provider = runtime.SinaProvider(transport=transport, clock=lambda: NOW)  # type: ignore[attr-defined]
+
+        rows = provider.fetch_share_capital(  # type: ignore[attr-defined]
+            "600054.SH", required_from=date(2023, 8, 8)
+        )
+
+        self.assertEqual([date(2019, 2, 13)], [row["effective_date"] for row in rows])
+
+        null_payload = b"var KKE_ShareAmount_sh600190=null;"
+        transport, _client, _sleeps = self._transport([_Response(200, null_payload)])
+        provider = runtime.SinaProvider(transport=transport, clock=lambda: NOW)  # type: ignore[attr-defined]
+        with self.assertRaisesRegex(Exception, "payload validation failed") as raised:
+            provider.fetch_share_capital(  # type: ignore[attr-defined]
+                "600190.SH", required_from=date(2023, 8, 8)
+            )
+        self.assertEqual(
+            "SinaNormalizationError", raised.exception.evidence["error_class"]
+        )
+
     def test_5xx_retries_with_injected_deterministic_backoff_and_stops_at_bound(self) -> None:
         transport, client, sleeps = self._transport(
             [_Response(503, b"one"), _Response(503, b"two"), _Response(503, b"three")]

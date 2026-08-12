@@ -24,6 +24,7 @@ class RecordedSinaProvider:
     def __init__(self) -> None:
         self.history_requests: list[str] = []
         self.capital_requests: list[str] = []
+        self.capital_required_from: list[date | None] = []
 
     def fetch_history(
         self, symbol: str, *, start: date, end: date
@@ -46,8 +47,11 @@ class RecordedSinaProvider:
             },
         )
 
-    def fetch_share_capital(self, symbol: str) -> tuple[dict[str, object], ...]:
+    def fetch_share_capital(
+        self, symbol: str, *, required_from: date | None = None
+    ) -> tuple[dict[str, object], ...]:
         self.capital_requests.append(symbol)
+        self.capital_required_from.append(required_from)
         return (
             {
                 "symbol": symbol,
@@ -151,6 +155,7 @@ class SinaBackfillContractTest(unittest.TestCase):
             self.assertEqual(("600000.SH",), second.verified_symbols)
             self.assertEqual(["600000.SH"], provider.history_requests)
             self.assertEqual(["600000.SH"], provider.capital_requests)
+            self.assertEqual([TRADE_DATE], provider.capital_required_from)
             checkpoint = database.load_sina_backfill_checkpoint(
                 run_id="recorded-sina-backfill-1", symbol="600000.SH"
             )

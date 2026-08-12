@@ -147,6 +147,48 @@ class SinaNormalizationContractTest(unittest.TestCase):
         self.assertEqual(facts[0].effective_date, date(2024, 12, 31))
         self.assertEqual(facts[0].outstanding_shares, 19_405_571_850)
 
+    def test_share_capital_discards_only_prewindow_invalid_prefix(self) -> None:
+        normalizer = _normalization()
+
+        facts = normalizer.normalize_sina_share_capital(  # type: ignore[attr-defined]
+            [
+                {"date": "1996-11-22", "amount": 0},
+                {"date": "2006-07-24", "amount": 19_303.986},
+                {"date": "2006-07-24", "amount": 13_993.2},
+                {"date": "2007-07-24", "amount": 26_336.5742},
+                {"date": "2024-12-31", "amount": 30_000},
+            ],
+            symbol="600061.SH",
+            source_timestamp=TIMESTAMP,
+            required_from=date(2023, 8, 8),
+        )
+
+        self.assertEqual(
+            [date(2007, 7, 24), date(2024, 12, 31)],
+            [fact.effective_date for fact in facts],
+        )
+        self.assertEqual(263_365_742, facts[0].outstanding_shares)
+
+    def test_share_capital_never_discards_window_anomalies_or_null_payload(self) -> None:
+        normalizer = _normalization()
+        with self.assertRaisesRegex(Exception, "window|positive|duplicate"):
+            normalizer.normalize_sina_share_capital(  # type: ignore[attr-defined]
+                [
+                    {"date": "2023-08-08", "amount": 10},
+                    {"date": "2023-08-08", "amount": 11},
+                ],
+                symbol="600061.SH",
+                source_timestamp=TIMESTAMP,
+                required_from=date(2023, 8, 8),
+            )
+        with self.assertRaisesRegex(Exception, "array|unavailable"):
+            normalizer.normalize_sina_share_capital(  # type: ignore[attr-defined]
+                None,
+                symbol="600190.SH",
+                source_timestamp=TIMESTAMP,
+                required_from=date(2023, 8, 8),
+            )
+
     def test_spot_keeps_provider_fields_and_derives_fen_market_cap_with_half_up_rounding(
         self,
     ) -> None:

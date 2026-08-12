@@ -85,17 +85,20 @@ def normalize_sina_history(
 
 
 def normalize_sina_share_capital(
-    rows: Sequence[Sequence[object] | Mapping[str, object]],
+    rows: Sequence[Sequence[object] | Mapping[str, object]] | None,
     *,
     symbol: str,
     source_timestamp: datetime,
     payload_sha256: str | None = None,
+    required_from: date | None = None,
 ) -> tuple[ShareCapitalFact, ...]:
     _symbol(symbol)
     _aware(source_timestamp)
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+        raise SinaNormalizationError("share-capital array is unavailable")
     digest = payload_sha256 or _canonical_hash(rows)
-    facts: list[ShareCapitalFact] = []
-    seen: set[date] = set()
+    parsed: list[tuple[date, int]] = []
+    counts: dict[date, int] = {}
     for row in rows:
         if isinstance(row, Mapping):
             effective_value = row.get("date")
@@ -108,12 +111,39 @@ def normalize_sina_share_capital(
         if effective_value in (None, "") or amount_value in (None, ""):
             raise SinaNormalizationError("share-capital row is incomplete")
         effective = _date(effective_value, "effective_date")
+        shares = _decimal_int(amount_value, Decimal(10_000), "outstanding_share")
+        parsed.append((effective, shares))
+        counts[effective] = counts.get(effective, 0) + 1
+
+    anomalous_dates = {
+        effective for effective, shares in parsed if shares <= 0 or counts[effective] > 1
+    }
+    if required_from is None:
+        if anomalous_dates:
+            if any(shares <= 0 for _effective, shares in parsed):
+                raise SinaNormalizationError("outstanding shares must be positive")
+            raise SinaNormalizationError("share-capital dates must be unique and increasing")
+        retained = parsed
+    else:
+        if any(effective >= required_from for effective in anomalous_dates):
+            raise SinaNormalizationError(
+                "share-capital window contains a nonpositive or duplicate fact"
+            )
+        cutoff = max(anomalous_dates) if anomalous_dates else None
+        retained = [
+            (effective, shares)
+            for effective, shares in parsed
+            if shares > 0 and (cutoff is None or effective > cutoff)
+        ]
+        if not any(effective <= required_from for effective, _shares in retained):
+            raise SinaNormalizationError("share-capital window has no positive opening fact")
+
+    facts: list[ShareCapitalFact] = []
+    seen: set[date] = set()
+    for effective, shares in retained:
         if effective in seen or (facts and effective <= facts[-1].effective_date):
             raise SinaNormalizationError("share-capital dates must be unique and increasing")
         seen.add(effective)
-        shares = _decimal_int(amount_value, Decimal(10_000), "outstanding_share")
-        if shares <= 0:
-            raise SinaNormalizationError("outstanding shares must be positive")
         facts.append(
             ShareCapitalFact(symbol, effective, SINA_SOURCE, shares, source_timestamp, digest)
         )

@@ -304,12 +304,16 @@ class SinaProvider:
         )
         return normalized, _evidence_record(result.evidence)
 
-    def fetch_share_capital(self, symbol: str) -> tuple[dict[str, object], ...]:
-        rows, _evidence = self.fetch_share_capital_with_evidence(symbol)
+    def fetch_share_capital(
+        self, symbol: str, *, required_from: date | None = None
+    ) -> tuple[dict[str, object], ...]:
+        rows, _evidence = self.fetch_share_capital_with_evidence(
+            symbol, required_from=required_from
+        )
         return rows
 
     def fetch_share_capital_with_evidence(
-        self, symbol: str
+        self, symbol: str, *, required_from: date | None = None
     ) -> tuple[tuple[dict[str, object], ...], dict[str, object]]:
         wire = _wire_symbol(symbol)
         result = self._transport.get(
@@ -325,6 +329,7 @@ class SinaProvider:
                 symbol=symbol,
                 source_timestamp=result.evidence.retrieved_at,
                 payload_sha256=result.evidence.payload_sha256,
+                required_from=required_from,
             )
         except (TypeError, ValueError) as error:
             raise _payload_failure(result.evidence, error) from error

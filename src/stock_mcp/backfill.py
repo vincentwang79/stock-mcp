@@ -193,10 +193,24 @@ class SinaBackfillService:
                     event="start",
                 )
                 capital_loader = getattr(self._provider, "fetch_share_capital_with_evidence", None)
+                first_history_date = min(
+                    (
+                        value
+                        for row in history
+                        if isinstance((value := row.get("trade_date")), date)
+                    ),
+                    default=start,
+                )
+                capital_required_from = max(start, first_history_date)
                 if callable(capital_loader):
-                    capital, capital_evidence = capital_loader(symbol)
+                    capital, capital_evidence = capital_loader(
+                        symbol, required_from=capital_required_from
+                    )
                 else:
-                    capital = tuple(self._provider.fetch_share_capital(symbol))
+                    capital_fetch = self._provider.fetch_share_capital
+                    capital = tuple(
+                        capital_fetch(symbol, required_from=capital_required_from)
+                    )
                     capital_evidence = None
                 self._emit_progress(
                     symbol=symbol,
