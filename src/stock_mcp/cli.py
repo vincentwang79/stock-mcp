@@ -54,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "restore",
             "backfill",
             "build-v3-facts",
+            "build-v4-status-facts",
             "prepare-sina-backfill-manifest",
             "backfill-sina",
             "verify-sina-backfill",
@@ -215,6 +216,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0 if report.get("ready") is True else 2
+
+    if args.command == "build-v4-status-facts":
+        from .storage import Database
+
+        if args.start is None or args.end is None:
+            parser.error("build-v4-status-facts requires --start and --end")
+        database = Database(settings.database_path)
+        database.initialize()
+        report = database.build_v4_legacy_status_facts(start=args.start, end=args.end)
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 0 if int(report["days"]) > 0 and int(report["eligible_rows"]) > 0 else 2
 
     if args.command == "prepare-sina-backfill-manifest":
         from .storage import Database
@@ -566,6 +578,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
             excluded_set = set(excluded_symbols)
             included_set = set(universe_symbols) - excluded_set
+            connection.execute(
+                "CREATE TEMP TABLE v4_manifest_included_symbols(symbol TEXT PRIMARY KEY)"
+            )
+            connection.executemany(
+                "INSERT INTO v4_manifest_included_symbols(symbol) VALUES(?)",
+                ((symbol,) for symbol in sorted(included_set)),
+            )
 
             def query_hash(
                 query: str, values: tuple[object, ...]
@@ -604,13 +623,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 (sessions[-1].isoformat(),),
             )
             price_days, _price_symbols = connection.execute(
-                "SELECT COUNT(DISTINCT trade_date), COUNT(DISTINCT symbol) FROM daily_bars "
-                "WHERE source='tushare' AND trade_date BETWEEN ? AND ?",
+                "SELECT COUNT(DISTINCT b.trade_date), COUNT(DISTINCT b.symbol) "
+                "FROM daily_bars b JOIN v4_manifest_included_symbols i ON i.symbol=b.symbol "
+                "WHERE b.source='tushare' AND b.trade_date BETWEEN ? AND ?",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             ).fetchone()
             status_days = connection.execute(
-                "SELECT COUNT(DISTINCT trade_date) FROM daily_security_status "
-                "WHERE source='baostock' AND trade_date BETWEEN ? AND ?",
+                "SELECT COUNT(DISTINCT s.trade_date) FROM daily_security_status s "
+                "JOIN v4_manifest_included_symbols i ON i.symbol=s.symbol "
+                "WHERE s.source='baostock' AND s.trade_date BETWEEN ? AND ?",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             ).fetchone()[0]
             snapshot_days = connection.execute(
@@ -633,12 +654,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             ).fetchone()[0]
             missing_status_rows = connection.execute(
-                "SELECT COUNT(*) FROM daily_bars b WHERE b.source='tushare' "
+                "SELECT COUNT(*) FROM daily_bars b "
+                "JOIN v4_manifest_included_symbols i ON i.symbol=b.symbol "
+                "WHERE b.source='tushare' "
                 "AND b.trade_date BETWEEN ? AND ? AND NOT EXISTS ("
                 "SELECT 1 FROM daily_security_status s WHERE s.source='baostock' "
                 "AND s.symbol=b.symbol AND s.trade_date=b.trade_date)",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             ).fetchone()[0]
+            gate_report = {
+                "expected_session_count": len(sessions),
+                "price_rows": int(price_rows),
+                "price_days": int(price_days),
+                "snapshot_days": int(snapshot_days),
+                "missing_price_rows": int(missing_price_rows),
+                "orphan_price_rows": int(orphan_price_rows),
+                "status_rows": int(status_rows),
+                "status_days": int(status_days),
+                "missing_status_rows": int(missing_status_rows),
+                "capital_rows": int(capital_rows),
+                "included_symbol_count": len(included_set),
+                "excluded_symbol_count": len(excluded_set),
+            }
+            gate_summary = " ".join(
+                f"{key}={value}" for key, value in sorted(gate_report.items())
+            )
         try:
             validate_v4_manifest_universe(
                 expected_session_count=len(sessions),
@@ -648,7 +688,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 orphan_price_rows=int(orphan_price_rows),
             )
         except ValueError as error:
-            print(f"stock-mcp: {error}")
+            print(
+                f"stock-mcp: {error} "
+                + gate_summary
+            )
             return 2
         if (
             not price_rows
@@ -659,8 +702,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             or int(missing_status_rows) != 0
         ):
             print(
-                "stock-mcp: v4 manifest requires bounded Tushare prices, "
-                "BaoStock statuses, and Sina share-capital facts"
+                "stock-mcp: v4 manifest gate failed "
+                + gate_summary
             )
             return 2
         manifest = build_v4_replay_manifest(

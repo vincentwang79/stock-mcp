@@ -477,6 +477,108 @@ class Database:
                     values,
                 )
 
+    def build_v4_legacy_status_facts(self, *, start: date, end: date) -> dict[str, object]:
+        """Derive eligible BaoStock status facts from recorded legacy snapshots.
+
+        Historical snapshots were admitted only after the dated BaoStock universe
+        reported ``tradeStatus=1`` and the security was non-ST.  Schema v10 kept
+        that eligibility in ``snapshot_securities`` but did not copy it into the
+        v11 status table.  This migration is explicit, deterministic and atomic.
+        """
+
+        if end < start:
+            raise ValueError("v4 status fact range is invalid")
+        schema = "legacy-baostock-snapshot-status-v1"
+        inserted_rows = 0
+        existing_rows = 0
+        eligible_rows = 0
+        days = 0
+        with self._idempotent_write_connection() as connection:
+            snapshots = connection.execute(
+                "SELECT m.trade_date, m.source_timestamp FROM market_snapshots m "
+                "WHERE m.source='tushare' AND m.trade_date BETWEEN ? AND ? "
+                "ORDER BY m.trade_date",
+                (start.isoformat(), end.isoformat()),
+            ).fetchall()
+            for trade_date_value, source_timestamp_value in snapshots:
+                trade_date_text = str(trade_date_value)
+                source_timestamp = str(source_timestamp_value)
+                securities = tuple(
+                    (str(row[0]), int(row[1]))
+                    for row in connection.execute(
+                        "SELECT s.symbol, s.is_st FROM snapshot_securities s "
+                        "JOIN daily_bars b ON b.symbol=s.symbol "
+                        "AND b.trade_date=s.trade_date AND b.source=s.source "
+                        "WHERE s.source='tushare' AND s.trade_date=? "
+                        "ORDER BY s.symbol",
+                        (trade_date_text,),
+                    )
+                )
+                if not securities:
+                    continue
+                days += 1
+                eligible_rows += len(securities)
+                batch_sha256 = hashlib.sha256(
+                    self._json(
+                        {
+                            "schema": schema,
+                            "trade_date": trade_date_text,
+                            "source_timestamp": source_timestamp,
+                            "statuses": [
+                                [symbol, "1", bool(is_st)]
+                                for symbol, is_st in securities
+                            ],
+                        }
+                    ).encode()
+                ).hexdigest()
+                conflicts = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM snapshot_securities s "
+                        "JOIN daily_bars b ON b.symbol=s.symbol "
+                        "AND b.trade_date=s.trade_date AND b.source=s.source "
+                        "JOIN daily_security_status d ON d.symbol=s.symbol "
+                        "AND d.trade_date=s.trade_date AND d.source='baostock' "
+                        "WHERE s.source='tushare' AND s.trade_date=? "
+                        "AND (d.tradestatus!='1' OR d.is_st!=s.is_st)",
+                        (trade_date_text,),
+                    ).fetchone()[0]
+                )
+                if conflicts:
+                    raise ValueError(
+                        "daily_security_status fact is immutable; status conflict"
+                    )
+                existing_rows += int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM snapshot_securities s "
+                        "JOIN daily_bars b ON b.symbol=s.symbol "
+                        "AND b.trade_date=s.trade_date AND b.source=s.source "
+                        "JOIN daily_security_status d ON d.symbol=s.symbol "
+                        "AND d.trade_date=s.trade_date AND d.source='baostock' "
+                        "WHERE s.source='tushare' AND s.trade_date=?",
+                        (trade_date_text,),
+                    ).fetchone()[0]
+                )
+                inserted_rows += int(
+                    connection.execute(
+                        "INSERT INTO daily_security_status(symbol,trade_date,source,"
+                        "tradestatus,is_st,source_timestamp,batch_sha256) "
+                        "SELECT s.symbol,s.trade_date,'baostock','1',s.is_st,?,? "
+                        "FROM snapshot_securities s JOIN daily_bars b ON b.symbol=s.symbol "
+                        "AND b.trade_date=s.trade_date AND b.source=s.source "
+                        "LEFT JOIN daily_security_status d ON d.symbol=s.symbol "
+                        "AND d.trade_date=s.trade_date AND d.source='baostock' "
+                        "WHERE s.source='tushare' AND s.trade_date=? AND d.symbol IS NULL",
+                        (source_timestamp, batch_sha256, trade_date_text),
+                    ).rowcount
+                )
+        return {
+            "schema": schema,
+            "days": days,
+            "eligible_rows": eligible_rows,
+            "inserted_rows": inserted_rows,
+            "existing_rows": existing_rows,
+        }
+
     def save_provider_daily_metrics(self, metrics: Iterable[dict[str, object] | object]) -> None:
         with self._idempotent_write_connection() as connection:
             self._save_provider_daily_metrics(connection, metrics)

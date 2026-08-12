@@ -86,6 +86,11 @@ manifest hash。任何未获准证券缺少点时股本都必须拒绝生成研�
 只能读取已经冻结的纳入集，不得运行时动态排除。该例外不改变 Sina provider 资格、
 shadow 完整性或生产 fallback 门禁。
 
+Schema v10 历史快照没有独立的 `daily_security_status` 表。升级后可通过离线
+`build-v4-status-facts` 将旧快照已经证明的 BaoStock 可交易、非 ST 资格迁移为带
+推导 Schema 和批次哈希的 v11 不可变状态事实；该命令不联网、不扩充旧证券宇宙，
+遇到既有事实冲突时必须原子失败。
+
 研究固定一条 v0.3-policy-1 基线及六个单因素 challenger，不做网格、组合赢家或自动调参。统计固定 20 会话圆形 moving-block bootstrap、10,000 次和 White Reality Check。没有 challenger 同时通过多重检验、CI、完整性、可执行率和新浪复制门禁时，合法结论是保留 v0.3。
 
 研究服务不得仅创建 `queued` 记录后永久搁置。完整逐日 worker、market-cap-matched benchmark、全终态 outcome、重启恢复和新浪复制门禁尚未可用时，`start_v4_research` 必须显式拒绝；读取接口仍可审计已经持久化的证据。该失败关闭行为不等于研究功能已通过验收。

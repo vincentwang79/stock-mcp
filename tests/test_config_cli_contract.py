@@ -333,6 +333,90 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
             database.get_v4_dataset_manifest(str(manifest["manifest_hash"])),
         )
 
+    def test_cli_builds_v4_status_facts_without_network_access(self) -> None:
+        from stock_mcp.storage import Database
+
+        database = Database(self.root / "data" / "stock-mcp.sqlite3")
+        database.initialize()
+        with database.connect() as connection:
+            connection.execute(
+                "INSERT INTO market_snapshots VALUES"
+                "('2026-08-07','tushare','2026-08-07T08:00:00+00:00',5000,5000)"
+            )
+            connection.execute(
+                "INSERT INTO snapshot_securities VALUES"
+                "('2026-08-07','tushare','600001.SH','one','SSE','MAIN',"
+                "'2000-01-01','fixture',0)"
+            )
+            connection.execute(
+                "INSERT INTO daily_bars VALUES"
+                "('600001.SH','2026-08-07',100000,101000,99000,100000,100000,"
+                "1000,10000000,'tushare','2026-08-07T08:00:00+00:00')"
+            )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "build-v4-status-facts",
+                    "--root",
+                    str(self.root),
+                    "--start",
+                    "2026-08-07",
+                    "--end",
+                    "2026-08-07",
+                ]
+            )
+
+        self.assertEqual(0, exit_code)
+        report = json.loads(output.getvalue())
+        self.assertEqual("legacy-baostock-snapshot-status-v1", report["schema"])
+        self.assertEqual(1, report["inserted_rows"])
+
+    def test_v4_manifest_failure_reports_each_failed_gate(self) -> None:
+        from stock_mcp.storage import Database
+
+        database = Database(self.root / "data" / "stock-mcp.sqlite3")
+        database.initialize()
+        start = date(2023, 8, 8)
+        end = date(2026, 8, 7)
+        span = (end - start).days
+        sessions = tuple(
+            start + timedelta(days=index * span // 726) for index in range(727)
+        )
+        database.save_expected_trading_days("tushare", sessions)
+        backfill = {
+            "schema": "sina-backfill-manifest-v1",
+            "run_id": "fixture-run",
+            "symbols": ["600001.SH"],
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "adapter_version": "sina-adapter-v1",
+        }
+        backfill["manifest_hash"] = sha256(
+            json.dumps(backfill, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        backfill_path = self.root / "sina-manifest.json"
+        backfill_path.write_text(json.dumps(backfill), encoding="utf-8")
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "prepare-v4-study-manifest",
+                    "--root",
+                    str(self.root),
+                    "--sina-backfill-manifest",
+                    str(backfill_path),
+                ]
+            )
+
+        self.assertEqual(2, exit_code)
+        self.assertIn("price_rows=0", output.getvalue())
+        self.assertIn("status_rows=0", output.getvalue())
+        self.assertIn("capital_rows=0", output.getvalue())
+        self.assertIn("missing_status_rows=0", output.getvalue())
+
     def test_project_console_script_points_to_the_real_cli_entrypoint(self) -> None:
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
             encoding="utf-8"

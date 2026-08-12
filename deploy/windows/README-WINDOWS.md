@@ -291,11 +291,19 @@ $runDir = (Get-Content (Join-Path $runRoot 'latest-run.txt') -Raw).Trim()
 
 ```powershell
 & 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  build-v4-status-facts --root E:\StockMcp `
+  --start 2023-08-08 --end 2026-08-07
+
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
   prepare-v4-study-manifest --root E:\StockMcp `
   --sina-backfill-manifest E:\StockMcp\config\sina-backfill-manifest.json `
   --capital-exclusions E:\code\stock-mcp\deploy\windows\v4-sina-capital-exclusions-20260812.json `
   --manifest E:\StockMcp\config\v4-study-manifest.json
 ```
+
+`build-v4-status-facts` 不联网，只把旧历史快照中已经通过 BaoStock
+`tradeStatus=1`、非 ST 门禁的证券，确定性迁移到 Schema v11 状态事实表。它不会
+为旧快照中已被排除的停牌或 ST 证券猜补状态；若存在内容冲突则整次事务回滚。
 
 成功输出必须记录完整证券宇宙、纳入集、排除集、三组数量和 SHA-256、覆盖率、排除
 原因和原始 Sina manifest hash。当前预期为原始宇宙 3,087 只、排除 41 只、研究
