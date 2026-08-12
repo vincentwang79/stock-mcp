@@ -75,6 +75,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--end", type=date.fromisoformat)
     parser.add_argument("--industry-json", type=Path)
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--capital-exclusions", type=Path)
+    parser.add_argument("--sina-backfill-manifest", type=Path)
     parser.add_argument("--trade-date", type=date.fromisoformat)
     parser.add_argument("--through", type=date.fromisoformat)
     parser.add_argument("--dataset-hash")
@@ -500,7 +502,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "prepare-v4-study-manifest":
-        from .replay import build_v4_replay_manifest, validate_v4_manifest_universe
+        from .replay import (
+            V4_CAPITAL_EXCLUSION_REASON,
+            build_v4_replay_manifest,
+            load_v4_capital_exclusions,
+            load_v4_sina_backfill_universe,
+            validate_v4_manifest_universe,
+        )
         from .storage import Database
 
         database = Database(settings.database_path)
@@ -511,14 +519,64 @@ def main(argv: Sequence[str] | None = None) -> int:
         if len(sessions) != 727:
             print("stock-mcp: v4 manifest requires the fixed 727-session Tushare calendar")
             return 2
+        if args.sina_backfill_manifest is None:
+            print(
+                "stock-mcp: v4 manifest requires --sina-backfill-manifest "
+                "to freeze the collected security universe"
+            )
+            return 2
+        try:
+            universe_symbols, universe_source_manifest_hash = (
+                load_v4_sina_backfill_universe(
+                    args.sina_backfill_manifest, sessions[0], sessions[-1]
+                )
+            )
+        except ValueError as error:
+            print(f"stock-mcp: {error}")
+            return 2
         with database.connect() as connection:
+            missing_capital_symbols = tuple(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT b.symbol FROM daily_bars b "
+                    "WHERE b.source='tushare' AND b.trade_date BETWEEN ? AND ? "
+                    "AND NOT EXISTS (SELECT 1 FROM share_capital_facts c "
+                    "WHERE c.source='sina' AND c.symbol=b.symbol "
+                    "AND c.effective_date <= b.trade_date) ORDER BY b.symbol",
+                    (sessions[60].isoformat(), sessions[-26].isoformat()),
+                )
+                if str(row[0]) in set(universe_symbols)
+            )
+            if missing_capital_symbols and args.capital_exclusions is None:
+                print(
+                    "stock-mcp: missing Sina share capital requires an explicit "
+                    "--capital-exclusions governance file"
+                )
+                return 2
+            try:
+                excluded_symbols = (
+                    load_v4_capital_exclusions(
+                        args.capital_exclusions, missing_capital_symbols
+                    )
+                    if args.capital_exclusions is not None
+                    else ()
+                )
+            except ValueError as error:
+                print(f"stock-mcp: {error}")
+                return 2
+            excluded_set = set(excluded_symbols)
+            included_set = set(universe_symbols) - excluded_set
 
-            def query_hash(query: str, values: tuple[object, ...]) -> tuple[str, int]:
+            def query_hash(
+                query: str, values: tuple[object, ...]
+            ) -> tuple[str, int]:
                 digest = sha256()
                 count = 0
                 cursor = connection.execute(query, values)
                 while rows := cursor.fetchmany(1_000):
                     for row in rows:
+                        if str(row[0]) not in included_set:
+                            continue
                         digest.update(
                             json.dumps(tuple(row), separators=(",", ":"), default=str).encode()
                         )
@@ -545,7 +603,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "AND effective_date <= ? ORDER BY symbol, effective_date",
                 (sessions[-1].isoformat(),),
             )
-            price_days, price_symbols = connection.execute(
+            price_days, _price_symbols = connection.execute(
                 "SELECT COUNT(DISTINCT trade_date), COUNT(DISTINCT symbol) FROM daily_bars "
                 "WHERE source='tushare' AND trade_date BETWEEN ? AND ?",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
@@ -574,28 +632,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "AND s.trade_date=b.trade_date AND s.symbol=b.symbol)",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             ).fetchone()[0]
-            capital_symbols = connection.execute(
-                "SELECT COUNT(DISTINCT symbol) FROM share_capital_facts "
-                "WHERE source='sina' AND effective_date <= ?",
-                (sessions[-1].isoformat(),),
-            ).fetchone()[0]
             missing_status_rows = connection.execute(
                 "SELECT COUNT(*) FROM daily_bars b WHERE b.source='tushare' "
                 "AND b.trade_date BETWEEN ? AND ? AND NOT EXISTS ("
                 "SELECT 1 FROM daily_security_status s WHERE s.source='baostock' "
                 "AND s.symbol=b.symbol AND s.trade_date=b.trade_date)",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
-            ).fetchone()[0]
-            missing_point_in_time_capital = connection.execute(
-                "SELECT COUNT(DISTINCT b.symbol) FROM daily_bars b "
-                "WHERE b.source='tushare' AND b.trade_date BETWEEN ? AND ? "
-                "AND NOT EXISTS (SELECT 1 FROM share_capital_facts c "
-                "WHERE c.source='sina' AND c.symbol=b.symbol "
-                "AND c.effective_date <= b.trade_date)",
-                (
-                    sessions[60].isoformat(),
-                    sessions[-26].isoformat(),
-                ),
             ).fetchone()[0]
         try:
             validate_v4_manifest_universe(
@@ -614,9 +656,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             or not capital_rows
             or int(price_days) != 727
             or int(status_days) != 727
-            or int(capital_symbols) < int(price_symbols)
             or int(missing_status_rows) != 0
-            or int(missing_point_in_time_capital) != 0
         ):
             print(
                 "stock-mcp: v4 manifest requires bounded Tushare prices, "
@@ -634,6 +674,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             statuses_hash=statuses,
             share_capital_hash=capital,
             industry_mapping_hash="829fb6481d3269a59a2f679b09c2d2d93ada2ffd0db54931f2ec61b646ac1c1a",
+            universe_symbols=universe_symbols,
+            excluded_symbols=excluded_symbols,
+            exclusion_reason=(
+                V4_CAPITAL_EXCLUSION_REASON if excluded_symbols else None
+            ),
+            universe_source_manifest_hash=universe_source_manifest_hash,
         )
         database.save_v4_dataset_manifest(manifest)
         if args.manifest is not None:

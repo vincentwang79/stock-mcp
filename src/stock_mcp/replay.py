@@ -4,12 +4,116 @@ import hashlib
 import json
 from collections.abc import Iterable
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from .domain import DailyReview, MarketSnapshot, StrategyVersion
 from .review import generate_daily_review
 
 V4_MANIFEST_SCHEMA = "v4-manifest-v1"
+V4_CAPITAL_EXCLUSION_REASON = "sina_share_capital_unavailable"
+
+
+def canonical_json_sha256(value: object) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _v4_symbol_hash(symbols: tuple[str, ...]) -> str:
+    encoded = json.dumps(symbols, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def load_v4_capital_exclusions(
+    path: Path, missing_symbols: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Load an explicit governance exception and require an exact evidence match."""
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("v4 capital exclusion file is invalid") from error
+    if (
+        not isinstance(document, dict)
+        or document.get("schema") != "v4-capital-exclusions-v1"
+        or document.get("reason") != V4_CAPITAL_EXCLUSION_REASON
+        or not isinstance(document.get("symbols"), list)
+    ):
+        raise ValueError("v4 capital exclusion document is invalid")
+    symbols = tuple(document["symbols"])
+    if symbols != tuple(sorted(set(symbols))):
+        raise ValueError("v4 capital exclusion symbols must be unique and sorted")
+    uncovered = set(missing_symbols) - set(symbols)
+    if uncovered:
+        raise ValueError(
+            "v4 capital exclusions do not cover every recorded missing-capital symbol"
+        )
+    return symbols
+
+
+def load_v4_sina_backfill_universe(
+    path: Path, start: date, end: date
+) -> tuple[tuple[str, ...], str]:
+    """Load the exact, hash-verified security universe collected by Sina backfill."""
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("Sina backfill manifest is invalid") from error
+    if not isinstance(document, dict):
+        raise ValueError("Sina backfill manifest is invalid")
+    recorded_hash = document.get("manifest_hash")
+    canonical = dict(document)
+    canonical.pop("manifest_hash", None)
+    symbols_value = document.get("symbols")
+    if (
+        document.get("schema") != "sina-backfill-manifest-v1"
+        or document.get("adapter_version") != "sina-adapter-v1"
+        or document.get("start") != start.isoformat()
+        or document.get("end") != end.isoformat()
+        or not isinstance(symbols_value, list)
+        or symbols_value != sorted(set(symbols_value))
+        or recorded_hash != canonical_json_sha256(canonical)
+    ):
+        raise ValueError("Sina backfill manifest hash or boundaries are invalid")
+    return tuple(symbols_value), str(recorded_hash)
+
+
+def validate_v4_manifest_symbol_coverage(manifest: dict[str, object]) -> None:
+    """Validate the immutable partition of the study's security universe."""
+
+    universe = tuple(manifest.get("universe_symbols", ()))
+    included = tuple(manifest.get("included_symbols", ()))
+    excluded = tuple(manifest.get("excluded_symbols", ()))
+    source_manifest_hash = str(manifest.get("universe_source_manifest_hash", ""))
+    if (
+        not universe
+        or universe != tuple(sorted(set(universe)))
+        or included != tuple(sorted(set(included)))
+        or excluded != tuple(sorted(set(excluded)))
+        or set(included) & set(excluded)
+        or set(included) | set(excluded) != set(universe)
+    ):
+        raise ValueError("v4 manifest included/excluded symbols must partition the universe")
+    if excluded and manifest.get("exclusion_reason") != V4_CAPITAL_EXCLUSION_REASON:
+        raise ValueError("v4 manifest exclusion reason is invalid")
+    if (
+        manifest.get("universe_source") != "sina-backfill-manifest-v1"
+        or len(source_manifest_hash) != 64
+        or any(character not in "0123456789abcdef" for character in source_manifest_hash)
+    ):
+        raise ValueError("v4 manifest universe source is invalid")
+    expected = {
+        "universe_symbol_count": len(universe),
+        "included_symbol_count": len(included),
+        "excluded_symbol_count": len(excluded),
+        "capital_coverage_bps": len(included) * 10_000 // len(universe),
+        "universe_symbols_hash": _v4_symbol_hash(universe),
+        "included_symbols_hash": _v4_symbol_hash(included),
+        "excluded_symbols_hash": _v4_symbol_hash(excluded),
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise ValueError("v4 manifest symbol coverage metadata is inconsistent")
 
 
 def validate_v4_manifest_universe(
@@ -43,11 +147,25 @@ def build_v4_replay_manifest(
     statuses_hash: str,
     share_capital_hash: str,
     industry_mapping_hash: str,
+    universe_symbols: tuple[str, ...],
+    excluded_symbols: tuple[str, ...] = (),
+    exclusion_reason: str | None = None,
+    universe_source_manifest_hash: str,
 ) -> dict[str, object]:
     if source != "tushare":
         raise ValueError("v4 primary research manifest requires the Tushare price source")
     if not sessions or sessions != tuple(sorted(set(sessions))):
         raise ValueError("v4 manifest sessions must be unique and increasing")
+    if (
+        not universe_symbols
+        or universe_symbols != tuple(sorted(set(universe_symbols)))
+        or excluded_symbols != tuple(sorted(set(excluded_symbols)))
+        or not set(excluded_symbols).issubset(universe_symbols)
+        or set(universe_symbols) == set(excluded_symbols)
+    ):
+        raise ValueError("v4 manifest universe and excluded symbols are invalid")
+    if (bool(excluded_symbols)) != (exclusion_reason == V4_CAPITAL_EXCLUSION_REASON):
+        raise ValueError("v4 manifest exclusion reason is invalid")
     if len(sessions) < 86:
         raise ValueError("v4 manifest requires 60 warmup and 25 outcome-only sessions")
     if (
@@ -62,6 +180,7 @@ def build_v4_replay_manifest(
         ("statuses", statuses_hash),
         ("share capital", share_capital_hash),
         ("industry", industry_mapping_hash),
+        ("universe source manifest", universe_source_manifest_hash),
     ):
         if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
             raise ValueError(f"v4 manifest {label} hash must be lowercase SHA-256")
@@ -88,7 +207,32 @@ def build_v4_replay_manifest(
         "statuses_hash": statuses_hash,
         "share_capital_hash": share_capital_hash,
         "industry_mapping_hash": industry_mapping_hash,
+        "universe_symbols": list(universe_symbols),
+        "included_symbols": list(
+            tuple(symbol for symbol in universe_symbols if symbol not in set(excluded_symbols))
+        ),
+        "excluded_symbols": list(excluded_symbols),
+        "universe_symbol_count": len(universe_symbols),
+        "included_symbol_count": len(universe_symbols) - len(excluded_symbols),
+        "excluded_symbol_count": len(excluded_symbols),
+        "capital_coverage_bps": (
+            (len(universe_symbols) - len(excluded_symbols)) * 10_000
+            // len(universe_symbols)
+        ),
+        "exclusion_reason": exclusion_reason,
+        "universe_source": "sina-backfill-manifest-v1",
+        "universe_source_manifest_hash": universe_source_manifest_hash,
     }
+    payload["universe_symbols_hash"] = _v4_symbol_hash(
+        tuple(payload["universe_symbols"])
+    )
+    payload["included_symbols_hash"] = _v4_symbol_hash(
+        tuple(payload["included_symbols"])
+    )
+    payload["excluded_symbols_hash"] = _v4_symbol_hash(
+        tuple(payload["excluded_symbols"])
+    )
+    validate_v4_manifest_symbol_coverage(payload)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     payload["manifest_hash"] = hashlib.sha256(encoded.encode()).hexdigest()
     return payload

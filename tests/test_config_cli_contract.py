@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from datetime import date
+from datetime import date, timedelta
 from hashlib import sha256
 from io import StringIO
 from pathlib import Path
@@ -224,6 +224,114 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         self.assertIn("Tushare latest-day probe trade_date=2023-08-07 rows=4321", output.getvalue())
         self.assertIn("trade_date=2023-08-07", output.getvalue())
         self.assertIn("reason=fixture validation failed", output.getvalue())
+
+    def test_cli_freezes_explicit_v4_capital_exclusions_in_the_manifest(self) -> None:
+        from stock_mcp.storage import Database
+
+        database = Database(self.root / "data" / "stock-mcp.sqlite3")
+        database.initialize()
+        start = date(2023, 8, 8)
+        end = date(2026, 8, 7)
+        span = (end - start).days
+        sessions = tuple(
+            start + timedelta(days=index * span // 726) for index in range(727)
+        )
+        symbols = ("600001.SH", "600002.SH", "600003.SH")
+        timestamp = "2026-08-10T00:00:00+00:00"
+        with database.connect() as connection:
+            connection.executemany(
+                "INSERT INTO expected_trading_days(source, trade_date) VALUES('tushare', ?)",
+                ((session.isoformat(),) for session in sessions),
+            )
+            connection.executemany(
+                "INSERT INTO market_snapshots VALUES(?, 'tushare', ?, 5000, 5000)",
+                ((session.isoformat(), timestamp) for session in sessions),
+            )
+            connection.executemany(
+                "INSERT INTO snapshot_securities VALUES(?, 'tushare', ?, ?, 'SSE', "
+                "'MAIN', '2000-01-01', 'fixture', 0)",
+                (
+                    (session.isoformat(), symbol, symbol)
+                    for session in sessions
+                    for symbol in symbols
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO daily_bars VALUES(?, ?, 100000, 101000, 99000, 100000, "
+                "100000, 1000, 10000000, 'tushare', ?)",
+                (
+                    (symbol, session.isoformat(), timestamp)
+                    for session in sessions
+                    for symbol in symbols
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO daily_security_status VALUES(?, ?, 'baostock', '1', 0, ?, ?)",
+                (
+                    (symbol, session.isoformat(), timestamp, "a" * 64)
+                    for session in sessions
+                    for symbol in symbols
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO share_capital_facts VALUES(?, ?, 'sina', 1000000, ?, ?)",
+                (
+                    (symbol, start.isoformat(), timestamp, "b" * 64)
+                    for symbol in symbols[:2]
+                ),
+            )
+
+        backfill = {
+            "schema": "sina-backfill-manifest-v1",
+            "run_id": "fixture-run",
+            "symbols": list(symbols),
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "adapter_version": "sina-adapter-v1",
+        }
+        backfill["manifest_hash"] = sha256(
+            json.dumps(backfill, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        backfill_path = self.root / "sina-manifest.json"
+        backfill_path.write_text(json.dumps(backfill), encoding="utf-8")
+        exclusions_path = self.root / "exclusions.json"
+        exclusions_path.write_text(
+            json.dumps(
+                {
+                    "schema": "v4-capital-exclusions-v1",
+                    "reason": "sina_share_capital_unavailable",
+                    "symbols": ["600003.SH"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        destination = self.root / "v4-manifest.json"
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "prepare-v4-study-manifest",
+                    "--root",
+                    str(self.root),
+                    "--sina-backfill-manifest",
+                    str(backfill_path),
+                    "--capital-exclusions",
+                    str(exclusions_path),
+                    "--manifest",
+                    str(destination),
+                ]
+            )
+
+        self.assertEqual(0, exit_code, output.getvalue())
+        manifest = json.loads(destination.read_text(encoding="utf-8"))
+        self.assertEqual(["600003.SH"], manifest["excluded_symbols"])
+        self.assertEqual(["600001.SH", "600002.SH"], manifest["included_symbols"])
+        self.assertEqual(6666, manifest["capital_coverage_bps"])
+        self.assertEqual(backfill["manifest_hash"], manifest["universe_source_manifest_hash"])
+        self.assertEqual(
+            manifest,
+            database.get_v4_dataset_manifest(str(manifest["manifest_hash"])),
+        )
 
     def test_project_console_script_points_to_the_real_cli_entrypoint(self) -> None:
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(

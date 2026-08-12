@@ -847,6 +847,8 @@ class Database:
             )
 
     def save_v4_dataset_manifest(self, manifest: dict[str, object]) -> dict[str, object]:
+        from .replay import validate_v4_manifest_symbol_coverage
+
         manifest_hash = str(manifest.get("manifest_hash", ""))
         self._validate_sha256(manifest_hash, "v4 manifest")
         if (
@@ -856,6 +858,7 @@ class Database:
             or manifest.get("status_source") != "baostock"
         ):
             raise ValueError("v4 manifest provider provenance is invalid")
+        validate_v4_manifest_symbol_coverage(manifest)
         canonical = dict(manifest)
         canonical.pop("manifest_hash", None)
         computed = hashlib.sha256(self._json(canonical).encode()).hexdigest()

@@ -280,6 +280,29 @@ $runDir = (Get-Content (Join-Path $runRoot 'latest-run.txt') -Raw).Trim()
 
 压缩 KLC 已由纯 Python 位流解码器和固定录制夹具覆盖，但真实端点单位人工对照、Windows 断点续跑和 20 日 shadow 仍是外部门禁。任何 KLC 完整性校验失败都必须终止，不能改用远端复权脚本、执行 JavaScript 或拿 Tushare 填补新浪缺口。资格未达到 `qualified_for_manual_approval` 时，不得执行 `approve-provider-source` 或 `activate_provider_source`。
 
+### v4 研究的股本覆盖例外
+
+本轮真实回填确认 41 只证券的新浪股本端点稳定返回空值。它们不得被记为抓取成功，
+也不降低 provider 资格对完整 shadow 的要求；但可以从 v4 主研究宇宙中显式排除。
+获准清单保存在 `deploy\windows\v4-sina-capital-exclusions-20260812.json`。
+
+生成 v4 研究 manifest 时，必须同时提供完成回填时使用的原始 Sina manifest 和这份
+排除清单：
+
+```powershell
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  prepare-v4-study-manifest --root E:\StockMcp `
+  --sina-backfill-manifest E:\StockMcp\config\sina-backfill-manifest.json `
+  --capital-exclusions E:\code\stock-mcp\deploy\windows\v4-sina-capital-exclusions-20260812.json `
+  --manifest E:\StockMcp\config\v4-study-manifest.json
+```
+
+成功输出必须记录完整证券宇宙、纳入集、排除集、三组数量和 SHA-256、覆盖率、排除
+原因和原始 Sina manifest hash。当前预期为原始宇宙 3,087 只、排除 41 只、研究
+纳入 3,046 只，覆盖率 `9867 bps`（98.67%）。任何不在获准 41 只中的新增股本缺口
+都会使命令失败；程序不会在运行时动态排除证券。清单写入 SQLite 后不可变，修改
+任一集合、计数或哈希都必须生成新的 manifest，不能改写旧研究。
+
 v4 研究入口和查询 DTO 已公开，但研究启动在完整 outcome/benchmark worker 未安装时会明确返回 `v4_research_rejected`，不会留下永远停在 `queued` 的假作业。不得将 Schema、CLI 或 DTO 存在描述为已完成研究、Sina replication、proposal、认证或激活。
 
 ## 构建发布包

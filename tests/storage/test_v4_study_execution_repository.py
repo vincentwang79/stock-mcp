@@ -16,12 +16,28 @@ class V4StudyExecutionRepositoryTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temporary.name) / "stock.sqlite3")
         self.database.initialize()
+        symbol_hash = lambda values: hashlib.sha256(  # noqa: E731
+            json.dumps(tuple(values), separators=(",", ":")).encode()
+        ).hexdigest()
         manifest = {
             "schema": "v4-manifest-v1",
             "source": "tushare",
             "share_capital_source": "sina",
             "status_source": "baostock",
             "created_at": "2026-08-11T00:00:00+00:00",
+            "universe_symbols": ["600001.SH", "600002.SH"],
+            "included_symbols": ["600001.SH"],
+            "excluded_symbols": ["600002.SH"],
+            "universe_symbol_count": 2,
+            "included_symbol_count": 1,
+            "excluded_symbol_count": 1,
+            "capital_coverage_bps": 5000,
+            "exclusion_reason": "sina_share_capital_unavailable",
+            "universe_symbols_hash": symbol_hash(("600001.SH", "600002.SH")),
+            "included_symbols_hash": symbol_hash(("600001.SH",)),
+            "excluded_symbols_hash": symbol_hash(("600002.SH",)),
+            "universe_source": "sina-backfill-manifest-v1",
+            "universe_source_manifest_hash": "d" * 64,
         }
         self.manifest_hash = hashlib.sha256(
             json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
@@ -40,6 +56,19 @@ class V4StudyExecutionRepositoryTest(unittest.TestCase):
                 },
             ),
         )
+
+    def test_manifest_rejects_tampered_symbol_coverage_even_with_a_new_outer_hash(self) -> None:
+        manifest = self.database.get_v4_dataset_manifest(self.manifest_hash)
+        assert manifest is not None
+        manifest["included_symbol_count"] = 2
+        manifest.pop("manifest_hash")
+        changed_hash = hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        with self.assertRaisesRegex(ValueError, "coverage|symbols|inconsistent"):
+            self.database.save_v4_dataset_manifest(
+                {**manifest, "manifest_hash": changed_hash}
+            )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()

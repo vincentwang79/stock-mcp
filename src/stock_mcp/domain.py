@@ -234,4 +234,16 @@ class V4DatasetManifest:
     capital_hash: str
     industry_hash: str
     adapter_version: str
+    universe_symbols: tuple[str, ...]
+    included_symbols: tuple[str, ...]
+    excluded_symbols: tuple[str, ...]
+    exclusion_reason: str | None
+    capital_coverage_bps: int
+    universe_symbol_count: int
+    included_symbol_count: int
+    excluded_symbol_count: int
+    universe_symbols_hash: str
+    included_symbols_hash: str
+    excluded_symbols_hash: str
+    universe_source_manifest_hash: str
     schema: str = "v4-manifest-v1"

@@ -2,13 +2,80 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
 
 from stock_mcp import outcomes, replay
 
 
 class V4OutcomeContractTest(unittest.TestCase):
+    def test_capital_exclusions_must_cover_every_recorded_missing_symbol(self) -> None:
+        load = getattr(replay, "load_v4_capital_exclusions", None)
+        self.assertTrue(callable(load))
+        if not callable(load):
+            return
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "exclusions.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": "v4-capital-exclusions-v1",
+                        "reason": "sina_share_capital_unavailable",
+                        "symbols": ["600002.SH", "600003.SH"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                ("600002.SH", "600003.SH"),
+                load(path, ("600002.SH",)),
+            )
+            with self.assertRaisesRegex(ValueError, "exactly|missing|exclusion"):
+                load(path, ("600004.SH",))
+
+    def test_v4_universe_is_loaded_from_a_hash_verified_sina_backfill_manifest(self) -> None:
+        load = getattr(replay, "load_v4_sina_backfill_universe", None)
+        self.assertTrue(callable(load))
+        if not callable(load):
+            return
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sina-manifest.json"
+            payload = {
+                "schema": "sina-backfill-manifest-v1",
+                "run_id": "sina-backfill-2023-08-08-2026-08-07",
+                "symbols": ["600001.SH", "600002.SH"],
+                "start": "2023-08-08",
+                "end": "2026-08-07",
+                "adapter_version": "sina-adapter-v1",
+            }
+            payload["manifest_hash"] = replay.canonical_json_sha256(payload)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            symbols, manifest_hash = load(
+                path, date(2023, 8, 8), date(2026, 8, 7)
+            )
+            self.assertEqual(("600001.SH", "600002.SH"), symbols)
+            self.assertEqual(payload["manifest_hash"], manifest_hash)
+            payload["symbols"].append("600003.SH")
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "hash|manifest"):
+                load(path, date(2023, 8, 8), date(2026, 8, 7))
+
+    def test_checked_in_capital_exclusion_record_contains_the_approved_41(self) -> None:
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "deploy"
+            / "windows"
+            / "v4-sina-capital-exclusions-20260812.json"
+        )
+        document = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual("v4-capital-exclusions-v1", document["schema"])
+        self.assertEqual("sina_share_capital_unavailable", document["reason"])
+        self.assertEqual(41, len(document["symbols"]))
+        self.assertEqual(document["symbols"], sorted(set(document["symbols"])))
+
     def test_manifest_rejects_a_sparse_or_mismatched_daily_price_universe(self) -> None:
         validate = getattr(replay, "validate_v4_manifest_universe", None)
         self.assertTrue(callable(validate))
@@ -59,6 +126,10 @@ class V4OutcomeContractTest(unittest.TestCase):
             statuses_hash="b" * 64,
             share_capital_hash="c" * 64,
             industry_mapping_hash="d" * 64,
+            universe_symbols=("600001.SH", "600002.SH", "600003.SH"),
+            excluded_symbols=("600003.SH",),
+            exclusion_reason="sina_share_capital_unavailable",
+            universe_source_manifest_hash="e" * 64,
         )
 
         self.assertEqual("v4-manifest-v1", manifest["schema"])
@@ -68,6 +139,55 @@ class V4OutcomeContractTest(unittest.TestCase):
         self.assertEqual(sessions[-26].isoformat(), manifest["signal_end"])
         self.assertEqual(sessions[-1].isoformat(), manifest["outcome_through"])
         self.assertRegex(str(manifest["manifest_hash"]), r"^[0-9a-f]{64}$")
+        self.assertEqual(["600001.SH", "600002.SH"], manifest["included_symbols"])
+        self.assertEqual(["600003.SH"], manifest["excluded_symbols"])
+        self.assertEqual(3, manifest["universe_symbol_count"])
+        self.assertEqual(2, manifest["included_symbol_count"])
+        self.assertEqual(1, manifest["excluded_symbol_count"])
+        self.assertEqual(6666, manifest["capital_coverage_bps"])
+        self.assertEqual(
+            "sina_share_capital_unavailable", manifest["exclusion_reason"]
+        )
+        self.assertRegex(str(manifest["universe_symbols_hash"]), r"^[0-9a-f]{64}$")
+        self.assertRegex(str(manifest["included_symbols_hash"]), r"^[0-9a-f]{64}$")
+        self.assertRegex(str(manifest["excluded_symbols_hash"]), r"^[0-9a-f]{64}$")
+        self.assertEqual("e" * 64, manifest["universe_source_manifest_hash"])
+
+        changed_exclusion = build_manifest(
+            source="tushare",
+            sessions=sessions,
+            bar_start=sessions[0],
+            signal_start=sessions[60],
+            signal_end=sessions[-26],
+            outcome_through=sessions[-1],
+            prices_hash="a" * 64,
+            statuses_hash="b" * 64,
+            share_capital_hash="c" * 64,
+            industry_mapping_hash="d" * 64,
+            universe_symbols=("600001.SH", "600002.SH", "600003.SH"),
+            excluded_symbols=("600002.SH",),
+            exclusion_reason="sina_share_capital_unavailable",
+            universe_source_manifest_hash="e" * 64,
+        )
+        self.assertNotEqual(manifest["manifest_hash"], changed_exclusion["manifest_hash"])
+
+        with self.assertRaisesRegex(ValueError, "excluded|universe|symbols"):
+            build_manifest(
+                source="tushare",
+                sessions=sessions,
+                bar_start=sessions[0],
+                signal_start=sessions[60],
+                signal_end=sessions[-26],
+                outcome_through=sessions[-1],
+                prices_hash="a" * 64,
+                statuses_hash="b" * 64,
+                share_capital_hash="c" * 64,
+                industry_mapping_hash="d" * 64,
+                universe_symbols=("600001.SH", "600002.SH"),
+                excluded_symbols=("600003.SH",),
+                exclusion_reason="sina_share_capital_unavailable",
+                universe_source_manifest_hash="e" * 64,
+            )
 
         with self.assertRaisesRegex(ValueError, "Tushare|source"):
             build_manifest(
@@ -81,6 +201,10 @@ class V4OutcomeContractTest(unittest.TestCase):
                 statuses_hash="b" * 64,
                 share_capital_hash="c" * 64,
                 industry_mapping_hash="d" * 64,
+                universe_symbols=("600001.SH",),
+                excluded_symbols=(),
+                exclusion_reason="sina_share_capital_unavailable",
+                universe_source_manifest_hash="e" * 64,
             )
 
     def test_outcome_v2_uses_earliest_event_then_next_executable_open_with_cost_paths(self) -> None:
