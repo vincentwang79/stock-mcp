@@ -14,7 +14,7 @@ from fractions import Fraction
 OUTCOME_HASH_SCHEMA = "v4-outcome-v2"
 BENCHMARK_SCHEMA = "v4-benchmark-v1"
 _CONDITION = re.compile(r"close\s*(>=|<=|>|<)\s*([1-9][0-9]*)\Z")
-_OPS: dict[str, Callable[[int, int], bool]] = {
+_OPS: dict[str, Callable[[object, object], bool]] = {
     ">=": operator.ge,
     "<=": operator.le,
     ">": operator.gt,
@@ -41,6 +41,8 @@ def evaluate_v4_candidate_outcomes(
             mainboard_by_symbol.setdefault(symbol, []).append(dict(raw_row))
     for rows in mainboard_by_symbol.values():
         rows.sort(key=lambda row: _as_date(row["trade_date"]))
+        adjusted = _adjusted_price_rows(rows)
+        rows[:] = adjusted
     results: dict[str, dict[str, object]] = {}
     for candidate in candidates:
         candidate_id = _text(candidate, "candidate_id")
@@ -52,9 +54,10 @@ def evaluate_v4_candidate_outcomes(
         if any(str(row.get("source", source)) != source for row in raw):
             raise ValueError("v4 outcome cannot mix price sources")
         raw.sort(key=lambda row: _as_date(row["trade_date"]))
+        raw = _adjusted_price_rows(raw, signal_close=candidate.get("signal_close_1e4"))
         post = [row for row in raw if signal_date < _as_date(row["trade_date"]) <= as_of]
-        expected_dates = tuple(day for day in calendar if signal_date < day <= as_of)[:20]
-        recorded_dates = tuple(_as_date(row["trade_date"]) for row in post[:20])
+        expected_dates = tuple(day for day in calendar if signal_date < day <= as_of)[:25]
+        recorded_dates = tuple(_as_date(row["trade_date"]) for row in post[:25])
         calendar_complete = recorded_dates == expected_dates
         statuses = status_by_symbol.get(symbol, {})
         confirmation = _condition(candidate.get("confirmation_condition"))
@@ -62,7 +65,7 @@ def evaluate_v4_candidate_outcomes(
         events: list[tuple[date, bool, bool]] = []
         for row in post[:5]:
             day = _as_date(row["trade_date"])
-            close = _positive_int(row.get("close_1e4"), "close")
+            close = _economic_price(row, "close")
             events.append((day, confirmation(close), invalidation(close)))
         confirmed_entry: date | None = None
         confirmed_status = "expired"
@@ -94,6 +97,8 @@ def evaluate_v4_candidate_outcomes(
             entry_open=True,
             expected_horizon_sessions=len(expected_dates),
         )
+        if next_entry is None and len(expected_dates) == 25 and len(post) >= 25:
+            next_path = _zero_return_terminal("unexecutable", costs=(10, 25, 50))
         confirmed_path = _path(
             post,
             confirmed_entry,
@@ -114,7 +119,7 @@ def evaluate_v4_candidate_outcomes(
             mainboard_by_symbol,
             calendar=calendar,
             signal_date=signal_date,
-            entry_date=next_entry,
+            entry_date=(next_entry if next_entry is not None else expected_dates[0]),
             entry_open=True,
             candidate_market_cap=market_cap,
         )
@@ -136,6 +141,7 @@ def evaluate_v4_candidate_outcomes(
             "confirmed_next_open_path": {
                 **confirmed_path,
                 "status": confirmed_status,
+                "execution_status": confirmed_path["status"],
                 "event_date": None if event_date is None else event_date.isoformat(),
                 "entry_date": None if confirmed_entry is None else confirmed_entry.isoformat(),
             },
@@ -146,15 +152,63 @@ def evaluate_v4_candidate_outcomes(
         paths["completeness_status"] = (
             "complete"
             if calendar_complete
-            and len(expected_dates) == 20
+            and len(expected_dates) == 25
             and paths["next_open_path"]["benchmark"]["completeness_rate_bps"] == 10_000  # type: ignore[index]
             and all(
                 paths[name]["status"] == "available"  # type: ignore[index]
-                for name in ("signal_close_path", "next_open_path")
+                for name in ("signal_close_path",)
+            )
+            and paths["next_open_path"]["status"] in {"available", "unexecutable"}  # type: ignore[index]
+            and (
+                paths["confirmed_next_open_path"]["status"] != "confirmed"  # type: ignore[index]
+                or (
+                    paths["confirmed_next_open_path"]["execution_status"] == "available"  # type: ignore[index]
+                    and paths["confirmed_next_open_path"]["benchmark"][  # type: ignore[index]
+                        "completeness_rate_bps"
+                    ]
+                    == 10_000
+                )
             )
             else "incomplete"
         )
     return results
+
+
+def validate_v4_outcome_batch(
+    *, candidates: Sequence[Mapping[str, object]], outcomes: Mapping[str, Mapping[str, object]]
+) -> None:
+    """Require one terminal, benchmark-complete outcome for every candidate.
+
+    A zero-candidate day is intentionally valid and contributes a zero daily
+    return.  Any selected candidate with missing execution or benchmark facts
+    makes the whole day incomplete instead of silently leaving the denominator.
+    """
+
+    candidate_ids = {_text(item, "candidate_id") for item in candidates}
+    if candidate_ids != set(outcomes):
+        raise ValueError("v4 outcome batch does not match the candidate set")
+    for outcome in outcomes.values():
+        if outcome.get("completeness_status") != "complete":
+            raise ValueError("v4 outcome batch is incomplete")
+        path = outcome.get("next_open_path")
+        benchmark = path.get("benchmark") if isinstance(path, Mapping) else None
+        if not (
+            isinstance(benchmark, Mapping)
+            and benchmark.get("completeness_rate_bps") == 10_000
+            and isinstance(benchmark.get("market_cap_matched_excess_bps"), Mapping)
+            and benchmark["market_cap_matched_excess_bps"].get(20) is not None
+        ):
+            raise ValueError("v4 benchmark evidence is incomplete")
+        confirmed = outcome.get("confirmed_next_open_path")
+        if isinstance(confirmed, Mapping) and confirmed.get("status") == "confirmed":
+            confirmed_benchmark = confirmed.get("benchmark")
+            if not (
+                confirmed.get("execution_status") == "available"
+                and isinstance(confirmed_benchmark, Mapping)
+                and confirmed_benchmark.get("completeness_rate_bps") == 10_000
+                and confirmed.get("gross_return_20d_bps") is not None
+            ):
+                raise ValueError("v4 confirmed-entry outcome is incomplete")
 
 
 def _benchmark_path(
@@ -187,15 +241,13 @@ def _benchmark_path(
         if any(day not in by_date for day in horizon_dates):
             continue
         first = by_date[horizon_dates[0]]
-        cap = first.get("market_cap_fen")
+        cap = first.get("signal_market_cap_fen")
         if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
             continue
-        base = _positive_int(
-            first.get("open_1e4" if entry_open else "pre_close_1e4"), "benchmark entry"
-        )
+        base = _economic_price(first, "open" if entry_open else "pre_close")
         peer_returns[symbol] = {
             horizon: _return_bps(
-                _positive_int(by_date[horizon_dates[horizon - 1]].get("close_1e4"), "close"),
+                _economic_price(by_date[horizon_dates[horizon - 1]], "close"),
                 base,
             )
             for horizon in (5, 10, 20)
@@ -300,25 +352,32 @@ def _path(
         "available" if len(selected) == 20 and expected_horizon_sessions >= 20 else "partial"
     )
     first = selected[0]
-    base = _positive_int(first.get("open_1e4" if entry_open else "pre_close_1e4"), "entry")
+    base = _economic_price(first, "open" if entry_open else "pre_close")
     for horizon in (5, 10, 20):
         if len(selected) >= horizon:
-            gross = _return_bps(
-                _positive_int(selected[horizon - 1].get("close_1e4"), "close"), base
-            )
+            gross = _return_bps(_economic_price(selected[horizon - 1], "close"), base)
             result[f"gross_return_{horizon}d_bps"] = gross
             for cost in costs:
                 result["net_return_bps_by_cost"][cost][horizon] = gross - cost  # type: ignore[index]
-    result["mfe_20d_bps"] = max(
-        _return_bps(_positive_int(row.get("high_1e4"), "high"), base) for row in selected
-    )
-    result["mae_20d_bps"] = min(
-        _return_bps(_positive_int(row.get("low_1e4"), "low"), base) for row in selected
-    )
+    result["mfe_20d_bps"] = max(_return_bps(_economic_price(row, "high"), base) for row in selected)
+    result["mae_20d_bps"] = min(_return_bps(_economic_price(row, "low"), base) for row in selected)
     return result
 
 
-def _condition(value: object) -> Callable[[int], bool]:
+def _zero_return_terminal(status: str, *, costs: tuple[int, ...]) -> dict[str, object]:
+    return {
+        "status": status,
+        "entry_date": None,
+        "gross_return_5d_bps": 0,
+        "gross_return_10d_bps": 0,
+        "gross_return_20d_bps": 0,
+        "net_return_bps_by_cost": {cost: {5: 0, 10: 0, 20: 0} for cost in costs},
+        "mfe_20d_bps": 0,
+        "mae_20d_bps": 0,
+    }
+
+
+def _condition(value: object) -> Callable[[int | Fraction], bool]:
     match = _CONDITION.fullmatch(str(value).strip())
     if match is None:
         raise ValueError("unsupported v4 outcome condition")
@@ -326,9 +385,45 @@ def _condition(value: object) -> Callable[[int], bool]:
     return lambda close: _OPS[operation](close, int(threshold))
 
 
-def _return_bps(value: int, base: int) -> int:
+def _return_bps(value: int | Fraction, base: int | Fraction) -> int:
     result = (Fraction(value, base) - 1) * 10_000
     return result.numerator // result.denominator
+
+
+def _adjusted_price_rows(
+    rows: Sequence[Mapping[str, object]], *, signal_close: object | None = None
+) -> list[dict[str, object]]:
+    """Attach point-in-time economic price levels using the close/pre-close chain."""
+
+    if not rows:
+        return []
+    first = rows[0]
+    anchor = (
+        _positive_int(signal_close, "signal close")
+        if signal_close is not None
+        else _positive_int(
+            first.get("signal_close_1e4", first.get("pre_close_1e4")), "signal close"
+        )
+    )
+    level = Fraction(anchor)
+    adjusted: list[dict[str, object]] = []
+    for raw in rows:
+        pre_close = _positive_int(raw.get("pre_close_1e4"), "pre_close")
+        row = dict(raw)
+        row["_economic_pre_close"] = level
+        for field in ("open", "high", "low", "close"):
+            value = _positive_int(raw.get(f"{field}_1e4"), field)
+            row[f"_economic_{field}"] = level * Fraction(value, pre_close)
+        level = row["_economic_close"]  # type: ignore[assignment]
+        adjusted.append(row)
+    return adjusted
+
+
+def _economic_price(row: Mapping[str, object], field: str) -> int | Fraction:
+    value = row.get(f"_economic_{field}")
+    if isinstance(value, Fraction) and value > 0:
+        return value
+    return _positive_int(row.get(f"{field}_1e4"), field)
 
 
 def _as_date(value: object) -> date:

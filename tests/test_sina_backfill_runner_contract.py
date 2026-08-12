@@ -168,9 +168,7 @@ class SinaBackfillRunnerContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "run.log"
             log.write_text(
-                "RUN fixed\n"
-                + "\n".join(prefix + json.dumps(event) for event in events)
-                + "\n",
+                "RUN fixed\n" + "\n".join(prefix + json.dumps(event) for event in events) + "\n",
                 encoding="utf-8",
             )
             completed = subprocess.run(

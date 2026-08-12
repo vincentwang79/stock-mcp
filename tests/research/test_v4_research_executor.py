@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import unittest
 from datetime import UTC, datetime
@@ -103,6 +104,49 @@ class V4ResearchExecutorTest(unittest.TestCase):
             coordinator.start_v4_research(manifest_hash="a" * 64, idempotency_key="study-1")
         self.assertEqual([], repository.created)
 
+    def test_transient_claim_error_does_not_kill_the_background_worker(self) -> None:
+        repository = _TransientClaimRepository()
+        coordinator = V4ResearchCoordinator(
+            repository,
+            step_executor=_Executor({"step": {"sequence": 1}, "complete": False}),
+            allowed=lambda _now: True,
+        )
+        coordinator.start_background()
+        try:
+            self.assertTrue(repository.recovered.wait(timeout=1))
+            self.assertIsNotNone(coordinator._thread)
+            self.assertTrue(coordinator._thread.is_alive())
+        finally:
+            coordinator.stop_background()
+
+    def test_persistent_storage_error_uses_backoff_and_remains_observable(self) -> None:
+        repository = _PersistentClaimErrorRepository()
+        coordinator = V4ResearchCoordinator(
+            repository,
+            step_executor=_Executor({"step": {"sequence": 1}, "complete": False}),
+            allowed=lambda _now: True,
+        )
+        coordinator.start_background()
+        try:
+            self.assertTrue(repository.called.wait(timeout=1))
+            threading.Event().wait(1.05)
+            self.assertLessEqual(repository.claims, 3)
+            self.assertEqual("OperationalError", coordinator.last_background_error)
+        finally:
+            coordinator.stop_background()
+
+    def test_transient_step_persistence_error_requeues_instead_of_terminal_failure(self) -> None:
+        repository = _TransientSaveRepository()
+        coordinator = V4ResearchCoordinator(
+            repository,
+            step_executor=_Executor({"step": {"sequence": 1}, "complete": False}),
+            allowed=lambda _now: True,
+        )
+        with self.assertRaises(sqlite3.OperationalError):
+            coordinator.run_next_step()
+        self.assertEqual([], repository.failed)
+        self.assertEqual(1, repository.requeue_calls)
+
 
 class _Repository:
     def __init__(self, *, claimed: dict[str, object] | None) -> None:
@@ -153,3 +197,35 @@ class _Executor:
 class _RaisingExecutor:
     def __call__(self, study: dict[str, object]) -> dict[str, object]:
         raise RuntimeError("outcome unavailable")
+
+
+class _TransientClaimRepository(_Repository):
+    def __init__(self) -> None:
+        super().__init__(claimed=None)
+        self.recovered = threading.Event()
+
+    def claim_next_v4_study(self) -> dict[str, object] | None:
+        self.claims += 1
+        if self.claims == 1:
+            raise sqlite3.OperationalError("database is locked")
+        self.recovered.set()
+        return None
+
+
+class _PersistentClaimErrorRepository(_Repository):
+    def __init__(self) -> None:
+        super().__init__(claimed=None)
+        self.called = threading.Event()
+
+    def claim_next_v4_study(self) -> dict[str, object] | None:
+        self.claims += 1
+        self.called.set()
+        raise sqlite3.OperationalError("database is read-only")
+
+
+class _TransientSaveRepository(_Repository):
+    def __init__(self) -> None:
+        super().__init__(claimed={"study_id": "study-1", "status": "running"})
+
+    def save_v4_study_step(self, *, study_id: str, step: dict[str, object]) -> None:
+        raise sqlite3.OperationalError("database is locked")

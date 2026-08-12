@@ -66,9 +66,7 @@ class V4StudyExecutionRepositoryTest(unittest.TestCase):
             json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         with self.assertRaisesRegex(ValueError, "coverage|symbols|inconsistent"):
-            self.database.save_v4_dataset_manifest(
-                {**manifest, "manifest_hash": changed_hash}
-            )
+            self.database.save_v4_dataset_manifest({**manifest, "manifest_hash": changed_hash})
 
     def tearDown(self) -> None:
         self.temporary.cleanup()

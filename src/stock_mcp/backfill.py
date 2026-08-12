@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import socket
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -44,6 +45,128 @@ def build_v3_facts(
         start=start,
         end=end,
     )
+
+
+def backfill_baostock_daily_statuses(
+    *,
+    database: Any,
+    client: object,
+    sessions: tuple[date, ...],
+    source_timestamp: str,
+    login: Callable[[], object] | None = None,
+    logout: Callable[[], object] | None = None,
+    progress: Callable[[date, int, int], None] | None = None,
+    minimum_main_board_count: int = MINIMUM_MAIN_BOARD_COUNT,
+) -> dict[str, object]:
+    """Persist the dated BaoStock universe including suspended main-board rows."""
+
+    if not sessions or sessions != tuple(sorted(set(sessions))):
+        raise ValueError("BaoStock status calendar is invalid")
+    run_id = f"baostock-status-v1-{sessions[0].isoformat()}-{sessions[-1].isoformat()}"
+    saved = skipped = 0
+    for ordinal, target in enumerate(sessions, start=1):
+        checkpoint = database.load_provider_backfill_checkpoint(
+            run_id=run_id, request_key=target.isoformat()
+        )
+        if isinstance(checkpoint, Mapping) and checkpoint.get("status") == "complete":
+            with database.connect() as connection:
+                persisted = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM daily_security_status "
+                        "WHERE source='baostock' AND trade_date=?",
+                        (target.isoformat(),),
+                    ).fetchone()[0]
+                )
+            if (
+                persisted == int(checkpoint.get("row_count", -1))
+                and persisted >= minimum_main_board_count
+            ):
+                skipped += 1
+                if progress is not None:
+                    progress(target, ordinal, len(sessions))
+                continue
+        if login is not None and logout is not None:
+            rows = _query_baostock_universe_with_reconnect(
+                client, target, login=login, logout=logout
+            )
+        else:
+            rows = _baostock_rows(_call_baostock(client, "query_all_stock", day=target.isoformat()))
+        normalized: list[dict[str, object]] = []
+        for row in rows:
+            symbol = _baostock_symbol(row.get("code"))
+            code, exchange = symbol.split(".")
+            if not _is_main_board(code, exchange):
+                continue
+            name = str(row.get("code_name", "")).strip()
+            trade_status = _trade_status(row)
+            if trade_status not in {"0", "1"}:
+                raise ValueError("BaoStock tradeStatus must be 0 or 1")
+            batch = hashlib.sha256(
+                (
+                    f"baostock-status-v1|{target.isoformat()}|{symbol}|"
+                    f"{trade_status}|{int(_is_st_name(name))}"
+                ).encode()
+            ).hexdigest()
+            normalized.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": target,
+                    "source": "baostock",
+                    "tradestatus": trade_status,
+                    "is_st": _is_st_name(name),
+                    "source_timestamp": source_timestamp,
+                    "batch_sha256": batch,
+                }
+            )
+        if len(normalized) < minimum_main_board_count:
+            raise ValueError("BaoStock status day main-board coverage is incomplete")
+        normalized_symbols = {str(item["symbol"]) for item in normalized}
+        with database.connect() as connection:
+            dated_snapshot_symbols = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT symbol FROM snapshot_securities "
+                    "WHERE source='tushare' AND trade_date=?",
+                    (target.isoformat(),),
+                )
+            }
+        if dated_snapshot_symbols - normalized_symbols:
+            raise ValueError("BaoStock status day does not cover the dated snapshot universe")
+        with database.connect() as connection:
+            lifecycle_symbols = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT symbol FROM snapshot_securities WHERE source='tushare' "
+                    "GROUP BY symbol HAVING MIN(list_date)<=?",
+                    (target.isoformat(),),
+                )
+            }
+        if lifecycle_symbols - normalized_symbols:
+            raise ValueError("BaoStock status day does not cover the recorded lifecycle universe")
+        database.save_baostock_status_batch(
+            run_id=run_id,
+            trade_date=target,
+            statuses=normalized,
+            checkpoint={
+                "schema": "baostock-daily-status-v1",
+                "status": "complete",
+                "trade_date": target.isoformat(),
+                "row_count": len(normalized),
+                "batch_sha256": hashlib.sha256(
+                    "\n".join(item["batch_sha256"] for item in normalized).encode()
+                ).hexdigest(),
+            },
+        )
+        saved += len(normalized)
+        if progress is not None:
+            progress(target, ordinal, len(sessions))
+    return {
+        "schema": "baostock-daily-status-v1",
+        "days": len(sessions),
+        "rows": saved,
+        "skipped_days": skipped,
+        "run_id": run_id,
+    }
 
 
 class TradingCalendar(Protocol):
@@ -127,16 +250,10 @@ class SinaBackfillService:
         assert isinstance(start, date) and isinstance(end, date)
         for ordinal, symbol in enumerate(self._symbols, start=1):
             symbol_started = monotonic()
-            self._emit_progress(
-                symbol=symbol, ordinal=ordinal, stage="symbol", event="start"
-            )
+            self._emit_progress(symbol=symbol, ordinal=ordinal, stage="symbol", event="start")
             checkpoint_started = monotonic()
-            self._emit_progress(
-                symbol=symbol, ordinal=ordinal, stage="checkpoint", event="start"
-            )
-            checkpoint = self._database.load_sina_backfill_checkpoint(
-                run_id=run_id, symbol=symbol
-            )
+            self._emit_progress(symbol=symbol, ordinal=ordinal, stage="checkpoint", event="start")
+            checkpoint = self._database.load_sina_backfill_checkpoint(run_id=run_id, symbol=symbol)
             self._emit_progress(
                 symbol=symbol,
                 ordinal=ordinal,
@@ -208,9 +325,7 @@ class SinaBackfillService:
                     )
                 else:
                     capital_fetch = self._provider.fetch_share_capital
-                    capital = tuple(
-                        capital_fetch(symbol, required_from=capital_required_from)
-                    )
+                    capital = tuple(capital_fetch(symbol, required_from=capital_required_from))
                     capital_evidence = None
                 self._emit_progress(
                     symbol=symbol,

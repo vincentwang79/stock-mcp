@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 from fractions import Fraction
@@ -28,6 +28,7 @@ from .domain import (
     MarketRegime,
     SetupType,
     StrategyVersion,
+    V3BreadthFacts,
     V3MarketInput,
     V3SecurityInput,
 )
@@ -343,6 +344,24 @@ def _quotas(regime: MarketRegime, parameters: Mapping[str, int]) -> tuple[int, i
 
 
 def generate_v3_daily_review(market: V3MarketInput, strategy: StrategyVersion) -> DailyReview:
+    return _generate_v3_daily_review(market, strategy)
+
+
+def _generate_v3_daily_review(
+    market: V3MarketInput,
+    strategy: StrategyVersion,
+    *,
+    include: Callable[[V3SecurityInput, _SetupMetrics], bool] | None = None,
+    ranking_bps: Mapping[str, int] | None = None,
+    breadth_override: V3BreadthFacts | None = None,
+) -> DailyReview:
+    """Shared immutable v3 pool builder used by preregistered v4 arms.
+
+    The public v3 entry point supplies no overrides, preserving its frozen
+    output.  V4 may filter or rank the complete eligible pool before quotas;
+    it cannot mutate v3 evidence or manufacture candidates afterwards.
+    """
+
     parameters = validate_v3_parameters(strategy.parameters, require_complete=True)
     if market.pipeline_version != PIPELINE_VERSION or market.input_hash_schema != INPUT_HASH_SCHEMA:
         raise ValueError("v3 market input contract version is unsupported")
@@ -367,7 +386,7 @@ def generate_v3_daily_review(market: V3MarketInput, strategy: StrategyVersion) -
         if not evaluate_v3_eligibility(item, strategy).eligible:
             continue
         metrics = _setup_metrics(item, parameters)
-        if metrics is not None:
+        if metrics is not None and (include is None or include(item, metrics)):
             pools[metrics.setup_type].append((item, metrics))
 
     industry_returns = _industry_returns(market)
@@ -455,10 +474,17 @@ def generate_v3_daily_review(market: V3MarketInput, strategy: StrategyVersion) -
                 )
             )
         ranked_by_setup[setup_type] = sorted(
-            candidates, key=lambda value: (-value.score, value.symbol)
+            candidates,
+            key=lambda value: (
+                -(ranking_bps.get(value.symbol, -1) if ranking_bps is not None else value.score),
+                value.symbol,
+            ),
         )
 
-    regime = _regime(market, parameters)
+    regime_market = (
+        market if breadth_override is None else replace(market, breadth=breadth_override)
+    )
+    regime = _regime(regime_market, parameters)
     pullback_quota, breakout_quota = _quotas(regime, parameters)
     selected = [
         *ranked_by_setup.get(SetupType.STRONG_PULLBACK, ())[:pullback_quota],
@@ -466,7 +492,7 @@ def generate_v3_daily_review(market: V3MarketInput, strategy: StrategyVersion) -
     ]
     selected.sort(
         key=lambda value: (
-            -value.score,
+            -(ranking_bps.get(value.symbol, -1) if ranking_bps is not None else value.score),
             0 if value.setup_type is SetupType.STRONG_PULLBACK else 1,
             value.symbol,
         )
@@ -483,6 +509,36 @@ def generate_v3_daily_review(market: V3MarketInput, strategy: StrategyVersion) -
         market_regime=regime,
         candidates=candidates,
     )
+
+
+def _v3_pool_percentiles(
+    market: V3MarketInput, strategy: StrategyVersion
+) -> dict[str, dict[str, int]]:
+    """Return frozen v3 percentile facts for every eligible setup, before quotas."""
+
+    parameters = validate_v3_parameters(strategy.parameters, require_complete=True)
+    pools: dict[SetupType, list[tuple[V3SecurityInput, _SetupMetrics]]] = defaultdict(list)
+    for item in sorted(market.securities, key=lambda entry: entry.security.symbol):
+        if not evaluate_v3_eligibility(item, strategy).eligible:
+            continue
+        metrics = _setup_metrics(item, parameters)
+        if metrics is not None:
+            pools[metrics.setup_type].append((item, metrics))
+    result: dict[str, dict[str, int]] = {}
+    for setup_type, entries in pools.items():
+        primary = percentile_bps(
+            tuple(metrics.primary for _, metrics in entries), higher_is_better=True
+        )
+        amount = percentile_bps(
+            tuple(metrics.amount_ratio_bps for _, metrics in entries),
+            higher_is_better=setup_type is SetupType.VOLUME_BREAKOUT,
+        )
+        for (item, _), primary_bps, amount_bps in zip(entries, primary, amount, strict=True):
+            result[item.security.symbol] = {
+                "primary_percentile_bps": primary_bps,
+                "amount_percentile_bps": amount_bps,
+            }
+    return result
 
 
 def _industry_returns(market: V3MarketInput) -> dict[str, int]:

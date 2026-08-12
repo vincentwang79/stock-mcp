@@ -24,9 +24,7 @@ def _v4_symbol_hash(symbols: tuple[str, ...]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
-def load_v4_capital_exclusions(
-    path: Path, missing_symbols: tuple[str, ...]
-) -> tuple[str, ...]:
+def load_v4_capital_exclusions(path: Path, missing_symbols: tuple[str, ...]) -> tuple[str, ...]:
     """Load an explicit governance exception and require an exact evidence match."""
 
     try:
@@ -45,9 +43,7 @@ def load_v4_capital_exclusions(
         raise ValueError("v4 capital exclusion symbols must be unique and sorted")
     uncovered = set(missing_symbols) - set(symbols)
     if uncovered:
-        raise ValueError(
-            "v4 capital exclusions do not cover every recorded missing-capital symbol"
-        )
+        raise ValueError("v4 capital exclusions do not cover every recorded missing-capital symbol")
     return symbols
 
 
@@ -216,22 +212,15 @@ def build_v4_replay_manifest(
         "included_symbol_count": len(universe_symbols) - len(excluded_symbols),
         "excluded_symbol_count": len(excluded_symbols),
         "capital_coverage_bps": (
-            (len(universe_symbols) - len(excluded_symbols)) * 10_000
-            // len(universe_symbols)
+            (len(universe_symbols) - len(excluded_symbols)) * 10_000 // len(universe_symbols)
         ),
         "exclusion_reason": exclusion_reason,
         "universe_source": "sina-backfill-manifest-v1",
         "universe_source_manifest_hash": universe_source_manifest_hash,
     }
-    payload["universe_symbols_hash"] = _v4_symbol_hash(
-        tuple(payload["universe_symbols"])
-    )
-    payload["included_symbols_hash"] = _v4_symbol_hash(
-        tuple(payload["included_symbols"])
-    )
-    payload["excluded_symbols_hash"] = _v4_symbol_hash(
-        tuple(payload["excluded_symbols"])
-    )
+    payload["universe_symbols_hash"] = _v4_symbol_hash(tuple(payload["universe_symbols"]))
+    payload["included_symbols_hash"] = _v4_symbol_hash(tuple(payload["included_symbols"]))
+    payload["excluded_symbols_hash"] = _v4_symbol_hash(tuple(payload["excluded_symbols"]))
     validate_v4_manifest_symbol_coverage(payload)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     payload["manifest_hash"] = hashlib.sha256(encoded.encode()).hexdigest()

@@ -74,7 +74,7 @@ class ConfigAndCliContractTest(unittest.TestCase):
         config.mkdir(parents=True)
         (config / "app.toml").write_bytes(
             b"\xef\xbb\xbf[service]\n"
-            b"bind_host = \"127.0.0.1\"\n"
+            b'bind_host = "127.0.0.1"\n'
             b"bind_port = 9876\n"
             b"\n[sina]\n"
             b"shadow_enabled = false\n"
@@ -90,13 +90,13 @@ class ConfigAndCliContractTest(unittest.TestCase):
         config.mkdir(parents=True)
         app_toml = config / "app.toml"
         app_toml.write_text(
-            r'''[storage]
+            r"""[storage]
 database = "E:\StockMcp\\data\\stock-mcp.sqlite3"
 backup_directory = "E:\StockMcp\\backups"
 
 [secrets]
 environment_file = "E:\StockMcp\\config\\secrets.env"
-''',
+""",
             encoding="utf-8",
         )
 
@@ -233,9 +233,7 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         start = date(2023, 8, 8)
         end = date(2026, 8, 7)
         span = (end - start).days
-        sessions = tuple(
-            start + timedelta(days=index * span // 726) for index in range(727)
-        )
+        sessions = tuple(start + timedelta(days=index * span // 726) for index in range(727))
         symbols = ("600001.SH", "600002.SH", "600003.SH")
         timestamp = "2026-08-10T00:00:00+00:00"
         with database.connect() as connection:
@@ -275,9 +273,19 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
             )
             connection.executemany(
                 "INSERT INTO share_capital_facts VALUES(?, ?, 'sina', 1000000, ?, ?)",
+                ((symbol, start.isoformat(), timestamp, "b" * 64) for symbol in symbols[:2]),
+            )
+            connection.executemany(
+                "INSERT INTO v3_snapshot_features(trade_date,source,symbol,feature_json) "
+                "VALUES(?,'tushare',?,?)",
                 (
-                    (symbol, start.isoformat(), timestamp, "b" * 64)
-                    for symbol in symbols[:2]
+                    (
+                        session.isoformat(),
+                        symbol,
+                        json.dumps({"industry_mapping_sha256": "c" * 64}),
+                    )
+                    for session in sessions
+                    for symbol in symbols
                 ),
             )
 
@@ -329,6 +337,19 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         self.assertEqual(6666, manifest["capital_coverage_bps"])
         self.assertEqual(backfill["manifest_hash"], manifest["universe_source_manifest_hash"])
         self.assertEqual(
+            database.compute_v4_evidence_hashes(
+                start=start,
+                end=end,
+                included_symbols=("600001.SH", "600002.SH"),
+            ),
+            {
+                "prices_hash": manifest["prices_hash"],
+                "statuses_hash": manifest["statuses_hash"],
+                "share_capital_hash": manifest["share_capital_hash"],
+                "industry_mapping_hash": manifest["industry_mapping_hash"],
+            },
+        )
+        self.assertEqual(
             manifest,
             database.get_v4_dataset_manifest(str(manifest["manifest_hash"])),
         )
@@ -373,6 +394,20 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         self.assertEqual("legacy-baostock-snapshot-status-v1", report["schema"])
         self.assertEqual(1, report["inserted_rows"])
 
+    def test_cli_exposes_complete_baostock_status_backfill_command(self) -> None:
+        with self.assertRaisesRegex(ValueError, "calendar"):
+            main(
+                [
+                    "backfill-baostock-statuses",
+                    "--root",
+                    str(self.root),
+                    "--start",
+                    "2026-08-07",
+                    "--end",
+                    "2026-08-07",
+                ]
+            )
+
     def test_v4_manifest_failure_reports_each_failed_gate(self) -> None:
         from stock_mcp.storage import Database
 
@@ -381,9 +416,7 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         start = date(2023, 8, 8)
         end = date(2026, 8, 7)
         span = (end - start).days
-        sessions = tuple(
-            start + timedelta(days=index * span // 726) for index in range(727)
-        )
+        sessions = tuple(start + timedelta(days=index * span // 726) for index in range(727))
         database.save_expected_trading_days("tushare", sessions)
         backfill = {
             "schema": "sina-backfill-manifest-v1",

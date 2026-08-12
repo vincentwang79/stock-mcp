@@ -227,10 +227,14 @@ class StockMcpApplication:
         if coordinator is None:
             return _error("v4_research_unavailable", "v4 research is unavailable")
         report = coordinator.get_v4_research_report(study_id=study_id)
-        return (
-            _error("v4_research_not_found", "v4 research does not exist")
-            if report is None
-            else _ok(dict(report))
+        if report is not None:
+            return _ok(dict(report))
+        run = coordinator.get_v4_research(study_id=study_id)
+        if run is None:
+            return _error("v4_research_not_found", "v4 research does not exist")
+        return _error(
+            "v4_research_not_ready",
+            f"v4 research report is not ready (status={run.get('status', 'unknown')})",
         )
 
     def get_provider_qualification(self, *, source: str) -> Result:

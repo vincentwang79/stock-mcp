@@ -284,9 +284,15 @@ class Database:
                     result_json TEXT NOT NULL,
                     PRIMARY KEY (operation, idempotency_key)
                 );
+                CREATE TABLE IF NOT EXISTS v4_evidence_revision (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    revision INTEGER NOT NULL
+                );
+                INSERT OR IGNORE INTO v4_evidence_revision(singleton, revision) VALUES(1, 0);
                 """
             )
             self._migrate(connection)
+            self._ensure_v4_evidence_revision_triggers(connection)
 
     def save_daily_bars(self, bars: Iterable[DailyBar]) -> None:
         records = tuple(bars)
@@ -459,23 +465,86 @@ class Database:
 
     def save_daily_security_statuses(self, statuses: Iterable[dict[str, object] | object]) -> None:
         with self._idempotent_write_connection() as connection:
-            for status in statuses:
+            self._save_daily_security_statuses(connection, statuses)
+
+    def _save_daily_security_statuses(
+        self, connection: sqlite3.Connection, statuses: Iterable[dict[str, object] | object]
+    ) -> None:
+        for status in statuses:
+            item = self._mapping(status)
+            trade_status = str(item["tradestatus"])
+            if trade_status not in {"0", "1"}:
+                raise ValueError("BaoStock tradeStatus must be 0 or 1")
+            key = (str(item["symbol"]), self._iso(item["trade_date"]), str(item["source"]))
+            values = (
+                trade_status,
+                int(bool(item["is_st"])),
+                self._iso(item["source_timestamp"]),
+                str(item["batch_sha256"]),
+            )
+            self._immutable_composite_insert(
+                connection,
+                "daily_security_status",
+                ("symbol", "trade_date", "source"),
+                key,
+                ("tradestatus", "is_st", "source_timestamp", "batch_sha256"),
+                values,
+            )
+
+    def save_baostock_status_batch(
+        self,
+        *,
+        run_id: str,
+        trade_date: date,
+        statuses: Iterable[dict[str, object] | object],
+        checkpoint: dict[str, object],
+    ) -> None:
+        """Atomically persist a complete dated BaoStock universe and its checkpoint."""
+
+        recorded = tuple(statuses)
+        if not recorded or checkpoint.get("status") != "complete":
+            raise ValueError("BaoStock status batch is incomplete")
+        encoded = self._jsonable_json(checkpoint)
+        with self._idempotent_write_connection() as connection:
+            for status in recorded:
                 item = self._mapping(status)
-                key = (str(item["symbol"]), self._iso(item["trade_date"]), str(item["source"]))
-                values = (
-                    str(item["tradestatus"]),
-                    int(bool(item["is_st"])),
-                    self._iso(item["source_timestamp"]),
-                    str(item["batch_sha256"]),
+                key = (
+                    str(item["symbol"]),
+                    self._iso(item["trade_date"]),
+                    str(item["source"]),
                 )
-                self._immutable_composite_insert(
-                    connection,
-                    "daily_security_status",
-                    ("symbol", "trade_date", "source"),
+                existing = connection.execute(
+                    "SELECT tradestatus,is_st FROM daily_security_status "
+                    "WHERE symbol=? AND trade_date=? AND source=?",
                     key,
-                    ("tradestatus", "is_st", "source_timestamp", "batch_sha256"),
-                    values,
-                )
+                ).fetchone()
+                if existing is not None:
+                    if (str(existing[0]), int(existing[1])) != (
+                        str(item["tradestatus"]),
+                        int(bool(item["is_st"])),
+                    ):
+                        raise ValueError("daily_security_status fact is immutable; status conflict")
+                    continue
+                self._save_daily_security_statuses(connection, (item,))
+            self._immutable_composite_insert(
+                connection,
+                "provider_backfill_checkpoints",
+                ("run_id", "request_key"),
+                (run_id, trade_date.isoformat()),
+                ("status", "checkpoint_json"),
+                ("complete", encoded),
+            )
+
+    def load_provider_backfill_checkpoint(
+        self, *, run_id: str, request_key: str
+    ) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT checkpoint_json FROM provider_backfill_checkpoints "
+                "WHERE run_id=? AND request_key=?",
+                (run_id, request_key),
+            ).fetchone()
+        return None if row is None else json.loads(str(row[0]))
 
     def build_v4_legacy_status_facts(self, *, start: date, end: date) -> dict[str, object]:
         """Derive eligible BaoStock status facts from recorded legacy snapshots.
@@ -525,8 +594,7 @@ class Database:
                             "trade_date": trade_date_text,
                             "source_timestamp": source_timestamp,
                             "statuses": [
-                                [symbol, "1", bool(is_st)]
-                                for symbol, is_st in securities
+                                [symbol, "1", bool(is_st)] for symbol, is_st in securities
                             ],
                         }
                     ).encode()
@@ -544,9 +612,7 @@ class Database:
                     ).fetchone()[0]
                 )
                 if conflicts:
-                    raise ValueError(
-                        "daily_security_status fact is immutable; status conflict"
-                    )
+                    raise ValueError("daily_security_status fact is immutable; status conflict")
                 existing_rows += int(
                     connection.execute(
                         "SELECT COUNT(*) FROM snapshot_securities s "
@@ -990,6 +1056,169 @@ class Database:
             ).fetchone()
         return None if row is None else json.loads(str(row[0]))
 
+    def compute_v4_evidence_hashes(
+        self, *, start: date, end: date, included_symbols: tuple[str, ...]
+    ) -> dict[str, str]:
+        """Hash the exact local facts a v4 manifest binds, without live I/O."""
+
+        if not included_symbols or included_symbols != tuple(sorted(set(included_symbols))):
+            raise ValueError("v4 evidence symbols are invalid")
+        included = set(included_symbols)
+
+        def digest_rows(rows: object) -> str:
+            digest = hashlib.sha256()
+            for row in rows:
+                if str(row[0]) not in included:
+                    continue
+                digest.update(json.dumps(tuple(row), separators=(",", ":"), default=str).encode())
+                digest.update(b"\n")
+            return digest.hexdigest()
+
+        with self.connect() as connection:
+            calendar = hashlib.sha256()
+            for row in connection.execute(
+                "SELECT trade_date FROM expected_trading_days WHERE source='tushare' "
+                "AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
+                (start.isoformat(), end.isoformat()),
+            ):
+                calendar.update(str(row[0]).encode())
+                calendar.update(b"\n")
+            prices = digest_rows(
+                connection.execute(
+                    "SELECT symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4, "
+                    "pre_close_1e4, volume_shares, amount_fen, source_timestamp FROM daily_bars "
+                    "WHERE source='tushare' AND trade_date BETWEEN ? AND ? "
+                    "ORDER BY trade_date, symbol",
+                    (start.isoformat(), end.isoformat()),
+                )
+            )
+            security_metadata = digest_rows(
+                connection.execute(
+                    "SELECT symbol, trade_date, name, exchange, board, list_date, industry, "
+                    "is_st FROM "
+                    "snapshot_securities WHERE source='tushare' AND trade_date BETWEEN ? AND ? "
+                    "ORDER BY trade_date, symbol",
+                    (start.isoformat(), end.isoformat()),
+                )
+            )
+            snapshot_metadata = hashlib.sha256()
+            for row in connection.execute(
+                "SELECT trade_date,source_timestamp "
+                "FROM market_snapshots WHERE source='tushare' AND trade_date BETWEEN ? AND ? "
+                "ORDER BY trade_date",
+                (start.isoformat(), end.isoformat()),
+            ):
+                snapshot_metadata.update(
+                    json.dumps(tuple(row), separators=(",", ":"), default=str).encode()
+                )
+                snapshot_metadata.update(b"\n")
+            price_limits = digest_rows(
+                connection.execute(
+                    "SELECT symbol, trade_date, fact_json FROM daily_price_limits "
+                    "WHERE source='tushare' AND trade_date BETWEEN ? AND ? "
+                    "ORDER BY trade_date, symbol",
+                    (start.isoformat(), end.isoformat()),
+                )
+            )
+            industry_features = digest_rows(
+                connection.execute(
+                    "SELECT symbol, trade_date, json_extract(feature_json,'$.industry'), "
+                    "json_extract(feature_json,'$.industry_mapping_sha256'), "
+                    "json_extract(feature_json,'$.industry_standard'), "
+                    "json_extract(feature_json,'$.industry_mode'), "
+                    "json_extract(feature_json,'$.industry_as_of') "
+                    "FROM v3_snapshot_features WHERE source='tushare' "
+                    "AND trade_date BETWEEN ? AND ? ORDER BY trade_date, symbol",
+                    (start.isoformat(), end.isoformat()),
+                )
+            )
+            statuses = digest_rows(
+                connection.execute(
+                    "SELECT symbol, trade_date, tradestatus, is_st, source_timestamp, batch_sha256 "
+                    "FROM daily_security_status WHERE source='baostock' "
+                    "AND trade_date BETWEEN ? AND ? ORDER BY trade_date, symbol",
+                    (start.isoformat(), end.isoformat()),
+                )
+            )
+            capital = digest_rows(
+                connection.execute(
+                    "SELECT symbol, effective_date, outstanding_shares, source_timestamp, "
+                    "payload_sha256 FROM share_capital_facts WHERE source='sina' "
+                    "AND effective_date <= ? ORDER BY symbol, effective_date",
+                    (end.isoformat(),),
+                )
+            )
+            industry = set()
+            for row in connection.execute(
+                "SELECT symbol, json_extract(feature_json,'$.industry_mapping_sha256'), "
+                "json_extract(feature_json,'$.industry_standard'), "
+                "json_extract(feature_json,'$.industry_mode'), "
+                "json_extract(feature_json,'$.industry_as_of') "
+                "FROM v3_snapshot_features WHERE source='tushare' "
+                "AND trade_date BETWEEN ? AND ? ORDER BY trade_date, symbol",
+                (start.isoformat(), end.isoformat()),
+            ):
+                if str(row[0]) in included and row[1] is not None:
+                    industry.add(tuple(str(item) for item in row[1:]))
+        if len(industry) != 1:
+            raise ValueError("v4 industry mapping evidence conflicts across the manifest window")
+        industry_metadata = industry.pop()
+        return {
+            "prices_hash": hashlib.sha256(
+                self._json(
+                    {
+                        "bars": prices,
+                        "calendar": calendar.hexdigest(),
+                        "security_metadata": security_metadata,
+                        "snapshot_metadata": snapshot_metadata.hexdigest(),
+                        "price_limits": price_limits,
+                        "industry_features": industry_features,
+                    }
+                ).encode()
+            ).hexdigest(),
+            "statuses_hash": statuses,
+            "share_capital_hash": capital,
+            "industry_mapping_hash": hashlib.sha256(
+                self._json({"industry_reference": industry_metadata}).encode()
+            ).hexdigest(),
+        }
+
+    def get_v4_evidence_revision(self) -> int:
+        """Return the O(1) revision advanced by immutable evidence table writes."""
+
+        with self.connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT revision FROM v4_evidence_revision WHERE singleton=1"
+                ).fetchone()[0]
+            )
+
+    @staticmethod
+    def _ensure_v4_evidence_revision_triggers(connection: sqlite3.Connection) -> None:
+        tables = (
+            "daily_bars",
+            "market_snapshots",
+            "snapshot_securities",
+            "daily_price_limits",
+            "v3_snapshot_features",
+            "daily_security_status",
+            "share_capital_facts",
+            "expected_trading_days",
+        )
+        for table in tables:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if exists is None:
+                continue
+            for action in ("INSERT", "UPDATE", "DELETE"):
+                name = f"v4_evidence_revision_{table}_{action.lower()}"
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {name} AFTER {action} ON {table} "
+                    "BEGIN UPDATE v4_evidence_revision SET revision=revision+1 "
+                    "WHERE singleton=1; END"
+                )
+
     def create_v4_study_run(
         self,
         *,
@@ -1120,6 +1349,190 @@ class Database:
             for row in rows
         )
 
+    def get_v4_study_progress(self, *, study_id: str) -> dict[str, dict[str, object]]:
+        """Return the compact durable cursor without decoding historical result JSON."""
+
+        with self.connect() as connection:
+            arms = tuple(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT arm_id FROM v4_study_arms WHERE study_id=? ORDER BY arm_id",
+                    (study_id,),
+                )
+            )
+            rows = connection.execute(
+                "SELECT arm_id,COUNT(*),MAX(signal_date) FROM v4_study_days "
+                "WHERE study_id=? GROUP BY arm_id",
+                (study_id,),
+            ).fetchall()
+        values = {str(row[0]): (int(row[1]), str(row[2])) for row in rows}
+        return {
+            arm_id: {
+                "completed_count": values.get(arm_id, (0, ""))[0],
+                "last_signal_date": None if arm_id not in values else values[arm_id][1],
+            }
+            for arm_id in arms
+        }
+
+    def save_v4_study_candidate_outcomes(
+        self, *, study_id: str, arm_id: str, outcomes: dict[str, object]
+    ) -> None:
+        """Persist immutable outcome-v2 evidence for one study arm."""
+
+        with self._idempotent_write_connection() as connection:
+            self._require_running_v4_arm(connection, study_id, arm_id)
+            self._save_v4_candidate_outcomes(
+                connection, study_id=study_id, arm_id=arm_id, outcomes=outcomes
+            )
+
+    def _save_v4_candidate_outcomes(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        study_id: str,
+        arm_id: str,
+        outcomes: dict[str, object],
+    ) -> None:
+        manifest_row = connection.execute(
+            "SELECT manifest_hash FROM v4_study_runs WHERE study_id=?", (study_id,)
+        ).fetchone()
+        if manifest_row is None:
+            raise ValueError("unknown v4 study")
+        manifest_hash = str(manifest_row[0])
+        for candidate_id, outcome in sorted(outcomes.items()):
+            if not isinstance(outcome, dict):
+                raise ValueError("v4 candidate outcome is invalid")
+            encoded = self._jsonable_json(outcome)
+            outcome_hash = hashlib.sha256(
+                self._json(
+                    {
+                        "schema": "v4-outcome-v2",
+                        "manifest_hash": manifest_hash,
+                        "arm_id": arm_id,
+                        "candidate_id": candidate_id,
+                        "outcome": outcome,
+                    }
+                ).encode()
+            ).hexdigest()
+            existing = connection.execute(
+                "SELECT outcome_json,outcome_hash FROM v4_study_candidate_outcomes "
+                "WHERE study_id=? AND arm_id=? AND candidate_id=?",
+                (study_id, arm_id, candidate_id),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != encoded or str(existing[1]) != outcome_hash:
+                    raise ValueError("immutable v4 candidate outcome conflict")
+                continue
+            connection.execute(
+                "INSERT INTO v4_study_candidate_outcomes(study_id,arm_id,candidate_id,"
+                "outcome_json,outcome_hash) VALUES(?,?,?,?,?)",
+                (study_id, arm_id, candidate_id, encoded, outcome_hash),
+            )
+
+    def list_v4_study_candidate_outcomes(self, *, study_id: str, arm_id: str) -> dict[str, object]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT candidate_id,outcome_json FROM v4_study_candidate_outcomes "
+                "WHERE study_id=? AND arm_id=? ORDER BY candidate_id",
+                (study_id, arm_id),
+            ).fetchall()
+        return {str(row[0]): json.loads(str(row[1])) for row in rows}
+
+    def save_v4_study_statistics(self, *, study_id: str, statistics: dict[str, object]) -> None:
+        """Persist one immutable study-wide statistics artifact."""
+
+        if statistics.get("schema") != "v4-statistics-v1":
+            raise ValueError("v4 statistics schema is invalid")
+        encoded = self._jsonable_json(statistics)
+        statistics_hash = hashlib.sha256(
+            self._json({"schema": "v4-statistics-v1", "statistics": statistics}).encode()
+        ).hexdigest()
+        with self._idempotent_write_connection() as connection:
+            run = connection.execute(
+                "SELECT manifest_hash,status FROM v4_study_runs WHERE study_id=?", (study_id,)
+            ).fetchone()
+            if run is None or str(run[1]) != "running":
+                raise ValueError("v4 study is not running")
+            if statistics.get("manifest_hash") != str(run[0]):
+                raise ValueError("v4 statistics manifest conflicts with the study")
+            existing = connection.execute(
+                "SELECT statistics_json,statistics_hash FROM v4_study_statistics "
+                "WHERE study_id=? AND arm_id='__study__'",
+                (study_id,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != encoded or str(existing[1]) != statistics_hash:
+                    raise ValueError("immutable v4 statistics conflict")
+                return
+            winner = statistics.get("winner")
+            if isinstance(winner, dict) and winner.get("eligible"):
+                replication = statistics.get("sina_replication")
+                if not (
+                    isinstance(replication, dict)
+                    and replication.get("artifact_hash")
+                    and replication.get("status") == "complete"
+                    and replication.get("completeness_rate_bps") == 10_000
+                ):
+                    raise ValueError("v4 winner requires a persisted Sina replication artifact")
+            connection.execute(
+                "INSERT INTO v4_study_statistics(study_id,arm_id,statistics_json,statistics_hash) "
+                "VALUES(?,'__study__',?,?)",
+                (study_id, encoded, statistics_hash),
+            )
+
+    def get_v4_study_execution_state(self, *, study_id: str) -> dict[str, object]:
+        run = self.get_v4_study_run(study_id)
+        if run is None:
+            raise ValueError("unknown v4 study")
+        manifest = self.get_v4_dataset_manifest(str(run["manifest_hash"]))
+        if manifest is None:
+            raise ValueError("v4 study manifest is missing")
+        arms = self.list_v4_study_arms(study_id)
+        completed_dates = {
+            str(arm["arm_id"]): tuple(
+                str(item["signal_date"])
+                for item in self.list_v4_study_days(
+                    study_id=study_id,
+                    arm_id=str(arm["arm_id"]),
+                    after_signal_date=None,
+                    limit=100_000,
+                )
+            )
+            for arm in arms
+        }
+        with self.connect() as connection:
+            stats = connection.execute(
+                "SELECT statistics_json FROM v4_study_statistics "
+                "WHERE study_id=? AND arm_id='__study__'",
+                (study_id,),
+            ).fetchone()
+            artifacts = connection.execute(
+                "SELECT artifact_json FROM v4_study_proposal_artifacts "
+                "WHERE study_id=? ORDER BY artifact_hash",
+                (study_id,),
+            ).fetchall()
+        statistics = {} if stats is None else json.loads(str(stats[0]))
+        replication = statistics.get("sina_replication") if isinstance(statistics, dict) else None
+        return {
+            "run": run,
+            "manifest": manifest,
+            "arms": arms,
+            "completed_dates": completed_dates,
+            "statistics": statistics,
+            "sina_replication": replication,
+            "proposal_artifacts": tuple(json.loads(str(row[0])) for row in artifacts),
+        }
+
+    @staticmethod
+    def _require_running_v4_arm(connection: sqlite3.Connection, study_id: str, arm_id: str) -> None:
+        row = connection.execute(
+            "SELECT r.status FROM v4_study_runs r JOIN v4_study_arms a "
+            "ON a.study_id=r.study_id WHERE r.study_id=? AND a.arm_id=?",
+            (study_id, arm_id),
+        ).fetchone()
+        if row is None or str(row[0]) != "running":
+            raise ValueError("v4 study arm is not running")
+
     def requeue_interrupted_v4_studies(self) -> int:
         """Make interrupted research work claimable after a process restart."""
 
@@ -1182,23 +1595,23 @@ class Database:
         except ValueError as error:
             raise ValueError("v4 signal_date is invalid") from error
         encoded = self._jsonable_json(result)
-        result_hash = hashlib.sha256(
-            self._json(
-                {
-                    "schema": "v4-result-v1",
-                    "study_id": study_id,
-                    "arm_id": arm_id,
-                    "signal_date": signal_date,
-                    "result": result,
-                }
-            ).encode()
-        ).hexdigest()
         with self._idempotent_write_connection() as connection:
             run = connection.execute(
-                "SELECT status FROM v4_study_runs WHERE study_id = ?", (study_id,)
+                "SELECT status,manifest_hash FROM v4_study_runs WHERE study_id = ?", (study_id,)
             ).fetchone()
             if run is None or str(run[0]) != "running":
                 raise ValueError("v4 study is not running")
+            result_hash = hashlib.sha256(
+                self._json(
+                    {
+                        "schema": "v4-result-v1",
+                        "manifest_hash": str(run[1]),
+                        "arm_id": arm_id,
+                        "signal_date": signal_date,
+                        "result": self._jsonable(result),
+                    }
+                ).encode()
+            ).hexdigest()
             if (
                 connection.execute(
                     "SELECT 1 FROM v4_study_arms WHERE study_id = ? AND arm_id = ?",
@@ -1221,9 +1634,71 @@ class Database:
                 "result_hash) VALUES (?, ?, ?, ?, ?)",
                 (study_id, arm_id, signal_date, encoded, result_hash),
             )
+            outcomes = result.get("candidate_outcomes")
+            if isinstance(outcomes, dict):
+                self._save_v4_candidate_outcomes(
+                    connection, study_id=study_id, arm_id=arm_id, outcomes=outcomes
+                )
 
     def complete_v4_study(self, *, study_id: str, report: dict[str, object]) -> None:
         """Commit an immutable terminal report for a running study."""
+
+        with self.connect() as connection:
+            run_manifest = connection.execute(
+                "SELECT m.manifest_json FROM v4_study_runs r JOIN v4_dataset_manifests m "
+                "ON m.manifest_hash=r.manifest_hash WHERE r.study_id=?",
+                (study_id,),
+            ).fetchone()
+            arms = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM v4_study_arms WHERE study_id=?", (study_id,)
+                ).fetchone()[0]
+            )
+            days = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM v4_study_days WHERE study_id=?", (study_id,)
+                ).fetchone()[0]
+            )
+            statistics = connection.execute(
+                "SELECT 1 FROM v4_study_statistics WHERE study_id=? AND arm_id='__study__'",
+                (study_id,),
+            ).fetchone()
+        strict_report = report.get("schema") == "v4-statistics-v1" or any(
+            key in report
+            for key in (
+                "completeness_status",
+                "outcome_completeness_rate_bps",
+                "benchmark_completeness_rate_bps",
+            )
+        )
+        if strict_report and (arms != 7 or days < 7 or statistics is None):
+            raise ValueError("v4 completion requires seven-arm calendar and outcome evidence")
+        if strict_report and report.get("completeness_status") not in {"complete", "incomplete"}:
+            raise ValueError("v4 completion report evidence is invalid")
+        if strict_report:
+            if run_manifest is None:
+                raise ValueError("v4 completion manifest evidence is missing")
+            manifest = json.loads(str(run_manifest[0]))
+            sessions = manifest.get("sessions")
+            if not isinstance(sessions, list) or len(sessions) < 86:
+                raise ValueError("v4 completion manifest calendar is incomplete")
+            expected = tuple(map(str, sessions[60:-25]))
+            with self.connect() as connection:
+                arm_rows = connection.execute(
+                    "SELECT arm_id FROM v4_study_arms WHERE study_id=? ORDER BY arm_id",
+                    (study_id,),
+                ).fetchall()
+                for (arm_id,) in arm_rows:
+                    actual = tuple(
+                        str(row[0])
+                        for row in connection.execute(
+                            "SELECT signal_date FROM v4_study_days "
+                            "WHERE study_id=? AND arm_id=? ORDER BY signal_date",
+                            (study_id, arm_id),
+                        ).fetchall()
+                    )
+                    if actual != expected:
+                        raise ValueError("v4 completion calendar evidence is incomplete")
 
         encoded = self._jsonable_json(report)
         result_hash = hashlib.sha256(
@@ -1506,10 +1981,7 @@ class Database:
                         (trade_date_value, source, *chunk),
                     ).fetchall()
                     stored.update(
-                        {
-                            (str(row[0]), str(row[1]), str(row[9])): tuple(row)
-                            for row in rows
-                        }
+                        {(str(row[0]), str(row[1]), str(row[9])): tuple(row) for row in rows}
                     )
         else:
             for (symbol, source), trade_dates in symbol_groups.items():
@@ -1528,10 +2000,7 @@ class Database:
                         (symbol, source, *chunk),
                     ).fetchall()
                     stored.update(
-                        {
-                            (str(row[0]), str(row[1]), str(row[9])): tuple(row)
-                            for row in rows
-                        }
+                        {(str(row[0]), str(row[1]), str(row[9])): tuple(row) for row in rows}
                     )
         if any(stored[key] != incoming[key] for key in stored):
             raise ValueError("daily market bar is immutable")

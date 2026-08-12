@@ -189,6 +189,6 @@ def _repair_legacy_windows_path_assignments(text: str) -> str:
         if not re.match(r"^[A-Za-z]:\\", path_value):
             return match.group(0)
         escaped = re.sub(r"(?<!\\)\\(?!\\)", r"\\\\", path_value)
-        return f'{match.group("prefix")}{escaped}{match.group("suffix")}'
+        return f"{match.group('prefix')}{escaped}{match.group('suffix')}"
 
     return assignment.sub(repair, text)

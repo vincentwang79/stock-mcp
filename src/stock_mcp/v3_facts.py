@@ -25,6 +25,7 @@ def load_v3_market_input(
     *,
     source: str,
     prior_history_sessions: int = 60,
+    included_symbols: frozenset[str] | None = None,
 ) -> V3MarketInput:
     """Load one complete v3 input from locally persisted v10 facts and price history."""
 
@@ -60,7 +61,14 @@ def load_v3_market_input(
     advance_count = 0
     ma20_eligible_count = 0
     above_ma20_count = 0
-    for security in snapshot.securities:
+    securities = tuple(
+        security
+        for security in snapshot.securities
+        if included_symbols is None or security.symbol in included_symbols
+    )
+    if not securities:
+        raise ValueError("v3 input contains no securities in the requested universe")
+    for security in securities:
         bars = sorted(bars_by_symbol.get(security.symbol, ()), key=lambda item: item.trade_date)
         target_bars = [bar for bar in bars if bar.trade_date == target]
         if len(target_bars) != 1:

@@ -299,8 +299,7 @@ class SinaProvider:
         except (TypeError, ValueError) as error:
             raise _payload_failure(result.evidence, error) from error
         normalized = tuple(
-            {**asdict(bar), "payload_sha256": result.evidence.payload_sha256}
-            for bar in bars
+            {**asdict(bar), "payload_sha256": result.evidence.payload_sha256} for bar in bars
         )
         return normalized, _evidence_record(result.evidence)
 

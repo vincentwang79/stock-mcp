@@ -195,9 +195,7 @@ class SinaRuntimeContractTest(unittest.TestCase):
             provider.fetch_share_capital(  # type: ignore[attr-defined]
                 "600190.SH", required_from=date(2023, 8, 8)
             )
-        self.assertEqual(
-            "SinaNormalizationError", raised.exception.evidence["error_class"]
-        )
+        self.assertEqual("SinaNormalizationError", raised.exception.evidence["error_class"])
 
     def test_5xx_retries_with_injected_deterministic_backoff_and_stops_at_bound(self) -> None:
         transport, client, sleeps = self._transport(

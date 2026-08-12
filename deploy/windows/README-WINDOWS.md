@@ -295,6 +295,10 @@ $runDir = (Get-Content (Join-Path $runRoot 'latest-run.txt') -Raw).Trim()
   --start 2023-08-08 --end 2026-08-07
 
 & 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  backfill-baostock-statuses --root E:\StockMcp `
+  --start 2023-08-08 --end 2026-08-07
+
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
   prepare-v4-study-manifest --root E:\StockMcp `
   --sina-backfill-manifest E:\StockMcp\config\sina-backfill-manifest.json `
   --capital-exclusions E:\code\stock-mcp\deploy\windows\v4-sina-capital-exclusions-20260812.json `
@@ -305,13 +309,26 @@ $runDir = (Get-Content (Join-Path $runRoot 'latest-run.txt') -Raw).Trim()
 `tradeStatus=1`、非 ST 门禁的证券，确定性迁移到 Schema v11 状态事实表。它不会
 为旧快照中已被排除的停牌或 ST 证券猜补状态；若存在内容冲突则整次事务回滚。
 
+`backfill-baostock-statuses` 随后按持久化 Tushare 交易日历逐日联网读取 BaoStock
+完整证券状态，明确保存 `tradeStatus=0` 停牌日。它使用持久 checkpoint，可安全重跑；
+manifest 门禁要求 3,046 只纳入证券在 727 日均有状态事实，未完成前拒绝生成研究
+manifest，而不是把价格和状态双缺失猜成停牌。
+
 成功输出必须记录完整证券宇宙、纳入集、排除集、三组数量和 SHA-256、覆盖率、排除
 原因和原始 Sina manifest hash。当前预期为原始宇宙 3,087 只、排除 41 只、研究
 纳入 3,046 只，覆盖率 `9867 bps`（98.67%）。任何不在获准 41 只中的新增股本缺口
 都会使命令失败；程序不会在运行时动态排除证券。清单写入 SQLite 后不可变，修改
 任一集合、计数或哈希都必须生成新的 manifest，不能改写旧研究。
 
-v4 研究入口和查询 DTO 已公开，但研究启动在完整 outcome/benchmark worker 未安装时会明确返回 `v4_research_rejected`，不会留下永远停在 `queued` 的假作业。不得将 Schema、CLI 或 DTO 存在描述为已完成研究、Sina replication、proposal、认证或激活。
+v4 逐日研究 worker 和查询 DTO 已接入。`start_v4_research` 只接受已持久化且完整的
+`v4-study-manifest.json`；它创建可恢复作业，不访问新浪或其他实时端点。worker 每步只处理
+一个信号日/研究臂，在盘后窗口让路；Windows 服务重启后从最早缺失步骤续跑。候选日与
+outcome 原子写入，终态必须通过七臂精确日历和统计证据门禁。
+
+在没有独立、完整的 Sina 价格 replication artifact 时，正常研究报告应为保留 v0.3、
+winner 不合格、proposal 为空。不得把研究完成描述为 Sina replication、provider 资格、
+proposal、策略认证或激活已经完成。首次 Windows 全量运行前仍需先通过开发机固定小数据集
+E2E；Windows 全量耗时和资源占用属于外部门禁。
 
 ## 构建发布包
 

@@ -24,11 +24,15 @@ from zoneinfo import ZoneInfo
 from .application import StockMcpApplication
 from .config import Settings
 from .mcp_server import create_server
-from .production import LazyAKShareQuoteProvider, ProductionPostMarketTask
+from .production import (
+    LazyAKShareQuoteProvider,
+    ProductionPostMarketTask,
+    is_v4_research_allowed,
+)
 from .replay_jobs import StrategyReplayCoordinator
 from .storage import Database
 from .strategy import DatabaseStrategyRegistry
-from .v4_research import V4ResearchCoordinator
+from .v4_research import V4ResearchCoordinator, V4StudyExecutor
 
 _LOOPBACK_HOST = "127.0.0.1"
 _MCP_PATH = "/mcp"
@@ -71,6 +75,7 @@ class ServiceRuntime:
     mcp_server: Any
     scheduler: Any
     replay_runner: Any | None = None
+    v4_research_runner: Any | None = None
     listener_started: bool = False
 
 
@@ -104,6 +109,14 @@ def build_runtime(
             raise TypeError("replay runner must provide recovery and background startup")
         requeue()
         start_background()
+    v4_research_runner = resolved.get("v4_research_runner")
+    if v4_research_runner is not None:
+        requeue = getattr(v4_research_runner, "requeue_interrupted", None)
+        start_background = getattr(v4_research_runner, "start_background", None)
+        if not callable(requeue) or not callable(start_background):
+            raise TypeError("v4 research runner must provide recovery and background startup")
+        requeue()
+        start_background()
     return ServiceRuntime(
         settings=settings,
         database=database,
@@ -111,6 +124,7 @@ def build_runtime(
         mcp_server=resolved["mcp_server"],
         scheduler=scheduler,
         replay_runner=replay_runner,
+        v4_research_runner=v4_research_runner,
     )
 
 
@@ -143,10 +157,16 @@ def serve(settings: Settings) -> int:
 
     runtime = build_runtime(settings)
     payload = health(runtime)
-    if payload["readyz"] == "ready":
-        return _run_mcp(runtime)
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    return _serve_health_only(runtime)
+    try:
+        if payload["readyz"] == "ready":
+            return _run_mcp(runtime)
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return _serve_health_only(runtime)
+    finally:
+        runner = runtime.v4_research_runner
+        stop = getattr(runner, "stop_background", None)
+        if callable(stop):
+            stop()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -166,7 +186,11 @@ def _default_dependencies(settings: Settings) -> dict[str, object]:
         strategy_registry,
         allowed=is_strategy_replay_allowed,
     )
-    v4_research = V4ResearchCoordinator(database)
+    v4_research = V4ResearchCoordinator(
+        database,
+        step_executor=V4StudyExecutor(database),
+        allowed=is_v4_research_allowed,
+    )
     application = StockMcpApplication(
         database,
         LazyAKShareQuoteProvider(),
@@ -186,6 +210,7 @@ def _default_dependencies(settings: Settings) -> dict[str, object]:
         ),
         "scheduler": scheduler,
         "replay_runner": replay_runner,
+        "v4_research_runner": v4_research,
     }
 
 

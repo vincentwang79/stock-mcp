@@ -55,6 +55,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "backfill",
             "build-v3-facts",
             "build-v4-status-facts",
+            "backfill-baostock-statuses",
             "prepare-sina-backfill-manifest",
             "backfill-sina",
             "verify-sina-backfill",
@@ -227,6 +228,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = database.build_v4_legacy_status_facts(start=args.start, end=args.end)
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0 if int(report["days"]) > 0 and int(report["eligible_rows"]) > 0 else 2
+
+    if args.command == "backfill-baostock-statuses":
+        import socket
+
+        from .backfill import backfill_baostock_daily_statuses
+        from .storage import Database
+
+        if args.start is None or args.end is None:
+            parser.error("backfill-baostock-statuses requires --start and --end")
+        database = Database(settings.database_path)
+        database.initialize()
+        sessions = database.load_expected_trading_days(args.start, args.end, source="tushare")
+        if not sessions:
+            raise ValueError("recorded Tushare calendar is missing")
+        import baostock  # type: ignore[import-not-found]
+
+        login = getattr(baostock, "login", None)
+        logout = getattr(baostock, "logout", None)
+        if not callable(login) or not callable(logout):
+            raise ValueError("BaoStock client does not provide login/logout")
+        original_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(30.0)
+        login_result = login()
+        if str(getattr(login_result, "error_code", "0")) != "0":
+            raise RuntimeError("BaoStock login failed")
+        try:
+            report = backfill_baostock_daily_statuses(
+                database=database,
+                client=baostock,
+                sessions=sessions,
+                source_timestamp=datetime.now(UTC).isoformat(),
+                login=login,
+                logout=logout,
+                progress=lambda day, ordinal, total: print(
+                    "stock-mcp: baostock-status "
+                    f"trade_date={day.isoformat()} progress={ordinal}/{total}",
+                    flush=True,
+                ),
+            )
+        finally:
+            try:
+                logout()
+            finally:
+                socket.setdefaulttimeout(original_timeout)
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 0
 
     if args.command == "prepare-sina-backfill-manifest":
         from .storage import Database
@@ -538,10 +585,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
         try:
-            universe_symbols, universe_source_manifest_hash = (
-                load_v4_sina_backfill_universe(
-                    args.sina_backfill_manifest, sessions[0], sessions[-1]
-                )
+            universe_symbols, universe_source_manifest_hash = load_v4_sina_backfill_universe(
+                args.sina_backfill_manifest, sessions[0], sessions[-1]
             )
         except ValueError as error:
             print(f"stock-mcp: {error}")
@@ -567,9 +612,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
             try:
                 excluded_symbols = (
-                    load_v4_capital_exclusions(
-                        args.capital_exclusions, missing_capital_symbols
-                    )
+                    load_v4_capital_exclusions(args.capital_exclusions, missing_capital_symbols)
                     if args.capital_exclusions is not None
                     else ()
                 )
@@ -586,9 +629,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ((symbol,) for symbol in sorted(included_set)),
             )
 
-            def query_hash(
-                query: str, values: tuple[object, ...]
-            ) -> tuple[str, int]:
+            def query_hash(query: str, values: tuple[object, ...]) -> tuple[str, int]:
                 digest = sha256()
                 count = 0
                 cursor = connection.execute(query, values)
@@ -603,20 +644,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                         count += 1
                 return digest.hexdigest(), count
 
-            prices, price_rows = query_hash(
+            _prices, price_rows = query_hash(
                 "SELECT symbol, trade_date, open_1e4, high_1e4, low_1e4, close_1e4, "
                 "pre_close_1e4, volume_shares, amount_fen, source_timestamp FROM daily_bars "
                 "WHERE source='tushare' AND trade_date BETWEEN ? AND ? "
                 "ORDER BY trade_date, symbol",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             )
-            statuses, status_rows = query_hash(
+            _statuses, status_rows = query_hash(
                 "SELECT symbol, trade_date, tradestatus, is_st, source_timestamp, batch_sha256 "
                 "FROM daily_security_status WHERE source='baostock' "
                 "AND trade_date BETWEEN ? AND ? ORDER BY trade_date, symbol",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             )
-            capital, capital_rows = query_hash(
+            _capital, capital_rows = query_hash(
                 "SELECT symbol, effective_date, outstanding_shares, source_timestamp, "
                 "payload_sha256 FROM share_capital_facts WHERE source='sina' "
                 "AND effective_date <= ? ORDER BY symbol, effective_date",
@@ -654,12 +695,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             ).fetchone()[0]
             missing_status_rows = connection.execute(
-                "SELECT COUNT(*) FROM daily_bars b "
-                "JOIN v4_manifest_included_symbols i ON i.symbol=b.symbol "
-                "WHERE b.source='tushare' "
-                "AND b.trade_date BETWEEN ? AND ? AND NOT EXISTS ("
+                "SELECT COUNT(*) FROM v4_manifest_included_symbols i "
+                "JOIN (SELECT symbol,MIN(list_date) list_date FROM snapshot_securities "
+                "WHERE source='tushare' GROUP BY symbol) life ON life.symbol=i.symbol "
+                "CROSS JOIN expected_trading_days e WHERE e.source='tushare' "
+                "AND e.trade_date BETWEEN ? AND ? AND e.trade_date>=life.list_date "
+                "AND NOT EXISTS ("
                 "SELECT 1 FROM daily_security_status s WHERE s.source='baostock' "
-                "AND s.symbol=b.symbol AND s.trade_date=b.trade_date)",
+                "AND s.symbol=i.symbol AND s.trade_date=e.trade_date)",
                 (sessions[0].isoformat(), sessions[-1].isoformat()),
             ).fetchone()[0]
             gate_report = {
@@ -676,9 +719,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "included_symbol_count": len(included_set),
                 "excluded_symbol_count": len(excluded_set),
             }
-            gate_summary = " ".join(
-                f"{key}={value}" for key, value in sorted(gate_report.items())
-            )
+            gate_summary = " ".join(f"{key}={value}" for key, value in sorted(gate_report.items()))
         try:
             validate_v4_manifest_universe(
                 expected_session_count=len(sessions),
@@ -688,10 +729,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 orphan_price_rows=int(orphan_price_rows),
             )
         except ValueError as error:
-            print(
-                f"stock-mcp: {error} "
-                + gate_summary
-            )
+            print(f"stock-mcp: {error} " + gate_summary)
             return 2
         if (
             not price_rows
@@ -701,11 +739,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             or int(status_days) != 727
             or int(missing_status_rows) != 0
         ):
-            print(
-                "stock-mcp: v4 manifest gate failed "
-                + gate_summary
-            )
+            print("stock-mcp: v4 manifest gate failed " + gate_summary)
             return 2
+        evidence_hashes = database.compute_v4_evidence_hashes(
+            start=sessions[0], end=sessions[-1], included_symbols=tuple(sorted(included_set))
+        )
         manifest = build_v4_replay_manifest(
             source="tushare",
             sessions=sessions,
@@ -713,15 +751,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             signal_start=sessions[60],
             signal_end=sessions[-26],
             outcome_through=sessions[-1],
-            prices_hash=prices,
-            statuses_hash=statuses,
-            share_capital_hash=capital,
-            industry_mapping_hash="829fb6481d3269a59a2f679b09c2d2d93ada2ffd0db54931f2ec61b646ac1c1a",
+            prices_hash=evidence_hashes["prices_hash"],
+            statuses_hash=evidence_hashes["statuses_hash"],
+            share_capital_hash=evidence_hashes["share_capital_hash"],
+            industry_mapping_hash=evidence_hashes["industry_mapping_hash"],
             universe_symbols=universe_symbols,
             excluded_symbols=excluded_symbols,
-            exclusion_reason=(
-                V4_CAPITAL_EXCLUSION_REASON if excluded_symbols else None
-            ),
+            exclusion_reason=(V4_CAPITAL_EXCLUSION_REASON if excluded_symbols else None),
             universe_source_manifest_hash=universe_source_manifest_hash,
         )
         database.save_v4_dataset_manifest(manifest)

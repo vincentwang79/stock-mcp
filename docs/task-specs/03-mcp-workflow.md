@@ -67,4 +67,12 @@ ChatGPT 需要结构化读取日报并记录个人观察，但不能改变排名
 
 Schema v11 增加只读 `get_provider_qualification`，以及必须消费主机一次性批准的 `activate_provider_source`。数据源激活只把已认证能力登记到 provider registry，供以后兼容 Sina 的 v4 生产组合读取；当前 v0.3 仍固定忽略 Sina，因此登记不会改变当前日报。数据源激活和策略激活是两个独立事务；MCP 的 `confirmed=true` 不能代替主机批准。
 
-v4 研究公开 `start_v4_research`、`get_v4_research`、`get_v4_research_arms`、`get_v4_research_days` 和 `get_v4_research_report`。读取接口不写数据库；完整逐日执行器尚未接入时，启动必须返回 `v4_research_rejected`，不得留下不会运行的排队作业。执行器和 Sina replication 门禁以后接入后，启动也只允许创建持久研究作业，不联网采集；研究成功最多生成不可变 proposal artifact，不直接写 `strategy_versions`，也不认证或激活。
+v4 研究公开 `start_v4_research`、`get_v4_research`、`get_v4_research_arms`、
+`get_v4_research_days` 和 `get_v4_research_report`。读取接口不写数据库；启动前必须存在完整
+不可变 manifest，否则返回 `v4_research_rejected` 且不留排队作业。受理后后台 worker 每步
+处理一个信号日/研究臂，16:20–18:10 为盘后任务让路，服务重启从最早缺失步骤续跑，且
+绝不联网采集。查询返回的是已持久化进度和证据，不会在读取请求中重算。
+
+主 Tushare 研究完成但没有独立 Sina replication 时，报告必须明确保留 v0.3、winner
+不合格、proposal 为空。研究接口不会直接写 `strategy_versions`，也不会认证、批准或激活
+策略。

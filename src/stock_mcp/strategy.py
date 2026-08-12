@@ -368,6 +368,7 @@ def evaluate_v4_research_statistics(
             "ci95": [lower, upper],
             "eligible": eligible,
             "completeness_rate_bps": metadata.get("completeness_rate_bps"),
+            "executable_rate_bps": metadata.get("executable_rate_bps"),
             "unexecutable_rate_bps": metadata.get("unexecutable_rate_bps"),
         }
     eligible_names = [name for name, result in arm_results.items() if result["eligible"]]

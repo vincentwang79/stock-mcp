@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from stock_mcp import outcomes, replay
+from stock_mcp.outcomes_v2 import validate_v4_outcome_batch
 
 
 class V4OutcomeContractTest(unittest.TestCase):
@@ -53,9 +54,7 @@ class V4OutcomeContractTest(unittest.TestCase):
             }
             payload["manifest_hash"] = replay.canonical_json_sha256(payload)
             path.write_text(json.dumps(payload), encoding="utf-8")
-            symbols, manifest_hash = load(
-                path, date(2023, 8, 8), date(2026, 8, 7)
-            )
+            symbols, manifest_hash = load(path, date(2023, 8, 8), date(2026, 8, 7))
             self.assertEqual(("600001.SH", "600002.SH"), symbols)
             self.assertEqual(payload["manifest_hash"], manifest_hash)
             payload["symbols"].append("600003.SH")
@@ -145,9 +144,7 @@ class V4OutcomeContractTest(unittest.TestCase):
         self.assertEqual(2, manifest["included_symbol_count"])
         self.assertEqual(1, manifest["excluded_symbol_count"])
         self.assertEqual(6666, manifest["capital_coverage_bps"])
-        self.assertEqual(
-            "sina_share_capital_unavailable", manifest["exclusion_reason"]
-        )
+        self.assertEqual("sina_share_capital_unavailable", manifest["exclusion_reason"])
         self.assertRegex(str(manifest["universe_symbols_hash"]), r"^[0-9a-f]{64}$")
         self.assertRegex(str(manifest["included_symbols_hash"]), r"^[0-9a-f]{64}$")
         self.assertRegex(str(manifest["excluded_symbols_hash"]), r"^[0-9a-f]{64}$")
@@ -296,7 +293,7 @@ class V4OutcomeContractTest(unittest.TestCase):
 
     def test_complete_outcome_includes_all_mainboard_and_market_cap_decile_benchmarks(self) -> None:
         signal_date = date(2026, 1, 1)
-        sessions = tuple(signal_date + timedelta(days=index) for index in range(1, 21))
+        sessions = tuple(signal_date + timedelta(days=index) for index in range(1, 26))
         candidate_bars = tuple(
             {
                 **_bar(day.isoformat(), 100_000, 102_000, 99_000, 101_000 + index * 1_000),
@@ -309,6 +306,7 @@ class V4OutcomeContractTest(unittest.TestCase):
                 **_bar(day.isoformat(), 100_000, 105_000, 99_000, 100_000 + symbol_index * 100),
                 "symbol": f"6000{symbol_index:02d}.SH",
                 "market_cap_fen": (symbol_index + 1) * 100,
+                "signal_market_cap_fen": (symbol_index + 1) * 100,
             }
             for day in sessions
             for symbol_index in range(10)
@@ -338,6 +336,180 @@ class V4OutcomeContractTest(unittest.TestCase):
         self.assertEqual({5, 10, 20}, set(benchmark["market_cap_decile_return_bps"]))
         self.assertEqual({5, 10, 20}, set(benchmark["market_cap_matched_excess_bps"]))
         self.assertEqual("complete", result["completeness_status"])
+
+    def test_confirmed_entry_requires_all_twenty_five_reserved_sessions(self) -> None:
+        signal_date = date(2026, 1, 1)
+        sessions = tuple(signal_date + timedelta(days=index) for index in range(1, 26))
+        rows = tuple(
+            {
+                **_bar(day.isoformat(), 100_000, 102_000, 99_000, 101_000),
+                "symbol": "600001.SH",
+                "market_cap_fen": 100,
+                "signal_market_cap_fen": 100,
+                "source": "tushare",
+            }
+            for day in sessions
+        )
+        candidate = {
+            "candidate_id": "candidate-confirmed",
+            "symbol": "600001.SH",
+            "trade_date": signal_date,
+            "market_cap_fen": 100,
+            "confirmation_condition": "close >= 100000",
+            "invalidation_condition": "close <= 90000",
+        }
+
+        incomplete = outcomes.evaluate_v4_candidate_outcomes(
+            candidates=(candidate,),
+            bars_by_symbol={"600001.SH": rows[:20]},
+            status_by_symbol={"600001.SH": {day.isoformat(): 1 for day in sessions[:20]}},
+            mainboard_bars=rows[:20],
+            source="tushare",
+            as_of=sessions[19],
+        )["candidate-confirmed"]
+        complete = outcomes.evaluate_v4_candidate_outcomes(
+            candidates=(candidate,),
+            bars_by_symbol={"600001.SH": rows},
+            status_by_symbol={"600001.SH": {day.isoformat(): 1 for day in sessions}},
+            mainboard_bars=rows,
+            source="tushare",
+            as_of=sessions[-1],
+        )["candidate-confirmed"]
+
+        self.assertEqual("incomplete", incomplete["completeness_status"])
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            validate_v4_outcome_batch(
+                candidates=(candidate,), outcomes={"candidate-confirmed": incomplete}
+            )
+        self.assertEqual("complete", complete["completeness_status"])
+        self.assertIsNotNone(complete["confirmed_next_open_path"]["gross_return_20d_bps"])
+        self.assertEqual(
+            10_000,
+            complete["confirmed_next_open_path"]["benchmark"]["completeness_rate_bps"],
+        )
+
+    def test_market_cap_cohort_is_frozen_at_signal_time(self) -> None:
+        signal_date = date(2026, 1, 1)
+        sessions = tuple(signal_date + timedelta(days=index) for index in range(1, 21))
+
+        def market_rows(future_cap: int) -> tuple[dict[str, object], ...]:
+            return tuple(
+                {
+                    **_bar(day.isoformat(), 100_000, 102_000, 99_000, 101_000 + position),
+                    "symbol": symbol,
+                    "market_cap_fen": future_cap if symbol == "600002.SH" else cap,
+                    "signal_market_cap_fen": cap,
+                    "source": "tushare",
+                }
+                for day in sessions
+                for position, (symbol, cap) in enumerate(
+                    (("600001.SH", 100), ("600002.SH", 200), ("600003.SH", 300))
+                )
+            )
+
+        candidate = {
+            "candidate_id": "candidate-pit-cap",
+            "symbol": "600002.SH",
+            "trade_date": signal_date,
+            "market_cap_fen": 200,
+            "confirmation_condition": "close >= 100000",
+            "invalidation_condition": "close <= 90000",
+        }
+        statuses = {"600002.SH": {day.isoformat(): 1 for day in sessions}}
+        candidate_rows = tuple(row for row in market_rows(200) if row["symbol"] == "600002.SH")
+        first = outcomes.evaluate_v4_candidate_outcomes(
+            candidates=(candidate,),
+            bars_by_symbol={"600002.SH": candidate_rows},
+            status_by_symbol=statuses,
+            mainboard_bars=market_rows(200),
+            source="tushare",
+            as_of=sessions[-1],
+        )["candidate-pit-cap"]["next_open_path"]["benchmark"]
+        second = outcomes.evaluate_v4_candidate_outcomes(
+            candidates=(candidate,),
+            bars_by_symbol={"600002.SH": candidate_rows},
+            status_by_symbol=statuses,
+            mainboard_bars=market_rows(20_000),
+            source="tushare",
+            as_of=sessions[-1],
+        )["candidate-pit-cap"]["next_open_path"]["benchmark"]
+        self.assertEqual(first, second)
+
+    def test_recorded_no_entry_terminal_stays_in_denominator_with_zero_return(self) -> None:
+        signal_date = date(2026, 1, 1)
+        sessions = tuple(signal_date + timedelta(days=index) for index in range(1, 26))
+        rows = tuple(
+            {
+                **_bar(day.isoformat(), 100_000, 100_000, 100_000, 100_000),
+                "symbol": "600001.SH",
+                "market_cap_fen": 100,
+                "signal_market_cap_fen": 100,
+                "source": "tushare",
+            }
+            for day in sessions
+        )
+        candidate = {
+            "candidate_id": "candidate-no-entry",
+            "symbol": "600001.SH",
+            "trade_date": signal_date,
+            "market_cap_fen": 100,
+            "confirmation_condition": "close >= 110000",
+            "invalidation_condition": "close <= 90000",
+        }
+        result = outcomes.evaluate_v4_candidate_outcomes(
+            candidates=(candidate,),
+            bars_by_symbol={"600001.SH": rows},
+            status_by_symbol={"600001.SH": {day.isoformat(): 0 for day in sessions}},
+            mainboard_bars=rows,
+            source="tushare",
+            as_of=sessions[-1],
+        )["candidate-no-entry"]
+
+        self.assertEqual("complete", result["completeness_status"])
+        self.assertEqual("unexecutable", result["next_open_path"]["status"])
+        self.assertEqual(0, result["next_open_path"]["gross_return_20d_bps"])
+        self.assertEqual(10_000, result["next_open_path"]["benchmark"]["completeness_rate_bps"])
+        validate_v4_outcome_batch(candidates=(candidate,), outcomes={"candidate-no-entry": result})
+
+    def test_corporate_action_chain_does_not_manufacture_an_invalidation(self) -> None:
+        signal_date = date(2026, 1, 1)
+        sessions = tuple(signal_date + timedelta(days=index) for index in range(1, 26))
+        rows = tuple(
+            {
+                **_bar(day.isoformat(), 90_000, 91_000, 89_000, 90_000),
+                "symbol": "600001.SH",
+                "pre_close_1e4": 90_000,
+                "signal_close_1e4": 100_000,
+                "signal_market_cap_fen": 100,
+                "source": "tushare",
+            }
+            for day in sessions
+        )
+        candidate = {
+            "candidate_id": "candidate-ex-right",
+            "symbol": "600001.SH",
+            "trade_date": signal_date,
+            "signal_close_1e4": 100_000,
+            "market_cap_fen": 100,
+            "confirmation_condition": "close >= 105000",
+            "invalidation_condition": "close <= 95000",
+        }
+
+        result = outcomes.evaluate_v4_candidate_outcomes(
+            candidates=(candidate,),
+            bars_by_symbol={"600001.SH": rows},
+            status_by_symbol={"600001.SH": {day.isoformat(): 1 for day in sessions}},
+            mainboard_bars=rows,
+            source="tushare",
+            as_of=sessions[-1],
+        )["candidate-ex-right"]
+
+        self.assertEqual("expired", result["confirmed_next_open_path"]["status"])
+        self.assertEqual(0, result["signal_close_path"]["gross_return_20d_bps"])
+        self.assertEqual(
+            0,
+            result["signal_close_path"]["benchmark"]["all_mainboard_return_bps"][20],
+        )
 
 
 def _bar(

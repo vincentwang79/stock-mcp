@@ -91,6 +91,18 @@ Schema v10 历史快照没有独立的 `daily_security_status` 表。升级后�
 推导 Schema 和批次哈希的 v11 不可变状态事实；该命令不联网、不扩充旧证券宇宙，
 遇到既有事实冲突时必须原子失败。
 
+旧快照未记录停牌证券，因此还必须运行联网、可断点续跑的
+`backfill-baostock-statuses`，按持久化交易日历保存完整 `tradeStatus=0/1` 状态。
+v4 manifest 门禁要求纳入证券逐日状态全覆盖；价格与状态双缺失不得推断为停牌。
+
 研究固定一条 v0.3-policy-1 基线及六个单因素 challenger，不做网格、组合赢家或自动调参。统计固定 20 会话圆形 moving-block bootstrap、10,000 次和 White Reality Check。没有 challenger 同时通过多重检验、CI、完整性、可执行率和新浪复制门禁时，合法结论是保留 v0.3。
 
-研究服务不得仅创建 `queued` 记录后永久搁置。完整逐日 worker、market-cap-matched benchmark、全终态 outcome、重启恢复和新浪复制门禁尚未可用时，`start_v4_research` 必须显式拒绝；读取接口仍可审计已经持久化的证据。该失败关闭行为不等于研究功能已通过验收。
+研究服务不得仅创建 `queued` 记录后永久搁置。当前逐日 worker 会在冻结 manifest 上按
+信号日、研究臂逐步持久化结果，并支持服务重启续跑；每步只读取本地 SQLite，不触发网络
+采集。候选日结果和 outcome 在同一事务写入，完成时数据库按 manifest 精确核对七臂信号
+日历和不可变统计证据。六个 challenger 必须在完整合格池上先执行单因素筛选或重排，再
+应用分形态配额，禁止只过滤 v0.3 已选出的前三名。
+
+主研究没有独立的 Sina 价格 replication 证据时，完整运行的合法终态仍是
+`retain_baseline`，不得生成 proposal。该状态表示主研究执行成功但胜出门禁未满足，不表示
+Sina replication、provider 资格、策略认证或激活已经完成。
