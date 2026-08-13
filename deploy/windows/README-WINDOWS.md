@@ -311,7 +311,10 @@ $runDir = (Get-Content (Join-Path $runRoot 'latest-run.txt') -Raw).Trim()
 
 `backfill-baostock-statuses` 随后按持久化 Tushare 交易日历逐日联网读取 BaoStock
 完整证券状态，明确保存 `tradeStatus=0` 停牌日。它使用持久 checkpoint，可安全重跑；
-manifest 门禁要求 3,046 只纳入证券在 727 日均有状态事实，未完成前拒绝生成研究
+逐日回填只要求 BaoStock 覆盖当天 Tushare 快照以及处于已记录快照生命周期内的证券；
+已经越过最后记录日期的退市或离场证券不再被错误要求出现在后续 BaoStock 清单中。
+若生命周期中间仍有缺失，命令会打印日期、缺失数量和最多 10 个代码样本并显式失败，
+不会猜成停牌。manifest 门禁要求 3,046 只纳入证券在其研究所需日期内均有状态事实，未完成前拒绝生成研究
 manifest，而不是把价格和状态双缺失猜成停牌。
 
 成功输出必须记录完整证券宇宙、纳入集、排除集、三组数量和 SHA-256、覆盖率、排除

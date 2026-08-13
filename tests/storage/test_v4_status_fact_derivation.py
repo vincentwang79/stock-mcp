@@ -161,6 +161,58 @@ class V4StatusFactDerivationTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(0, inferred)
 
+    def test_symbol_after_recorded_lifecycle_does_not_block_status_backfill(self) -> None:
+        class Result:
+            error_code = "0"
+            fields = ("code", "code_name", "tradeStatus")
+
+            def __init__(self) -> None:
+                self.rows = iter(
+                    (
+                        ("sh.600001", "one", "1"),
+                        ("sh.600002", "two", "1"),
+                    )
+                )
+                self.current: tuple[str, str, str] | None = None
+
+            def next(self) -> bool:
+                self.current = next(self.rows, None)
+                return self.current is not None
+
+            def get_row_data(self) -> tuple[str, str, str]:
+                assert self.current is not None
+                return self.current
+
+        class Client:
+            def query_all_stock(self, *, day: str) -> Result:
+                return Result()
+
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO market_snapshots VALUES"
+                "('2026-08-06','tushare','2026-08-06T08:00:00+00:00',5000,5000)"
+            )
+            connection.execute(
+                "INSERT INTO snapshot_securities VALUES"
+                "('2026-08-06','tushare','600003.SH','ended','SSE','MAIN',"
+                "'2000-01-01','fixture',0)"
+            )
+
+        report = backfill.backfill_baostock_daily_statuses(
+            database=self.database,
+            client=Client(),
+            sessions=(date(2026, 8, 7),),
+            source_timestamp="2026-08-07T08:00:00+00:00",
+            minimum_main_board_count=2,
+        )
+
+        self.assertEqual(2, report["rows"])
+        with self.database.connect() as connection:
+            inferred = connection.execute(
+                "SELECT COUNT(*) FROM daily_security_status WHERE symbol='600003.SH'"
+            ).fetchone()[0]
+        self.assertEqual(0, inferred)
+
     def test_unknown_trade_status_is_rejected_without_persisting_a_checkpoint(self) -> None:
         class Result:
             error_code = "0"

@@ -137,12 +137,18 @@ def backfill_baostock_daily_statuses(
                 str(row[0])
                 for row in connection.execute(
                     "SELECT symbol FROM snapshot_securities WHERE source='tushare' "
-                    "GROUP BY symbol HAVING MIN(list_date)<=?",
-                    (target.isoformat(),),
+                    "GROUP BY symbol HAVING MIN(list_date)<=? AND MAX(trade_date)>=?",
+                    (target.isoformat(), target.isoformat()),
                 )
             }
-        if lifecycle_symbols - normalized_symbols:
-            raise ValueError("BaoStock status day does not cover the recorded lifecycle universe")
+        missing_lifecycle_symbols = lifecycle_symbols - normalized_symbols
+        if missing_lifecycle_symbols:
+            sample = ",".join(sorted(missing_lifecycle_symbols)[:10])
+            raise ValueError(
+                "BaoStock status day does not cover the recorded lifecycle universe "
+                f"trade_date={target.isoformat()} missing_count="
+                f"{len(missing_lifecycle_symbols)} sample={sample}"
+            )
         database.save_baostock_status_batch(
             run_id=run_id,
             trade_date=target,

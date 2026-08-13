@@ -288,6 +288,27 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
                     for symbol in symbols
                 ),
             )
+            lifecycle_end = sessions[300].isoformat()
+            connection.execute(
+                "DELETE FROM snapshot_securities WHERE source='tushare' "
+                "AND symbol='600002.SH' AND trade_date>?",
+                (lifecycle_end,),
+            )
+            connection.execute(
+                "DELETE FROM daily_bars WHERE source='tushare' "
+                "AND symbol='600002.SH' AND trade_date>?",
+                (lifecycle_end,),
+            )
+            connection.execute(
+                "DELETE FROM daily_security_status WHERE source='baostock' "
+                "AND symbol='600002.SH' AND trade_date>?",
+                (lifecycle_end,),
+            )
+            connection.execute(
+                "DELETE FROM v3_snapshot_features WHERE source='tushare' "
+                "AND symbol='600002.SH' AND trade_date>?",
+                (lifecycle_end,),
+            )
 
         backfill = {
             "schema": "sina-backfill-manifest-v1",

@@ -696,10 +696,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             ).fetchone()[0]
             missing_status_rows = connection.execute(
                 "SELECT COUNT(*) FROM v4_manifest_included_symbols i "
-                "JOIN (SELECT symbol,MIN(list_date) list_date FROM snapshot_securities "
-                "WHERE source='tushare' GROUP BY symbol) life ON life.symbol=i.symbol "
+                "JOIN (SELECT symbol,MIN(list_date) list_date,MAX(trade_date) last_date "
+                "FROM snapshot_securities WHERE source='tushare' GROUP BY symbol) life "
+                "ON life.symbol=i.symbol "
                 "CROSS JOIN expected_trading_days e WHERE e.source='tushare' "
                 "AND e.trade_date BETWEEN ? AND ? AND e.trade_date>=life.list_date "
+                "AND e.trade_date<=life.last_date "
                 "AND NOT EXISTS ("
                 "SELECT 1 FROM daily_security_status s WHERE s.source='baostock' "
                 "AND s.symbol=i.symbol AND s.trade_date=e.trade_date)",
