@@ -77,7 +77,10 @@ class V4ResearchExecutorTest(unittest.TestCase):
         self.assertEqual([], repository.completed)
         self.assertEqual(1, len(repository.failed))
         self.assertEqual("study-1", repository.failed[0][0])
-        self.assertEqual("v4 research step failed (RuntimeError)", repository.failed[0][1])
+        self.assertEqual(
+            "v4 research step failed (RuntimeError): outcome unavailable",
+            repository.failed[0][1],
+        )
 
     def test_background_start_requeues_interrupted_work_before_running(self) -> None:
         repository = _Repository(claimed=None)

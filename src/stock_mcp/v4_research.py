@@ -972,9 +972,13 @@ class V4ResearchCoordinator:
             self._database.requeue_interrupted_v4_studies()
             raise
         except Exception as error:
+            message = str(error).strip()
+            summary = f"v4 research step failed ({type(error).__name__})"
+            if message:
+                summary = f"{summary}: {message}"[:512]
             self._database.fail_v4_study(
                 study_id=study_id,
-                error=f"v4 research step failed ({type(error).__name__})",
+                error=summary,
             )
         return True
 
