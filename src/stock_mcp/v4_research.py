@@ -580,9 +580,17 @@ def _prior_limit_up_count(
     for bar in item.prior_bars[-20:]:
         facts = limit_facts_by_date.get(bar.trade_date)
         if not isinstance(facts, Mapping):
-            raise ValueError("v4 prior price-limit evidence is incomplete")
-        fact = facts.get(item.security.symbol) if isinstance(facts, Mapping) else None
-        if isinstance(fact, Mapping) and fact.get("touched_up"):
+            raise ValueError(
+                "v4 prior price-limit evidence is incomplete for "
+                f"{item.security.symbol} on {bar.trade_date.isoformat()}"
+            )
+        fact = facts.get(item.security.symbol)
+        if not isinstance(fact, Mapping):
+            raise ValueError(
+                "v4 prior price-limit evidence is incomplete for "
+                f"{item.security.symbol} on {bar.trade_date.isoformat()}"
+            )
+        if fact.get("touched_up"):
             count += 1
     return count
 
@@ -590,7 +598,12 @@ def _prior_limit_up_count(
 def _restrict_v4_market(market: V3MarketInput, included: set[str]) -> V3MarketInput:
     """Apply the frozen manifest universe before any v4 score or rank is computed."""
 
-    securities = tuple(item for item in market.securities if item.security.symbol in included)
+    securities = tuple(
+        item
+        for item in market.securities
+        if item.security.symbol in included
+        and tuple(bar.trade_date for bar in item.prior_bars) == market.prior_dates
+    )
     if not securities:
         raise ValueError("v4 manifest screening universe is empty on the signal date")
     industries = {

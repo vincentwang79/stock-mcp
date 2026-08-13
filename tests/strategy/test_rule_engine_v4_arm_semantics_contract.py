@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from datetime import timedelta
 
 from stock_mcp import v3, v4
-from stock_mcp.v4_research import _restrict_v4_market
+from stock_mcp.v4_research import _prior_limit_up_count, _restrict_v4_market
 from tests.strategy.test_rule_engine_v3_contract import (
     _breakout_input,
     _market,
@@ -39,6 +40,36 @@ def _generate_v4_review(
 
 
 class V4ArmSemanticsContractTest(unittest.TestCase):
+    def test_prior_limit_evidence_requires_the_symbol_fact_for_each_bar_date(self) -> None:
+        item = _breakout_input(self, "600499.SH")
+        facts = {bar.trade_date: {} for bar in item.prior_bars[-20:]}
+
+        with self.assertRaisesRegex(
+            ValueError,
+            rf"600499\.SH.*{item.prior_bars[-20].trade_date.isoformat()}",
+        ):
+            _prior_limit_up_count(item, facts)
+
+    def test_restriction_excludes_a_symbol_with_non_contiguous_market_history(self) -> None:
+        complete = _breakout_input(self, "600500.SH")
+        first = complete.prior_bars[0]
+        discontinuous = replace(
+            _breakout_input(self, "600501.SH"),
+            prior_bars=(
+                replace(first, symbol="600501.SH", trade_date=first.trade_date - timedelta(days=1)),
+                *_breakout_input(self, "600501.SH").prior_bars[1:],
+            ),
+        )
+        market = _market(self, (complete, discontinuous))
+
+        restricted = _restrict_v4_market(
+            market, {item.security.symbol for item in market.securities}
+        )
+
+        self.assertEqual(
+            ("600500.SH",), tuple(item.security.symbol for item in restricted.securities)
+        )
+
     def test_current_breadth_uses_the_same_mainboard_non_st_listing_eligibility(self) -> None:
         eligible = _breakout_input(self, "600501.SH")
         st_inputs = tuple(
