@@ -362,13 +362,16 @@ def _terminal_report(
     replications: list[object] = []
     rates: dict[str, tuple[int, int]] = {}
     completeness_by_arm: dict[str, bool] = {}
+    completed_days_by_arm: dict[str, tuple[bool, ...]] = {}
     for arm_id in _V4_ARM_IDS:
         days = days_by_arm[arm_id]
         if tuple(str(day["signal_date"]) for day in days) != expected:
             raise ValueError("v4 study signal-day calendar is incomplete")
         results = tuple(dict(day["result"]) for day in days)
-        completeness = all(item.get("completeness_status") == "complete" for item in results)
+        completed_days = tuple(item.get("completeness_status") == "complete" for item in results)
+        completeness = all(completed_days)
         completeness_by_arm[arm_id] = completeness
+        completed_days_by_arm[arm_id] = completed_days
         complete = complete and completeness
         returns[arm_id] = tuple(int(item["daily_primary_metric_bps"]) for item in results)
         selected = tuple(
@@ -393,8 +396,9 @@ def _terminal_report(
     baseline_executable, baseline_unexecutable = rates[_V4_ARM_IDS[0]]
     for arm_id in _V4_ARM_IDS:
         executable_rate, unexecutable_rate = rates[arm_id]
+        completed_days = completed_days_by_arm[arm_id]
         metadata[arm_id] = {
-            "completeness_rate_bps": 10_000 if completeness_by_arm[arm_id] else 0,
+            "completeness_rate_bps": _completion_rate_bps(completed_days),
             "executable_rate_bps": executable_rate,
             "executable_rate_delta_bps": executable_rate - baseline_executable,
             "unexecutable_rate_delta_bps": unexecutable_rate - baseline_unexecutable,
@@ -419,12 +423,17 @@ def _terminal_report(
             "winner": {"eligible": False, "arm_id": None, "decision": "retain_baseline"},
         }
     winner = dict(statistics["winner"])
+    completed_signal_days = tuple(
+        all(completed_days_by_arm[arm_id][index] for arm_id in _V4_ARM_IDS)
+        for index in range(len(signal_dates))
+    )
+    completion_rate_bps = _completion_rate_bps(completed_signal_days)
     report = {
         "schema": "v4-statistics-v1",
         "manifest_hash": manifest_hash,
         "completeness_status": "complete" if complete else "incomplete",
-        "outcome_completeness_rate_bps": 10_000 if complete else 0,
-        "benchmark_completeness_rate_bps": 10_000 if complete else 0,
+        "outcome_completeness_rate_bps": completion_rate_bps,
+        "benchmark_completeness_rate_bps": completion_rate_bps,
         "sina_replication_complete": bool(statistics.get("sina_replication_complete")),
         "winner": winner,
         "retain_version": "v0.3-policy-1" if not winner.get("eligible") else None,
@@ -434,6 +443,12 @@ def _terminal_report(
         "statistics_hash": _canonical_hash(statistics),
     }
     return report, statistics
+
+
+def _completion_rate_bps(completed_days: tuple[bool, ...]) -> int:
+    if not completed_days:
+        raise ValueError("v4 study has no signal days")
+    return sum(completed_days) * 10_000 // len(completed_days)
 
 
 def _consistent_replication(values: list[object]) -> Mapping[str, object] | None:

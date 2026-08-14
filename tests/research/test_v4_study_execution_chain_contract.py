@@ -91,6 +91,45 @@ class V4StudyExecutionChainContractTest(unittest.TestCase):
         self.assertIsNone(report["winner"]["arm_id"])
         self.assertEqual([], report["proposals"])
 
+    def test_terminal_report_exposes_the_actual_incomplete_day_rate(self) -> None:
+        """One bad day must not be reported as though every day were bad."""
+
+        sessions = (date(2026, 4, 1), date(2026, 4, 2))
+        days_by_arm = {
+            arm_id: tuple(
+                {
+                    "signal_date": day.isoformat(),
+                    "result": {
+                        "daily_primary_metric_bps": 0,
+                        "completeness_status": (
+                            "incomplete"
+                            if arm_id == "v0.3-policy-1" and day == sessions[-1]
+                            else "complete"
+                        ),
+                        "candidate_outcomes": {},
+                        "replication_evidence": None,
+                    },
+                }
+                for day in sessions
+            )
+            for arm_id in _ARMS
+        }
+
+        report, statistics = v4_research._terminal_report(  # noqa: SLF001
+            manifest_hash="a" * 64,
+            signal_dates=sessions,
+            days_by_arm=days_by_arm,
+        )
+
+        self.assertEqual("incomplete", report["completeness_status"])
+        self.assertEqual(5_000, report["outcome_completeness_rate_bps"])
+        self.assertEqual(5_000, report["benchmark_completeness_rate_bps"])
+        self.assertEqual(10_000, statistics["arms"]["v4-trend-quality"]["completeness_rate_bps"])
+        self.assertEqual(
+            {"eligible": False, "arm_id": None, "decision": "retain_baseline"},
+            report["winner"],
+        )
+
     def test_missing_replication_evidence_retains_baseline_in_a_deterministic_report(self) -> None:
         first_repository = _StudyRepository()
         second_repository = _StudyRepository()
