@@ -49,6 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=(
             "doctor",
             "inspect-database",
+            "derive-v4-study-report",
             "migrate",
             "backup",
             "restore",
@@ -83,6 +84,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--through", type=date.fromisoformat)
     parser.add_argument("--dataset-hash")
     parser.add_argument("--qualification-id")
+    parser.add_argument("--study-id")
     parser.add_argument("--capability", action="append", default=[])
     args = parser.parse_args(argv)
     settings = Settings.load(root=args.root)
@@ -128,6 +130,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         print(json.dumps(report, ensure_ascii=False))
         return 0 if report["integrity"] == "ok" else 2
+
+    if args.command == "derive-v4-study-report":
+        if not args.study_id or args.destination is None:
+            parser.error("derive-v4-study-report requires --study-id and --destination")
+        from .storage import Database
+        from .v4_research import derive_v4_study_amendment
+
+        amendment = derive_v4_study_amendment(
+            Database(settings.database_path),
+            source_study_id=args.study_id,
+        )
+        args.destination.parent.mkdir(parents=True, exist_ok=True)
+        args.destination.write_text(
+            json.dumps(amendment, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "derived",
+                    "source_study_id": args.study_id,
+                    "destination": str(args.destination),
+                    "amendment_hash": amendment["amendment_hash"],
+                    "corrected_outcome_count": amendment["corrected_outcome_count"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     if args.command == "backup":
         from .backup import BackupManager

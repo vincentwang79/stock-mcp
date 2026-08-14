@@ -102,6 +102,60 @@ class V4ExecutionEvidenceContractTest(unittest.TestCase):
             ),
         )
 
+    def test_seven_arm_signal_day_batch_is_one_atomic_write(self) -> None:
+        second_arm = {
+            "arm_id": "challenger",
+            "parameters": {"rule_engine_version": 3},
+            "parameters_hash": "c" * 64,
+            "parent_version": "v0.3-policy-1",
+            "change": "fixed challenger",
+        }
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO v4_study_arms(study_id,arm_id,parameters_json,parameters_hash,"
+                "parent_version,unique_difference,status) VALUES (?,?,?,?,?,?,?)",
+                (
+                    self.study["study_id"],
+                    second_arm["arm_id"],
+                    json.dumps(second_arm["parameters"], sort_keys=True, separators=(",", ":")),
+                    second_arm["parameters_hash"],
+                    second_arm["parent_version"],
+                    json.dumps(second_arm["change"], sort_keys=True, separators=(",", ":")),
+                    "queued",
+                ),
+            )
+            connection.execute(
+                "CREATE TRIGGER reject_challenger_day BEFORE INSERT ON v4_study_days "
+                "WHEN NEW.arm_id='challenger' BEGIN SELECT RAISE(ABORT, 'fixture'); END"
+            )
+
+        steps = tuple(
+            {
+                "kind": "day",
+                "arm_id": arm_id,
+                "signal_date": "2026-08-03",
+                "result": {"candidates": [], "candidate_outcomes": {}},
+            }
+            for arm_id in ("baseline", "challenger")
+        )
+        save_batch = getattr(self.database, "save_v4_study_steps", None)
+        self.assertTrue(callable(save_batch), "one signal day must persist as one atomic batch")
+        if not callable(save_batch):
+            return
+        with self.assertRaises(sqlite3.IntegrityError):
+            save_batch(study_id=self.study["study_id"], steps=steps)
+
+        for arm_id in ("baseline", "challenger"):
+            self.assertEqual(
+                (),
+                self.database.list_v4_study_days(
+                    study_id=self.study["study_id"],
+                    arm_id=arm_id,
+                    after_signal_date=None,
+                    limit=10,
+                ),
+            )
+
     def test_same_manifest_arm_day_and_evidence_have_identical_hashes_across_studies(self) -> None:
         step = {
             "kind": "day",

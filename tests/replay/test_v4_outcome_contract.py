@@ -514,6 +514,11 @@ class V4OutcomeContractTest(unittest.TestCase):
         confirmed = result["confirmed_next_open_path"]
         self.assertEqual("confirmed", confirmed["status"])
         self.assertEqual("unexecutable", confirmed["execution_status"])
+        self.assertIsNone(confirmed["entry_date"])
+        self.assertEqual(
+            "entry_expired_before_20_session_horizon",
+            confirmed["execution_terminal_reason"],
+        )
         self.assertEqual(0, confirmed["gross_return_20d_bps"])
         self.assertEqual("complete", result["completeness_status"])
         validate_v4_outcome_batch(

@@ -324,9 +324,20 @@ manifest，而不是把价格和状态双缺失猜成停牌。
 任一集合、计数或哈希都必须生成新的 manifest，不能改写旧研究。
 
 v4 逐日研究 worker 和查询 DTO 已接入。`start_v4_research` 只接受已持久化且完整的
-`v4-study-manifest.json`；它创建可恢复作业，不访问新浪或其他实时端点。worker 每步只处理
-一个信号日/研究臂，在盘后窗口让路；Windows 服务重启后从最早缺失步骤续跑。候选日与
-outcome 原子写入，终态必须通过七臂精确日历和统计证据门禁。
+`v4-study-manifest.json`；它创建可恢复作业，不访问新浪或其他实时端点。worker 以一个
+信号日为工作单元，共享七臂的市场输入并只计算一次重复候选 outcome；同日缺失的研究臂
+在一个事务中原子写入。在盘后窗口让路；Windows 服务重启后从最早缺失信号日续跑。终态
+必须通过七臂精确日历和统计证据门禁。
+
+旧研究因已修正的报告终态规则而显示不完整时，不要重跑行情研究。可从不可变逐日结果
+生成独立、只读、带来源哈希的修订报告；命令不会修改原研究或 SQLite：
+
+```powershell
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  derive-v4-study-report --root E:\StockMcp `
+  --study-id <已完成的 study_id> `
+  --destination E:\StockMcp\state\v4-study-amendment.json
+```
 
 在没有独立、完整的 Sina 价格 replication artifact 时，正常研究报告应为保留 v0.3、
 winner 不合格、proposal 为空。不得把研究完成描述为 Sina replication、provider 资格、

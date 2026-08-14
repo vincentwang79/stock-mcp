@@ -20,6 +20,7 @@ from stock_mcp.v4_research import (
     SQLiteV4StudyDataLoader,
     V4ResearchCoordinator,
     V4StudyExecutor,
+    derive_v4_study_amendment,
 )
 
 _ARMS = (
@@ -87,6 +88,11 @@ class V4LocalSqliteE2ETest(unittest.TestCase):
             first_run = database.get_v4_study_run(study_id)
             assert first_run is not None
             self.assertEqual("running", first_run["status"], first_run["error"])
+            first_progress = database.get_v4_study_progress(study_id=study_id)
+            self.assertEqual(
+                {arm_id: 1 for arm_id in _ARMS},
+                {arm_id: int(item["completed_count"]) for arm_id, item in first_progress.items()},
+            )
             self.assertEqual(1, database.requeue_interrupted_v4_studies())
 
             restarted = V4ResearchCoordinator(
@@ -100,7 +106,9 @@ class V4LocalSqliteE2ETest(unittest.TestCase):
                 "load_share_capital_fact",
                 side_effect=AssertionError("v4 execution must bulk-load share capital"),
             ):
-                for _ in range(len(_ARMS) * len(signal_dates)):
+                # The first signal date was saved above. Each remaining date is
+                # one seven-arm batch, followed by one terminal report step.
+                for _ in range(len(signal_dates)):
                     self.assertTrue(restarted.run_next_step())
 
             run = database.get_v4_study_run(study_id)
@@ -149,6 +157,11 @@ class V4LocalSqliteE2ETest(unittest.TestCase):
             self.assertTrue(readback["ok"])
             self.assertEqual(report, readback["data"])
 
+            amendment = derive_v4_study_amendment(database, source_study_id=study_id)
+            self.assertEqual(0, amendment["corrected_outcome_count"])
+            self.assertEqual(report, amendment["report"])
+            self.assertEqual(run, database.get_v4_study_run(study_id))
+
             second_database, second_manifest_hash, _ = _seed_fixed_v11_database(
                 Path(directory) / "repeat"
             )
@@ -163,6 +176,39 @@ class V4LocalSqliteE2ETest(unittest.TestCase):
             self.assertEqual(manifest_hash, polluted_manifest_hash)
             self.assertEqual(run["result_hash"], polluted["result_hash"])
             self.assertEqual(report, polluted["report"])
+
+    def test_one_signal_day_reuses_outcome_evaluation_across_all_seven_arms(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, manifest_hash, signal_dates = _seed_fixed_v11_database(Path(directory))
+            loader = SQLiteV4StudyDataLoader(database)
+            load_batch = getattr(loader, "load_v4_signal_evidence_batch", None)
+            self.assertTrue(callable(load_batch), "production loader must expose a seven-arm batch")
+            if not callable(load_batch):
+                return
+            with patch(
+                "stock_mcp.v4_research.evaluate_v4_candidate_outcomes",
+                wraps=__import__(
+                    "stock_mcp.v4_research", fromlist=["evaluate_v4_candidate_outcomes"]
+                ).evaluate_v4_candidate_outcomes,
+            ) as evaluate:
+                evidence = load_batch(
+                    manifest_hash=manifest_hash,
+                    signal_date=signal_dates[0],
+                    arm_ids=_ARMS,
+                )
+
+            self.assertEqual(set(_ARMS), set(evidence))
+            self.assertEqual(1, evaluate.call_count)
+            legacy_loader = SQLiteV4StudyDataLoader(database)
+            individually = {
+                arm_id: legacy_loader.load_v4_signal_evidence(
+                    manifest_hash=manifest_hash,
+                    signal_date=signal_dates[0],
+                    arm_id=arm_id,
+                )
+                for arm_id in _ARMS
+            }
+            self.assertEqual(individually, evidence)
 
     def test_recorded_suspension_without_a_bar_is_kept_as_a_zero_return_peer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

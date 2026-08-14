@@ -63,6 +63,18 @@ class V4StudyExecutionChainContractTest(unittest.TestCase):
             self.assertIn("daily_primary_metric_bps", result)
             self.assertEqual("complete", result["completeness_status"])
 
+    def test_batches_all_missing_arms_for_one_signal_date(self) -> None:
+        repository = _StudyRepository()
+        loader = _BatchStudyDataLoader()
+        coordinator = self._coordinator(repository, loader)
+
+        self.assertTrue(coordinator.run_next_step())
+
+        self.assertEqual(1, loader.batch_calls)
+        self.assertEqual(0, loader.individual_calls)
+        self.assertEqual(1, repository.batch_writes)
+        self.assertEqual(list(_ARMS), [str(step["arm_id"]) for step in repository.saved_steps])
+
     def test_reserves_the_final_twenty_five_sessions_for_outcomes_not_signals(self) -> None:
         repository = _StudyRepository()
         loader = _FixedStudyDataLoader()
@@ -216,6 +228,7 @@ class _StudyRepository:
         self.completed_reports: list[dict[str, object]] = []
         self.saved_statistics: list[dict[str, object]] = []
         self.day_result_reads = 0
+        self.batch_writes = 0
 
     def claim_next_v4_study(self) -> dict[str, object] | None:
         if self.completed_reports:
@@ -233,6 +246,11 @@ class _StudyRepository:
             copied = _copy_step(step)
             self.persisted_days[key] = copied
             self.saved_steps.append(copied)
+
+    def save_v4_study_steps(self, *, study_id: str, steps: tuple[dict[str, object], ...]) -> None:
+        self.batch_writes += 1
+        for step in steps:
+            self.save_v4_study_step(study_id=study_id, step=step)
 
     def complete_v4_study(self, *, study_id: str, report: dict[str, object]) -> None:
         assert study_id == self.study["study_id"]
@@ -333,6 +351,37 @@ class _FixedStudyDataLoader:
             "daily_primary_metric_bps": 0,
             "completeness_status": self.completeness_status,
             "replication_evidence": self.replication_evidence,
+        }
+
+
+class _BatchStudyDataLoader(_FixedStudyDataLoader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_calls = 0
+        self.individual_calls = 0
+
+    def load_v4_signal_evidence(
+        self, *, manifest_hash: str, signal_date: date, arm_id: str
+    ) -> dict[str, object]:
+        self.individual_calls += 1
+        return super().load_v4_signal_evidence(
+            manifest_hash=manifest_hash,
+            signal_date=signal_date,
+            arm_id=arm_id,
+        )
+
+    def load_v4_signal_evidence_batch(
+        self, *, manifest_hash: str, signal_date: date, arm_ids: tuple[str, ...]
+    ) -> dict[str, dict[str, object]]:
+        self.batch_calls += 1
+        return {
+            arm_id: _FixedStudyDataLoader.load_v4_signal_evidence(
+                self,
+                manifest_hash=manifest_hash,
+                signal_date=signal_date,
+                arm_id=arm_id,
+            )
+            for arm_id in arm_ids
         }
 
 

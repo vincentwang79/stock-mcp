@@ -40,6 +40,10 @@ class V4ResearchRepository(Protocol):
 
     def save_v4_study_step(self, *, study_id: str, step: dict[str, object]) -> None: ...
 
+    def save_v4_study_steps(
+        self, *, study_id: str, steps: tuple[dict[str, object], ...]
+    ) -> None: ...
+
     def complete_v4_study(self, *, study_id: str, report: dict[str, object]) -> None: ...
 
     def fail_v4_study(self, *, study_id: str, error: str) -> None: ...
@@ -106,9 +110,37 @@ class V4StudyExecutor:
             if last != expected_last:
                 raise ValueError("v4 study progress contains a gap")
         for index, signal_date in enumerate(signal_dates):
-            for arm_id in _V4_ARM_IDS:
-                if int(progress[arm_id]["completed_count"]) > index:
-                    continue
+            missing_arms = tuple(
+                arm_id
+                for arm_id in _V4_ARM_IDS
+                if int(progress[arm_id]["completed_count"]) <= index
+            )
+            if not missing_arms:
+                continue
+            load_batch = getattr(self._data_loader, "load_v4_signal_evidence_batch", None)
+            if callable(load_batch):
+                evidence_by_arm = load_batch(
+                    manifest_hash=manifest_hash,
+                    signal_date=signal_date,
+                    arm_ids=missing_arms,
+                )
+                if not isinstance(evidence_by_arm, Mapping) or set(evidence_by_arm) != set(
+                    missing_arms
+                ):
+                    raise ValueError("v4 study day batch is incomplete")
+                steps = tuple(
+                    {
+                        "kind": "day",
+                        "signal_date": signal_date.isoformat(),
+                        "arm_id": arm_id,
+                        "result": _validated_day_result(
+                            dict(evidence_by_arm[arm_id]), source=str(manifest["source"])
+                        ),
+                    }
+                    for arm_id in missing_arms
+                )
+                return {"steps": steps, "complete": False}
+            for arm_id in missing_arms:
                 evidence = dict(
                     self._data_loader.load_v4_signal_evidence(
                         manifest_hash=manifest_hash,
@@ -168,56 +200,95 @@ class SQLiteV4StudyDataLoader:
     def load_v4_signal_evidence(
         self, *, manifest_hash: str, signal_date: date, arm_id: str
     ) -> dict[str, object]:
+        return self.load_v4_signal_evidence_batch(
+            manifest_hash=manifest_hash,
+            signal_date=signal_date,
+            arm_ids=(arm_id,),
+        )[arm_id]
+
+    def load_v4_signal_evidence_batch(
+        self, *, manifest_hash: str, signal_date: date, arm_ids: tuple[str, ...]
+    ) -> dict[str, dict[str, object]]:
+        """Evaluate all requested arms from one frozen signal-day input.
+
+        Candidate execution outcomes are arm-independent.  The batch therefore
+        evaluates each unique candidate once and projects the immutable result
+        back into every arm that selected it.
+        """
+
+        if not arm_ids or len(set(arm_ids)) != len(arm_ids):
+            raise ValueError("v4 arm batch is empty or contains duplicates")
         self._verify_manifest_evidence(manifest_hash)
         key = (manifest_hash, signal_date)
         common = self._cache.get(key)
         if common is None:
             common = self._load_common(manifest_hash, signal_date)
             self._cache[key] = common
-        review = generate_v4_daily_review(
-            market=common["market"],
-            strategy=common["strategy"],
-            prior_four_breadth=common["prior_four_breadth"],
-            arm_id=arm_id,
-            features=common["features"],
-        )
-        candidates = tuple(
-            _candidate_payload(
-                candidate,
-                signal_date,
-                common["features"].get(candidate.symbol, {}),
+        candidates_by_arm: dict[str, tuple[dict[str, object], ...]] = {}
+        unique_candidates: dict[str, dict[str, object]] = {}
+        projections: dict[str, tuple[object, ...]] = {}
+        for arm_id in arm_ids:
+            review = generate_v4_daily_review(
+                market=common["market"],
+                strategy=common["strategy"],
+                prior_four_breadth=common["prior_four_breadth"],
+                arm_id=arm_id,
+                features=common["features"],
             )
-            for candidate in review.candidates
-        )
-        outcomes = evaluate_v4_candidate_outcomes(
-            candidates=candidates,
+            candidates = tuple(
+                _candidate_payload(
+                    candidate,
+                    signal_date,
+                    common["features"].get(candidate.symbol, {}),
+                )
+                for candidate in review.candidates
+            )
+            candidates_by_arm[arm_id] = candidates
+            for candidate in candidates:
+                candidate_id = str(candidate["candidate_id"])
+                projection = _outcome_candidate_projection(candidate)
+                if candidate_id in projections and projections[candidate_id] != projection:
+                    raise ValueError("v4 candidate outcome inputs conflict across arms")
+                projections[candidate_id] = projection
+                unique_candidates.setdefault(candidate_id, candidate)
+        all_outcomes = evaluate_v4_candidate_outcomes(
+            candidates=tuple(unique_candidates.values()),
             bars_by_symbol=common["bars_by_symbol"],
             status_by_symbol=common["status_by_symbol"],
             mainboard_bars=common["mainboard_bars"],
             source="tushare",
             as_of=common["outcome_through"],
         )
-        try:
-            validate_v4_outcome_batch(candidates=candidates, outcomes=outcomes)
-            complete = True
-        except ValueError:
-            complete = False
-        try:
-            metric = v4_daily_primary_metric_bps(outcomes=outcomes, candidate_count=len(candidates))
-        except ValueError:
-            complete = False
-            metric = 0
-        return {
-            "source": "tushare",
-            "source_timestamp": common["source_timestamp"],
-            "candidates": candidates,
-            "candidate_outcomes": outcomes,
-            "daily_primary_metric_bps": metric,
-            "completeness_status": "complete" if complete else "incomplete",
-            # The primary Tushare study cannot manufacture its own independent
-            # Sina replication evidence. That remains a separate persisted gate.
-            "replication_evidence": None,
-        }
+        evidence_by_arm: dict[str, dict[str, object]] = {}
+        for arm_id, candidates in candidates_by_arm.items():
+            outcomes = {
+                str(candidate["candidate_id"]): all_outcomes[str(candidate["candidate_id"])]
+                for candidate in candidates
+            }
+            try:
+                validate_v4_outcome_batch(candidates=candidates, outcomes=outcomes)
+                complete = True
+            except ValueError:
+                complete = False
+            try:
+                metric = v4_daily_primary_metric_bps(
+                    outcomes=outcomes, candidate_count=len(candidates)
+                )
+            except ValueError:
+                complete = False
+                metric = 0
+            evidence_by_arm[arm_id] = {
+                "source": "tushare",
+                "source_timestamp": common["source_timestamp"],
+                "candidates": candidates,
+                "candidate_outcomes": outcomes,
+                "daily_primary_metric_bps": metric,
+                "completeness_status": "complete" if complete else "incomplete",
+                # The primary Tushare study cannot manufacture its own independent
+                # Sina replication evidence. That remains a separate persisted gate.
+                "replication_evidence": None,
+            }
+        return evidence_by_arm
 
     def _verify_manifest_evidence(self, manifest_hash: str) -> dict[str, object]:
         manifest = self._database.get_v4_dataset_manifest(manifest_hash)
@@ -445,6 +516,157 @@ def _terminal_report(
     return report, statistics
 
 
+def derive_v4_study_amendment(repository: Any, *, source_study_id: str) -> dict[str, object]:
+    """Derive a corrected report from immutable persisted v4 day evidence.
+
+    This is intentionally read-only.  It never rewrites the source study and
+    only recognizes the narrowly frozen confirmed-entry expiry correction.
+    Any other incomplete evidence remains a hard failure.
+    """
+
+    run = repository.get_v4_study_run(source_study_id)
+    if not isinstance(run, Mapping) or run.get("status") != "completed":
+        raise ValueError("v4 amendment requires a completed source study")
+    manifest_hash = str(run.get("manifest_hash", ""))
+    manifest = repository.get_v4_dataset_manifest(manifest_hash)
+    _validate_study_manifest(manifest, manifest_hash)
+    assert manifest is not None
+    sessions = tuple(date.fromisoformat(str(item)) for item in manifest["sessions"])
+    signal_dates = sessions[60:-25]
+    arms = tuple(str(item["arm_id"]) for item in repository.list_v4_study_arms(source_study_id))
+    if set(arms) != set(_V4_ARM_IDS) or len(arms) != len(_V4_ARM_IDS):
+        raise ValueError("v4 amendment requires the frozen seven research arms")
+
+    corrections: list[dict[str, object]] = []
+    source_day_hashes: list[dict[str, str]] = []
+    amended_days: dict[str, tuple[dict[str, object], ...]] = {}
+    for arm_id in _V4_ARM_IDS:
+        source_days = repository.list_v4_study_days(
+            study_id=source_study_id,
+            arm_id=arm_id,
+            after_signal_date=None,
+            limit=len(signal_dates) + 1,
+        )
+        values: list[dict[str, object]] = []
+        for source_day in source_days:
+            signal_date = str(source_day["signal_date"])
+            source_day_hashes.append(
+                {
+                    "arm_id": arm_id,
+                    "signal_date": signal_date,
+                    "result_hash": str(source_day["result_hash"]),
+                }
+            )
+            result = json.loads(
+                json.dumps(source_day["result"], ensure_ascii=False, sort_keys=True)
+            )
+            day_corrections = _amend_v4_confirmed_entry_expiry(
+                result,
+                arm_id=arm_id,
+                signal_date=signal_date,
+            )
+            corrections.extend(day_corrections)
+            values.append({"signal_date": signal_date, "result": result})
+        amended_days[arm_id] = tuple(values)
+
+    unexpected = tuple(
+        (arm_id, str(day["signal_date"]))
+        for arm_id, days in amended_days.items()
+        for day in days
+        if day["result"].get("completeness_status") != "complete"  # type: ignore[union-attr]
+    )
+    if unexpected:
+        raise ValueError("v4 amendment found unsupported incomplete evidence")
+    report, statistics = _terminal_report(
+        manifest_hash=manifest_hash,
+        signal_dates=signal_dates,
+        days_by_arm=amended_days,
+    )
+    amendment: dict[str, object] = {
+        "schema": "v4-study-amendment-v1",
+        "policy": "confirmed-entry-expiry-v1",
+        "source_study_id": source_study_id,
+        "source_result_hash": str(run.get("result_hash", "")),
+        "source_days_hash": _canonical_hash(source_day_hashes),
+        "manifest_hash": manifest_hash,
+        "corrected_day_count": len({(item["arm_id"], item["signal_date"]) for item in corrections}),
+        "corrected_outcome_count": len(corrections),
+        "corrections": corrections,
+        "report": report,
+        "statistics": statistics,
+    }
+    amendment["amendment_hash"] = _canonical_hash(amendment)
+    return amendment
+
+
+def _amend_v4_confirmed_entry_expiry(
+    result: dict[str, object], *, arm_id: str, signal_date: str
+) -> tuple[dict[str, object], ...]:
+    outcomes = result.get("candidate_outcomes")
+    if not isinstance(outcomes, dict):
+        raise ValueError("v4 amendment candidate outcomes are missing")
+    corrections: list[dict[str, object]] = []
+    for candidate_id, outcome in outcomes.items():
+        if not isinstance(outcome, dict) or outcome.get("completeness_status") == "complete":
+            continue
+        signal_path = outcome.get("signal_close_path")
+        next_path = outcome.get("next_open_path")
+        confirmed = outcome.get("confirmed_next_open_path")
+        benchmark = next_path.get("benchmark") if isinstance(next_path, dict) else None
+        supported = (
+            outcome.get("schema") == "v4-outcome-v2"
+            and outcome.get("calendar_complete") is True
+            and isinstance(signal_path, dict)
+            and signal_path.get("status") == "available"
+            and isinstance(next_path, dict)
+            and next_path.get("status") in {"available", "unexecutable"}
+            and isinstance(benchmark, dict)
+            and benchmark.get("completeness_rate_bps") == 10_000
+            and isinstance(confirmed, dict)
+            and confirmed.get("status") == "confirmed"
+            and confirmed.get("execution_status") in {"partial", "unavailable"}
+            and isinstance(confirmed.get("entry_date"), str)
+            and confirmed.get("gross_return_20d_bps") is None
+        )
+        if not supported:
+            continue
+        original_entry_date = confirmed.get("entry_date")
+        original_execution_status = str(confirmed.get("execution_status"))
+        confirmed.update(
+            {
+                "status": "confirmed",
+                "execution_status": "unexecutable",
+                "entry_date": None,
+                "gross_return_5d_bps": 0,
+                "gross_return_10d_bps": 0,
+                "gross_return_20d_bps": 0,
+                "net_return_bps_by_cost": {
+                    str(cost): {"5": 0, "10": 0, "20": 0} for cost in (10, 25, 50)
+                },
+                "mfe_20d_bps": 0,
+                "mae_20d_bps": 0,
+                "execution_terminal_reason": "entry_expired_before_20_session_horizon",
+                "first_late_executable_date": original_entry_date,
+            }
+        )
+        outcome["completeness_status"] = "complete"
+        corrections.append(
+            {
+                "arm_id": arm_id,
+                "signal_date": signal_date,
+                "candidate_id": str(candidate_id),
+                "original_execution_status": original_execution_status,
+                "terminal_status": "unexecutable",
+            }
+        )
+    if all(
+        isinstance(outcome, dict) and outcome.get("completeness_status") == "complete"
+        for outcome in outcomes.values()
+    ):
+        result["completeness_status"] = "complete"
+    return tuple(corrections)
+
+
 def _completion_rate_bps(completed_days: tuple[bool, ...]) -> int:
     if not completed_days:
         raise ValueError("v4 study has no signal days")
@@ -535,6 +757,23 @@ def _candidate_payload(
         "market_cap_fen": facts.get("market_cap_fen"),
         "signal_close_1e4": facts.get("signal_close_1e4"),
     }
+
+
+def _outcome_candidate_projection(candidate: Mapping[str, object]) -> tuple[object, ...]:
+    """Return exactly the fields that can change v4 outcome evaluation."""
+
+    return tuple(
+        candidate.get(name)
+        for name in (
+            "candidate_id",
+            "symbol",
+            "trade_date",
+            "confirmation_condition",
+            "invalidation_condition",
+            "market_cap_fen",
+            "signal_close_1e4",
+        )
+    )
 
 
 def _v4_features(
@@ -983,10 +1222,27 @@ class V4ResearchCoordinator:
         try:
             result = self._step_executor(study)
             step = result.get("step")
+            steps = result.get("steps")
             complete = result.get("complete")
-            if not isinstance(step, Mapping) or not isinstance(complete, bool):
+            has_step = isinstance(step, Mapping)
+            has_steps = (
+                isinstance(steps, (tuple, list))
+                and bool(steps)
+                and all(isinstance(item, Mapping) for item in steps)
+            )
+            if has_step == has_steps or not isinstance(complete, bool):
                 raise ValueError("v4 study step result is invalid")
-            self._database.save_v4_study_step(study_id=study_id, step=dict(step))
+            if has_steps:
+                batch = tuple(dict(item) for item in steps)
+                save_batch = getattr(self._database, "save_v4_study_steps", None)
+                if callable(save_batch):
+                    save_batch(study_id=study_id, steps=batch)
+                else:
+                    for item in batch:
+                        self._database.save_v4_study_step(study_id=study_id, step=item)
+            else:
+                assert isinstance(step, Mapping)
+                self._database.save_v4_study_step(study_id=study_id, step=dict(step))
             if complete:
                 statistics = result.get("statistics")
                 save_statistics = getattr(self._database, "save_v4_study_statistics", None)

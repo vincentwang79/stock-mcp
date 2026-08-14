@@ -114,6 +114,12 @@ def evaluate_v4_candidate_outcomes(
             observed_rows=post,
             expected_dates=expected_dates,
         )
+        confirmed_terminal_reason = None
+        first_late_executable_date = None
+        if confirmed_path["status"] == "unexecutable" and confirmed_entry is not None:
+            first_late_executable_date = confirmed_entry
+            confirmed_entry = None
+            confirmed_terminal_reason = "entry_expired_before_20_session_horizon"
         market_cap = candidate.get("market_cap_fen")
         signal_path["benchmark"] = _benchmark_path(
             mainboard_by_symbol,
@@ -152,6 +158,12 @@ def evaluate_v4_candidate_outcomes(
                 "execution_status": confirmed_path["status"],
                 "event_date": None if event_date is None else event_date.isoformat(),
                 "entry_date": None if confirmed_entry is None else confirmed_entry.isoformat(),
+                "execution_terminal_reason": confirmed_terminal_reason,
+                "first_late_executable_date": (
+                    None
+                    if first_late_executable_date is None
+                    else first_late_executable_date.isoformat()
+                ),
             },
             "benchmark_schema": BENCHMARK_SCHEMA,
             "calendar_complete": calendar_complete,

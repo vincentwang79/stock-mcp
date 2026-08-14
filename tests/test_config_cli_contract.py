@@ -154,6 +154,42 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual(11, json.loads(completed.stdout)["schema"])
 
+    def test_cli_writes_a_read_only_v4_study_amendment(self) -> None:
+        destination = self.root / "state" / "v4-amendment.json"
+        amendment = {
+            "schema": "v4-study-amendment-v1",
+            "source_study_id": "study-source",
+            "amendment_hash": "a" * 64,
+            "corrected_outcome_count": 4,
+        }
+        output = StringIO()
+
+        with (
+            patch(
+                "stock_mcp.v4_research.derive_v4_study_amendment",
+                return_value=amendment,
+            ),
+            redirect_stdout(output),
+        ):
+            try:
+                exit_code = main(
+                    [
+                        "derive-v4-study-report",
+                        "--root",
+                        str(self.root),
+                        "--study-id",
+                        "study-source",
+                        "--destination",
+                        str(destination),
+                    ]
+                )
+            except SystemExit:
+                self.fail("stock-mcp CLI does not expose the v4 amendment command")
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(amendment, json.loads(destination.read_text(encoding="utf-8")))
+        self.assertIn(str(destination), output.getvalue())
+
     def test_cli_runs_a_bounded_resumable_historical_backfill(self) -> None:
         config = self.root / "config"
         config.mkdir(parents=True)

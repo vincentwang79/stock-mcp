@@ -70,8 +70,8 @@ Schema v11 增加只读 `get_provider_qualification`，以及必须消费主机�
 v4 研究公开 `start_v4_research`、`get_v4_research`、`get_v4_research_arms`、
 `get_v4_research_days` 和 `get_v4_research_report`。读取接口不写数据库；启动前必须存在完整
 不可变 manifest，否则返回 `v4_research_rejected` 且不留排队作业。受理后后台 worker 每步
-处理一个信号日/研究臂，16:20–18:10 为盘后任务让路，服务重启从最早缺失步骤续跑，且
-绝不联网采集。查询返回的是已持久化进度和证据，不会在读取请求中重算。
+批量处理一个信号日的七个研究臂，16:20–18:10 为盘后任务让路，服务重启从最早缺失信号日
+续跑，且绝不联网采集。查询返回的是已持久化进度和证据，不会在读取请求中重算。
 
 主 Tushare 研究完成但没有独立 Sina replication 时，报告必须明确保留 v0.3、winner
 不合格、proposal 为空。研究接口不会直接写 `strategy_versions`，也不会认证、批准或激活

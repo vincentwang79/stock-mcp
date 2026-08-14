@@ -1576,13 +1576,47 @@ class Database:
         return self._v4_study_run_from_row(claimed)
 
     def save_v4_study_step(self, *, study_id: str, step: dict[str, object]) -> None:
-        """Persist one immutable, typed research step.
+        """Persist one immutable, typed research step."""
 
-        Only the daily-result step is accepted until the complete v4 outcome and
-        statistics executor is wired.  Rejecting unknown shapes prevents a
-        partial worker from manufacturing apparent progress.
+        self.save_v4_study_steps(study_id=study_id, steps=(step,))
+
+    def save_v4_study_steps(self, *, study_id: str, steps: Iterable[dict[str, object]]) -> None:
+        """Atomically persist all arm results for one signal-day work unit.
+
+        Repeated identical rows are idempotent.  Any invalid or conflicting row
+        rolls back the entire batch so a restart cannot observe a partially
+        published seven-arm signal day.
         """
 
+        batch = tuple(steps)
+        if not batch:
+            raise ValueError("v4 study step batch is empty")
+        signal_dates = {str(step.get("signal_date", "")) for step in batch}
+        arm_ids = {str(step.get("arm_id", "")) for step in batch}
+        if len(signal_dates) != 1 or len(arm_ids) != len(batch):
+            raise ValueError("v4 study step batch must contain one date and unique arms")
+        with self._idempotent_write_connection() as connection:
+            run = connection.execute(
+                "SELECT status,manifest_hash FROM v4_study_runs WHERE study_id = ?", (study_id,)
+            ).fetchone()
+            if run is None or str(run[0]) != "running":
+                raise ValueError("v4 study is not running")
+            for step in batch:
+                self._save_v4_study_step(
+                    connection,
+                    study_id=study_id,
+                    manifest_hash=str(run[1]),
+                    step=step,
+                )
+
+    def _save_v4_study_step(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        study_id: str,
+        manifest_hash: str,
+        step: dict[str, object],
+    ) -> None:
         if step.get("kind") != "day":
             raise ValueError("unsupported v4 study step kind")
         arm_id = str(step.get("arm_id", ""))
@@ -1595,50 +1629,44 @@ class Database:
         except ValueError as error:
             raise ValueError("v4 signal_date is invalid") from error
         encoded = self._jsonable_json(result)
-        with self._idempotent_write_connection() as connection:
-            run = connection.execute(
-                "SELECT status,manifest_hash FROM v4_study_runs WHERE study_id = ?", (study_id,)
-            ).fetchone()
-            if run is None or str(run[0]) != "running":
-                raise ValueError("v4 study is not running")
-            result_hash = hashlib.sha256(
-                self._json(
-                    {
-                        "schema": "v4-result-v1",
-                        "manifest_hash": str(run[1]),
-                        "arm_id": arm_id,
-                        "signal_date": signal_date,
-                        "result": self._jsonable(result),
-                    }
-                ).encode()
-            ).hexdigest()
-            if (
-                connection.execute(
-                    "SELECT 1 FROM v4_study_arms WHERE study_id = ? AND arm_id = ?",
-                    (study_id, arm_id),
-                ).fetchone()
-                is None
-            ):
-                raise ValueError("unknown v4 study arm")
-            existing = connection.execute(
-                "SELECT result_json, result_hash FROM v4_study_days "
-                "WHERE study_id = ? AND arm_id = ? AND signal_date = ?",
-                (study_id, arm_id, signal_date),
-            ).fetchone()
-            if existing is not None:
-                if str(existing[0]) != encoded or str(existing[1]) != result_hash:
-                    raise ValueError("immutable v4 study day conflict")
-                return
+        result_hash = hashlib.sha256(
+            self._json(
+                {
+                    "schema": "v4-result-v1",
+                    "manifest_hash": manifest_hash,
+                    "arm_id": arm_id,
+                    "signal_date": signal_date,
+                    "result": self._jsonable(result),
+                }
+            ).encode()
+        ).hexdigest()
+        if (
             connection.execute(
-                "INSERT INTO v4_study_days(study_id, arm_id, signal_date, result_json, "
-                "result_hash) VALUES (?, ?, ?, ?, ?)",
-                (study_id, arm_id, signal_date, encoded, result_hash),
+                "SELECT 1 FROM v4_study_arms WHERE study_id = ? AND arm_id = ?",
+                (study_id, arm_id),
+            ).fetchone()
+            is None
+        ):
+            raise ValueError("unknown v4 study arm")
+        existing = connection.execute(
+            "SELECT result_json, result_hash FROM v4_study_days "
+            "WHERE study_id = ? AND arm_id = ? AND signal_date = ?",
+            (study_id, arm_id, signal_date),
+        ).fetchone()
+        if existing is not None:
+            if str(existing[0]) != encoded or str(existing[1]) != result_hash:
+                raise ValueError("immutable v4 study day conflict")
+            return
+        connection.execute(
+            "INSERT INTO v4_study_days(study_id, arm_id, signal_date, result_json, "
+            "result_hash) VALUES (?, ?, ?, ?, ?)",
+            (study_id, arm_id, signal_date, encoded, result_hash),
+        )
+        outcomes = result.get("candidate_outcomes")
+        if isinstance(outcomes, dict):
+            self._save_v4_candidate_outcomes(
+                connection, study_id=study_id, arm_id=arm_id, outcomes=outcomes
             )
-            outcomes = result.get("candidate_outcomes")
-            if isinstance(outcomes, dict):
-                self._save_v4_candidate_outcomes(
-                    connection, study_id=study_id, arm_id=arm_id, outcomes=outcomes
-                )
 
     def complete_v4_study(self, *, study_id: str, report: dict[str, object]) -> None:
         """Commit an immutable terminal report for a running study."""
