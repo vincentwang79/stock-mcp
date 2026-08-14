@@ -51,6 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "inspect-database",
             "derive-v4-study-report",
             "derive-v4-study-diagnostics",
+            "initialize-research-program",
             "migrate",
             "backup",
             "restore",
@@ -105,6 +106,42 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         Database(settings.database_path).initialize()
         print("stock-mcp: database ready")
+        return 0
+
+    if args.command == "initialize-research-program":
+        from .research_program import (
+            first_batch_hypotheses,
+            v4_discovery_trials_from_diagnostic,
+        )
+        from .storage import Database
+
+        database = Database(settings.database_path)
+        database.initialize()
+        hypotheses = first_batch_hypotheses(registered_at=datetime(2026, 8, 14, tzinfo=UTC))
+        database.register_research_hypotheses(hypotheses)
+        trial_count = 0
+        if args.study_id:
+            from .v4_research import derive_v4_study_diagnostics
+
+            diagnostic = derive_v4_study_diagnostics(database, source_study_id=args.study_id)
+            trials = v4_discovery_trials_from_diagnostic(
+                diagnostic,
+                recorded_at=datetime(2026, 8, 14, tzinfo=UTC),
+            )
+            for trial in trials:
+                database.save_research_trial(trial)
+            trial_count = len(trials)
+        print(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "schema": 12,
+                    "hypothesis_count": len(hypotheses),
+                    "trial_count": trial_count,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
 
     if args.command == "inspect-database":

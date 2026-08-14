@@ -29,7 +29,7 @@ from stock_mcp.domain import (
     StrategyVersion,
 )
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class IdempotencyKeyReuseError(ValueError):
@@ -55,6 +55,10 @@ class Database:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         return connection
+
+    def schema_version(self) -> int:
+        with self.connect() as connection:
+            return int(connection.execute("PRAGMA user_version").fetchone()[0])
 
     def initialize(self) -> None:
         if self.path.exists():
@@ -4322,6 +4326,336 @@ class Database:
             "certified": certified,
         }
 
+    def register_research_hypotheses(self, hypotheses: Iterable[dict[str, object]]) -> int:
+        """Register immutable, versioned research definitions."""
+
+        records = tuple(dict(item) for item in hypotheses)
+        with self._idempotent_write_connection() as connection:
+            for record in records:
+                required = (
+                    "hypothesis_id",
+                    "family",
+                    "title",
+                    "mechanism",
+                    "formula",
+                    "data_requirements",
+                    "status",
+                    "sample_role",
+                    "registered_at",
+                )
+                if any(record.get(field) in (None, "") for field in required):
+                    raise ValueError("research hypothesis definition is incomplete")
+                formula_json = self._json(record["formula"])
+                requirements_json = self._json(record["data_requirements"])
+                canonical = {field: self._jsonable(record.get(field)) for field in required}
+                canonical["frozen_after"] = self._iso(record.get("frozen_after"))
+                definition_hash = hashlib.sha256(self._json(canonical).encode("utf-8")).hexdigest()
+                self._immutable_insert(
+                    connection,
+                    "research_hypotheses",
+                    "hypothesis_id",
+                    str(record["hypothesis_id"]),
+                    (
+                        "family",
+                        "title",
+                        "mechanism",
+                        "formula_json",
+                        "data_requirements_json",
+                        "status",
+                        "sample_role",
+                        "frozen_after",
+                        "definition_hash",
+                        "registered_at",
+                    ),
+                    (
+                        str(record["family"]),
+                        str(record["title"]),
+                        str(record["mechanism"]),
+                        formula_json,
+                        requirements_json,
+                        str(record["status"]),
+                        str(record["sample_role"]),
+                        self._iso(record.get("frozen_after")),
+                        definition_hash,
+                        self._iso(record["registered_at"]),
+                    ),
+                )
+        return len(records)
+
+    def get_research_hypothesis(self, hypothesis_id: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT hypothesis_id, family, title, mechanism, formula_json,
+                       data_requirements_json, status, sample_role, frozen_after,
+                       definition_hash, registered_at
+                FROM research_hypotheses WHERE hypothesis_id = ?
+                """,
+                (hypothesis_id,),
+            ).fetchone()
+        return None if row is None else self._research_hypothesis_from_row(row)
+
+    def list_research_hypotheses(
+        self, *, family: str | None = None, status: str | None = None
+    ) -> tuple[dict[str, object], ...]:
+        conditions: list[str] = []
+        parameters: list[object] = []
+        if family is not None:
+            conditions.append("family = ?")
+            parameters.append(family)
+        if status is not None:
+            conditions.append("status = ?")
+            parameters.append(status)
+        where = "" if not conditions else " WHERE " + " AND ".join(conditions)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT hypothesis_id, family, title, mechanism, formula_json,
+                       data_requirements_json, status, sample_role, frozen_after,
+                       definition_hash, registered_at
+                FROM research_hypotheses
+                """
+                + where
+                + " ORDER BY hypothesis_id",
+                tuple(parameters),
+            ).fetchall()
+        return tuple(self._research_hypothesis_from_row(row) for row in rows)
+
+    def save_research_trial(self, trial: dict[str, object]) -> None:
+        required = (
+            "trial_id",
+            "hypothesis_id",
+            "manifest_hash",
+            "sample_role",
+            "status",
+            "result",
+            "result_hash",
+            "created_at",
+        )
+        if any(trial.get(field) in (None, "") for field in required):
+            raise ValueError("research trial is incomplete")
+        self._validate_research_hash(trial["manifest_hash"], "manifest")
+        self._validate_research_hash(trial["result_hash"], "result")
+        with self._idempotent_write_connection() as connection:
+            self._immutable_insert(
+                connection,
+                "research_trials",
+                "trial_id",
+                str(trial["trial_id"]),
+                (
+                    "hypothesis_id",
+                    "manifest_hash",
+                    "sample_role",
+                    "status",
+                    "result_json",
+                    "result_hash",
+                    "created_at",
+                    "completed_at",
+                ),
+                (
+                    str(trial["hypothesis_id"]),
+                    str(trial["manifest_hash"]),
+                    str(trial["sample_role"]),
+                    str(trial["status"]),
+                    self._json(trial["result"]),
+                    str(trial["result_hash"]),
+                    self._iso(trial["created_at"]),
+                    self._iso(trial.get("completed_at")),
+                ),
+            )
+
+    def list_research_trials(
+        self, *, hypothesis_id: str | None = None
+    ) -> tuple[dict[str, object], ...]:
+        query = """
+            SELECT trial_id, hypothesis_id, manifest_hash, sample_role, status,
+                   result_json, result_hash, created_at, completed_at
+            FROM research_trials
+        """
+        parameters: tuple[object, ...] = ()
+        if hypothesis_id is not None:
+            query += " WHERE hypothesis_id = ?"
+            parameters = (hypothesis_id,)
+        query += " ORDER BY created_at, trial_id"
+        with self.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return tuple(
+            {
+                "trial_id": str(row[0]),
+                "hypothesis_id": str(row[1]),
+                "manifest_hash": str(row[2]),
+                "sample_role": str(row[3]),
+                "status": str(row[4]),
+                "result": json.loads(str(row[5])),
+                "result_hash": str(row[6]),
+                "created_at": datetime.fromisoformat(str(row[7])),
+                "completed_at": None if row[8] is None else datetime.fromisoformat(str(row[8])),
+            }
+            for row in rows
+        )
+
+    def save_research_forward_observation(self, observation: dict[str, object]) -> None:
+        required = (
+            "hypothesis_id",
+            "trade_date",
+            "input_hash",
+            "result_hash",
+            "observation",
+            "recorded_at",
+        )
+        if any(observation.get(field) in (None, "") for field in required):
+            raise ValueError("forward research observation is incomplete")
+        self._validate_research_hash(observation["input_hash"], "input")
+        self._validate_research_hash(observation["result_hash"], "result")
+        trade_date = self._iso(observation["trade_date"])
+        with self._idempotent_write_connection() as connection:
+            hypothesis = connection.execute(
+                "SELECT frozen_after FROM research_hypotheses WHERE hypothesis_id = ?",
+                (str(observation["hypothesis_id"]),),
+            ).fetchone()
+            if hypothesis is None:
+                raise ValueError("forward research hypothesis does not exist")
+            if hypothesis[0] is not None and trade_date <= str(hypothesis[0]):
+                raise ValueError("forward observation must be after the frozen discovery sample")
+            self._immutable_composite_insert(
+                connection,
+                "research_forward_observations",
+                ("hypothesis_id", "trade_date"),
+                (str(observation["hypothesis_id"]), trade_date),
+                ("input_hash", "result_hash", "observation_json", "recorded_at"),
+                (
+                    str(observation["input_hash"]),
+                    str(observation["result_hash"]),
+                    self._json(observation["observation"]),
+                    self._iso(observation["recorded_at"]),
+                ),
+            )
+
+    def list_research_forward_observations(
+        self, *, hypothesis_id: str
+    ) -> tuple[dict[str, object], ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT hypothesis_id, trade_date, input_hash, result_hash,
+                       observation_json, recorded_at
+                FROM research_forward_observations
+                WHERE hypothesis_id = ? ORDER BY trade_date
+                """,
+                (hypothesis_id,),
+            ).fetchall()
+        return tuple(
+            {
+                "hypothesis_id": str(row[0]),
+                "trade_date": str(row[1]),
+                "input_hash": str(row[2]),
+                "result_hash": str(row[3]),
+                "observation": json.loads(str(row[4])),
+                "recorded_at": datetime.fromisoformat(str(row[5])),
+            }
+            for row in rows
+        )
+
+    def save_point_in_time_fundamentals(self, facts: Iterable[dict[str, object]]) -> int:
+        records = tuple(dict(item) for item in facts)
+        with self._idempotent_write_connection() as connection:
+            for record in records:
+                required = (
+                    "symbol",
+                    "interface",
+                    "report_period",
+                    "visible_date",
+                    "revision_key",
+                    "source",
+                    "payload",
+                    "payload_hash",
+                    "source_timestamp",
+                )
+                if any(record.get(field) in (None, "") for field in required):
+                    raise ValueError("point-in-time fundamental fact is incomplete")
+                self._validate_research_hash(record["payload_hash"], "payload")
+                self._immutable_composite_insert(
+                    connection,
+                    "point_in_time_fundamentals",
+                    (
+                        "symbol",
+                        "interface",
+                        "report_period",
+                        "visible_date",
+                        "revision_key",
+                        "source",
+                    ),
+                    (
+                        str(record["symbol"]),
+                        str(record["interface"]),
+                        self._iso(record["report_period"]),
+                        self._iso(record["visible_date"]),
+                        str(record["revision_key"]),
+                        str(record["source"]),
+                    ),
+                    ("payload_json", "payload_hash", "source_timestamp"),
+                    (
+                        self._json(record["payload"]),
+                        str(record["payload_hash"]),
+                        self._iso(record["source_timestamp"]),
+                    ),
+                )
+        return len(records)
+
+    def load_point_in_time_fundamentals(
+        self, *, symbol: str, as_of: date, source: str = "tushare"
+    ) -> tuple[dict[str, object], ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT symbol, interface, report_period, visible_date, revision_key,
+                       source, payload_json, payload_hash, source_timestamp
+                FROM point_in_time_fundamentals
+                WHERE symbol = ? AND source = ? AND visible_date <= ?
+                ORDER BY interface, report_period, visible_date DESC, revision_key DESC
+                """,
+                (symbol, source, as_of.isoformat()),
+            ).fetchall()
+        latest: dict[tuple[str, str], tuple[object, ...]] = {}
+        for row in rows:
+            latest.setdefault((str(row[1]), str(row[2])), row)
+        return tuple(
+            {
+                "symbol": str(row[0]),
+                "interface": str(row[1]),
+                "report_period": date.fromisoformat(str(row[2])),
+                "visible_date": date.fromisoformat(str(row[3])),
+                "revision_key": str(row[4]),
+                "source": str(row[5]),
+                "payload": json.loads(str(row[6])),
+                "payload_hash": str(row[7]),
+                "source_timestamp": datetime.fromisoformat(str(row[8])),
+            }
+            for row in latest.values()
+        )
+
+    @staticmethod
+    def _validate_research_hash(value: object, label: str) -> None:
+        text = str(value)
+        if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+            raise ValueError(f"research {label} hash must be lowercase SHA-256")
+
+    @staticmethod
+    def _research_hypothesis_from_row(row: tuple[object, ...]) -> dict[str, object]:
+        return {
+            "hypothesis_id": str(row[0]),
+            "family": str(row[1]),
+            "title": str(row[2]),
+            "mechanism": str(row[3]),
+            "formula": json.loads(str(row[4])),
+            "data_requirements": json.loads(str(row[5])),
+            "status": str(row[6]),
+            "sample_role": str(row[7]),
+            "frozen_after": None if row[8] is None else str(row[8]),
+            "definition_hash": str(row[9]),
+            "registered_at": datetime.fromisoformat(str(row[10])),
+        }
+
     def _migrate(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version > SCHEMA_VERSION:
@@ -4684,6 +5018,66 @@ class Database:
                     artifact_json TEXT NOT NULL, created_at TEXT NOT NULL
                 );
                 PRAGMA user_version = 11;
+                """
+            )
+        if version < 12:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS research_hypotheses (
+                    hypothesis_id TEXT PRIMARY KEY,
+                    family TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    mechanism TEXT NOT NULL,
+                    formula_json TEXT NOT NULL,
+                    data_requirements_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    sample_role TEXT NOT NULL,
+                    frozen_after TEXT,
+                    definition_hash TEXT NOT NULL,
+                    registered_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS research_trials (
+                    trial_id TEXT PRIMARY KEY,
+                    hypothesis_id TEXT NOT NULL,
+                    manifest_hash TEXT NOT NULL,
+                    sample_role TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY(hypothesis_id) REFERENCES research_hypotheses(hypothesis_id)
+                );
+                CREATE INDEX IF NOT EXISTS research_trials_hypothesis_idx
+                    ON research_trials(hypothesis_id, created_at);
+                CREATE TABLE IF NOT EXISTS research_forward_observations (
+                    hypothesis_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    observation_json TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY(hypothesis_id, trade_date),
+                    FOREIGN KEY(hypothesis_id) REFERENCES research_hypotheses(hypothesis_id)
+                );
+                CREATE TABLE IF NOT EXISTS point_in_time_fundamentals (
+                    symbol TEXT NOT NULL,
+                    interface TEXT NOT NULL,
+                    report_period TEXT NOT NULL,
+                    visible_date TEXT NOT NULL,
+                    revision_key TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    source_timestamp TEXT NOT NULL,
+                    PRIMARY KEY(
+                        symbol, interface, report_period, visible_date,
+                        revision_key, source
+                    )
+                );
+                CREATE INDEX IF NOT EXISTS point_in_time_fundamentals_visible_idx
+                    ON point_in_time_fundamentals(symbol, source, visible_date);
+                PRAGMA user_version = 12;
                 """
             )
 

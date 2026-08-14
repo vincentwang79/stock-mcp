@@ -175,6 +175,15 @@ class ActivateProviderSourceInput(_IdempotentWrite):
     confirmed: bool
 
 
+class ListResearchHypothesesInput(_Dto):
+    family: str | None = Field(default=None, min_length=1, max_length=100)
+    status: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class GetResearchHypothesisInput(_Dto):
+    hypothesis_id: str = Field(min_length=1, max_length=160)
+
+
 class ToolError(_Dto):
     code: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=1_000)
@@ -655,6 +664,8 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         ),
         ("get_provider_qualification", GetProviderQualificationInput, True, False, False),
         ("activate_provider_source", ActivateProviderSourceInput, False, True, False),
+        ("list_research_hypotheses", ListResearchHypothesesInput, True, False, False),
+        ("get_research_hypothesis", GetResearchHypothesisInput, True, False, False),
     )
     output_models: dict[str, type[_Dto]] = {
         "get_daily_review": GetDailyReviewResult,
@@ -685,6 +696,8 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         "get_v4_research_diagnostics": V4ResearchResult,
         "get_provider_qualification": ProviderQualificationResult,
         "activate_provider_source": ProviderQualificationResult,
+        "list_research_hypotheses": V4ResearchResult,
+        "get_research_hypothesis": V4ResearchResult,
     }
     return tuple(
         ToolDefinition(

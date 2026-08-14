@@ -19,3 +19,4 @@
 2. `02-strategy-replay.md`：市场状态、策略筛选、回放与版本治理。
 3. `03-mcp-workflow.md`：MCP 工具、观察列表、候选事件与复盘。
 4. `04-windows-release.md`：Windows 发布、Tunnel、备份、升级与诊断。
+5. `05-research-program-v5.md`：跨机制研究、终身试验账本、点时事实与独立验证。

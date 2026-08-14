@@ -167,6 +167,34 @@ class StockMcpApplication:
         # repository remains responsible for membership and idempotency.
         self._watchlist_order: dict[str, list[str]] = {}
 
+    def list_research_hypotheses(
+        self, *, family: str | None = None, status: str | None = None
+    ) -> Result:
+        hypotheses = self._repository.list_research_hypotheses(family=family, status=status)
+        trials = self._repository.list_research_trials()
+        return _ok(
+            {
+                "hypotheses": [dict(item) for item in hypotheses],
+                "lifetime_trial_count": len(trials),
+            }
+        )
+
+    def get_research_hypothesis(self, *, hypothesis_id: str) -> Result:
+        hypothesis = self._repository.get_research_hypothesis(hypothesis_id)
+        if hypothesis is None:
+            return _error("research_hypothesis_not_found", "research hypothesis does not exist")
+        trials = self._repository.list_research_trials(hypothesis_id=hypothesis_id)
+        observations = self._repository.list_research_forward_observations(
+            hypothesis_id=hypothesis_id
+        )
+        return _ok(
+            {
+                "hypothesis": dict(hypothesis),
+                "trials": [dict(item) for item in trials],
+                "forward_observations": [dict(item) for item in observations],
+            }
+        )
+
     def start_v4_research(self, *, manifest_hash: str, idempotency_key: str) -> Result:
         coordinator = getattr(self, "_v4_research", None)
         if coordinator is None:

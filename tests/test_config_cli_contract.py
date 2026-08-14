@@ -130,10 +130,52 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
 
         self.assertEqual(0, exit_code)
         report = json.loads(output.getvalue())
-        self.assertEqual(11, report["schema"])
+        self.assertEqual(12, report["schema"])
         self.assertEqual("ok", report["integrity"])
         self.assertEqual(0, report["tushare_days"])
         self.assertEqual(0, report["tushare_rows"])
+
+    def test_cli_imports_existing_v4_diagnostic_into_lifetime_ledger(self) -> None:
+        arms = {
+            f"v4-{name}": {"eligibility": {"eligible": False}}
+            for name in (
+                "breadth-five-day-median",
+                "breakout-overextension-cap",
+                "no-recent-limit-up",
+                "signal-quality-rank",
+                "size-bottom-30pct-filter",
+                "trend-quality",
+            )
+        }
+        diagnostic = {
+            "schema": "v4-study-diagnostic-v1",
+            "source_study_id": "v4-study-fixed",
+            "manifest_hash": "a" * 64,
+            "source_result_hash": "b" * 64,
+            "diagnostic_hash": "c" * 64,
+            "arms": {"v0.3-policy-1": {}, **arms},
+        }
+        with patch(
+            "stock_mcp.v4_research.derive_v4_study_diagnostics",
+            return_value=diagnostic,
+        ):
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "initialize-research-program",
+                        "--root",
+                        str(self.root),
+                        "--study-id",
+                        "v4-study-fixed",
+                    ]
+                ),
+            )
+        from stock_mcp.storage import Database
+
+        database = Database(self.root / "data" / "stock-mcp.sqlite3")
+        self.assertEqual(11, len(database.list_research_hypotheses()))
+        self.assertEqual(6, len(database.list_research_trials()))
 
     def test_standalone_database_inspector_works_before_source_install(self) -> None:
         self.assertEqual(0, main(["migrate", "--root", str(self.root)]))
@@ -152,7 +194,7 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual(11, json.loads(completed.stdout)["schema"])
+        self.assertEqual(12, json.loads(completed.stdout)["schema"])
 
     def test_cli_writes_a_read_only_v4_study_amendment(self) -> None:
         destination = self.root / "state" / "v4-amendment.json"

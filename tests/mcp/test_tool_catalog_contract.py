@@ -36,6 +36,8 @@ EXPECTED_TOOL_NAMES = frozenset(
         "get_v4_research_diagnostics",
         "get_provider_qualification",
         "activate_provider_source",
+        "list_research_hypotheses",
+        "get_research_hypothesis",
     }
 )
 
@@ -58,6 +60,8 @@ READ_TOOL_NAMES = frozenset(
         "get_v4_research_report",
         "get_v4_research_diagnostics",
         "get_provider_qualification",
+        "list_research_hypotheses",
+        "get_research_hypothesis",
     }
 )
 WRITE_TOOL_NAMES = EXPECTED_TOOL_NAMES - READ_TOOL_NAMES

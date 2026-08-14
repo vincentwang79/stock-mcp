@@ -1,0 +1,118 @@
+# Research Program v5：跨机制研究与独立验证
+
+## 目标与非目标
+
+Research Program v5 扩大沪深主板候选研究范围，但不把“测试更多规则”误当作能力提升。
+它首先建立不可删除的终身试验账本，再把探索、独立确认、跨源复制和策略治理分开。
+
+- 当前 `v0.3-policy-1` 保持不变；`retain_baseline` 不表示基线本身优秀。
+- `no-recent-limit-up-v1` 冻结为待独立验证假设，不是策略 proposal。
+- `2023-08-08` 至 `2026-08-07` 已用于假设选择，标记为
+  `discovery_exhausted`，不得重新包装为样本外证据。
+- 本计划不创建、认证、批准或激活任何新策略，不接入交易、账户、仓位或盘中监控。
+
+## 研究依据
+
+在线研究显示，中国 A 股的价值、规模和盈利能力具有相对明确的研究基础，而传统价格
+动量并不能直接从成熟市场移植。大规模 A 股异常复现中，多数候选变量未产生显著价差，
+因此所有失败与未通过项目也必须永久计入试验次数。
+
+主要参考：
+
+- [Replicating and Digesting Anomalies in the Chinese A-share Market](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4365416)
+- [Anomalies in Chinese A-Shares](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2955144)
+- [Size and Value in China](https://hub.hku.hk/handle/10722/273695)
+- [Q-theory, Mispricing, and Profitability Premium: Evidence from China](https://doi.org/10.1016/j.jbankfin.2017.10.001)
+- [Investor attention, aggregate limit-hits, and stock returns](https://doi.org/10.1016/j.irfa.2022.102142)
+- [A Reality Check for Data Snooping](https://doi.org/10.1111/1468-0262.00152)
+- [Stepwise Multiple Testing as Formalized Data Snooping](https://doi.org/10.1111/j.1468-0262.2005.00615.x)
+
+## 四层证据
+
+1. **探索**：可以使用已耗尽的三年数据理解方向、机制和数据质量；不能晋级。
+2. **独立确认**：只能使用以后取得的更长历史，或从 `2026-08-08` 开始积累的冻结前向
+   数据。结果窗口重叠时必须 purge/embargo。
+3. **跨源复制**：使用完整同源 Sina 价格验证数据源稳健性；不能代替独立时间样本。
+4. **治理**：只有前述门禁通过后，才可以另行创建 proposal 并进入回放、认证和激活流程。
+
+## 终身试验账本
+
+Schema v12 增加不可变研究事实：
+
+- `research_hypotheses`：研究族、机制、冻结公式、数据要求、状态和首次登记时间；
+- `research_trials`：每次实际检验的 manifest、样本角色、结果哈希和终态；
+- `research_forward_observations`：冻结假设在新交易日上的逐日证据；
+- `point_in_time_fundamentals`：以实际公告日为可见边界的基本面事实。
+
+记录不得删除或覆盖。同一主键同内容写入幂等，不同内容必须冲突。多重检验的试验总数
+来自整个账本，不能按一次 study 或一次发布重置。
+
+## 第一批研究族
+
+| 研究族 | 第一批冻结代表 | 数据边界 | 当前角色 |
+| --- | --- | --- | --- |
+| attention-overreaction | `no-recent-limit-up-v1` | 目标日前 20 日涨停触及次数 | 前向确认候选 |
+| salience-turnover | `extreme-return-abnormal-turnover-v1` | 行业相对收益、20 日换手基线 | 探索 |
+| downside-liquidity-risk | `downside-tail-liquidity-v1` | 60 日下行波动、跳空和换手稳定性 | 探索 |
+| overnight-intraday | `overnight-intraday-separation-v1` | 前一收盘、当日开盘和收盘 | 探索 |
+| value | `earnings-price-point-in-time-v1` | 公告日可见盈利和当日市值 | 数据准备 |
+| profitability | `profitability-quality-point-in-time-v1` | 公告日可见 ROE/ROA/毛利/现金流 | 数据准备 |
+
+每个研究族首轮只允许一个代表假设。不得做阈值网格、自动组合赢家或按事后最优市场状态
+筛选。行业分类必须绑定版本；`unavailable` 不得形成虚假行业。
+
+上一轮 v4 的另外五个 challenger 也必须以 `discovery_exhausted` 保存：
+`breadth-five-day-median-v1`、`breakout-overextension-cap-v1`、
+`signal-quality-rank-v1`、`size-bottom-30pct-filter-v1` 和 `trend-quality-v1`。
+它们不是下一轮优先方向，但其失败不能从终身试验次数中消失。
+
+## 点时基本面规则
+
+- `ann_date` 或更严格的 `f_ann_date` 是事实首次可见时间；报告期结束日不能替代公告日。
+- 同一报告期的调整、修订和原始版本分别保存；不得把后来修订值写回较早交易日。
+- Tushare `daily_basic` 的每日估值、换手率和市值必须绑定交易日及原始字段哈希。
+- 财务指标、利润表、资产负债表和现金流量表必须保存接口、公告时间、报告类型、
+  `update_flag` 和 payload 哈希。
+- 缺失点时事实只能使该证券/研究日显式不可用，不能用当前值或同业均值填补。
+
+## 统计与晋级
+
+主指标继续使用 `20d_25bps_market_cap_matched_excess_bps`。探索报告同时输出绝对表现、
+相对基线配对差值、成本、P05、最差连续 20 信号日、年度/形态/排名/市场状态拆解。
+
+确认性晋级至少要求：
+
+- outcome 与 benchmark 完整率 100%；
+- challenger 绝对主指标大于 0；
+- 相对基线配对均值大于 0 且 95% 区间下界严格大于 0；
+- 终身试验族上的 family-wise `p <= 0.05`；
+- 可执行率、不可执行率和尾部风险不恶化；
+- 独立时间样本通过；
+- 独立 Sina 复制完整且主指标非负。
+
+White Reality Check 保留为家族整体门禁；Romano-Wolf step-down 用于识别具体通过者。
+Deflated Sharpe Ratio 和 Probability of Backtest Overfitting 仅作为辅助诊断，未在单独 ADR
+冻结阈值前不得成为可调整的晋级开关。
+
+## 第一批实施边界
+
+1. 建立 Schema v12 终身账本、点时基本面和前向观察持久化；
+2. 登记现有 v4 六臂及失败结果，冻结 `no-recent-limit-up-v1`；
+3. 提供三类价格/交易行为探索信号的纯函数，不启动真实全量研究；
+4. 提供 Tushare `daily_basic` 与 `fina_indicator` 的离线规范化入口；
+5. 提供终身试验计数、White RC 与 Romano-Wolf 结构化诊断；
+6. MCP 第一批只增加只读研究账本查询，不公开自动注册、自动选参或自动晋级写操作。
+
+第一批必须用本地真实 SQLite v12 小数据集完成端到端验证：迁移、不可变事实、点时可见性、
+三类信号、前向观察、终身试验计数、统计诊断和 MCP 查询必须在同一固定数据链上通过。
+标准测试全部使用固定夹具且不得联网。Windows 全量数据迁移、真实点时数据回填和前向
+观察属于后续外部门禁，不能由本地离线测试宣称完成。
+
+初始化账本并可选导入现有 v4 诊断的本地管理入口为：
+
+```text
+stock-mcp initialize-research-program --root PATH [--study-id V4_STUDY_ID]
+```
+
+不带 `--study-id` 时只登记 11 个冻结定义；带入已完成研究 ID 时，还会从持久化诊断生成
+六条不可变 `discovery_exhausted` trial。该命令不联网、不启动研究，也不创建或激活策略。
