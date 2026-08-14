@@ -68,7 +68,10 @@ ChatGPT 需要结构化读取日报并记录个人观察，但不能改变排名
 Schema v11 增加只读 `get_provider_qualification`，以及必须消费主机一次性批准的 `activate_provider_source`。数据源激活只把已认证能力登记到 provider registry，供以后兼容 Sina 的 v4 生产组合读取；当前 v0.3 仍固定忽略 Sina，因此登记不会改变当前日报。数据源激活和策略激活是两个独立事务；MCP 的 `confirmed=true` 不能代替主机批准。
 
 v4 研究公开 `start_v4_research`、`get_v4_research`、`get_v4_research_arms`、
-`get_v4_research_days` 和 `get_v4_research_report`。读取接口不写数据库；启动前必须存在完整
+`get_v4_research_days`、`get_v4_research_report` 和只读
+`get_v4_research_diagnostics`。诊断工具只消费已完成研究的持久化逐日证据，返回绝对区间、
+风险/成本/形态/排名拆解和明确晋级门禁，不联网、不改库，也不触发新研究。其他读取接口
+同样不写数据库；启动前必须存在完整
 不可变 manifest，否则返回 `v4_research_rejected` 且不留排队作业。受理后后台 worker 每步
 批量处理一个信号日的七个研究臂，16:20–18:10 为盘后任务让路，服务重启从最早缺失信号日
 续跑，且绝不联网采集。查询返回的是已持久化进度和证据，不会在读取请求中重算。

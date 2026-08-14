@@ -110,6 +110,13 @@ v4 manifest 门禁要求纳入证券逐日状态全覆盖；价格与状态双�
 绝对均值、相对基线的配对日差值及配对 bootstrap 区间明确命名；兼容字段
 `mean_primary_bps` 仍表示配对差值，不能误读为 challenger 的绝对均值。
 
+已完成研究还可以生成 `v4-study-diagnostic-v1` 只读诊断。它绑定 source study、result、
+逐日结果、manifest 和 amendment 哈希，仅消费持久化的研究日及候选 outcome，不重新读取
+行情、不联网、不改库。诊断固定提供七臂绝对主指标 block-bootstrap 区间、正收益日比例、
+日收益下侧 5% 分位、最差连续 20 信号日区块、年度/形态/排名/10、25、50 bps 成本拆解，
+并将每一项晋级门禁的实际值、阈值和失败原因结构化返回。形态和排名分组使用完整信号日
+序列，无该分组候选的日期计 0。未持久化的研究维度必须标记 `unavailable`，不得推断。
+
 主研究没有独立的 Sina 价格 replication 证据时，完整运行的合法终态仍是
 `retain_baseline`，不得生成 proposal。该状态表示主研究执行成功但胜出门禁未满足，不表示
 Sina replication、provider 资格、策略认证或激活已经完成。

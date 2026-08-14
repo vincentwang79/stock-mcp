@@ -21,6 +21,7 @@ from stock_mcp.v4_research import (
     V4ResearchCoordinator,
     V4StudyExecutor,
     derive_v4_study_amendment,
+    derive_v4_study_diagnostics,
 )
 
 _ARMS = (
@@ -160,6 +161,23 @@ class V4LocalSqliteE2ETest(unittest.TestCase):
             amendment = derive_v4_study_amendment(database, source_study_id=study_id)
             self.assertEqual(0, amendment["corrected_outcome_count"])
             self.assertEqual(report, amendment["report"])
+            self.assertEqual(run, database.get_v4_study_run(study_id))
+
+            diagnostic = derive_v4_study_diagnostics(database, source_study_id=study_id)
+            self.assertEqual("v4-study-diagnostic-v1", diagnostic["schema"])
+            self.assertEqual(set(_ARMS), set(diagnostic["arms"]))
+            self.assertEqual(
+                diagnostic["arms"]["v0.3-policy-1"]["absolute_primary_metric"]["mean_bps"],
+                diagnostic["arms"]["v0.3-policy-1"]["breakdowns"]["by_cost_bps"]["25"]["mean_bps"],
+            )
+            self.assertEqual(
+                "unavailable",
+                diagnostic["dimensions"]["market_regime"]["status"],
+            )
+            self.assertEqual(run, database.get_v4_study_run(study_id))
+            diagnostic_readback = tools["get_v4_research_diagnostics"].handler(study_id=study_id)
+            self.assertTrue(diagnostic_readback["ok"])
+            self.assertEqual(diagnostic, diagnostic_readback["data"])
             self.assertEqual(run, database.get_v4_study_run(study_id))
 
             second_database, second_manifest_hash, _ = _seed_fixed_v11_database(

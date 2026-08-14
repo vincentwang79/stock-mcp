@@ -190,6 +190,43 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         self.assertEqual(amendment, json.loads(destination.read_text(encoding="utf-8")))
         self.assertIn(str(destination), output.getvalue())
 
+    def test_cli_writes_read_only_v4_study_diagnostics(self) -> None:
+        destination = self.root / "state" / "v4-diagnostic.json"
+        diagnostic = {
+            "schema": "v4-study-diagnostic-v1",
+            "source_study_id": "study-source",
+            "diagnostic_hash": "d" * 64,
+            "signal_day_count": 642,
+        }
+        output = StringIO()
+
+        with (
+            patch(
+                "stock_mcp.v4_research.derive_v4_study_diagnostics",
+                return_value=diagnostic,
+            ),
+            redirect_stdout(output),
+        ):
+            try:
+                exit_code = main(
+                    [
+                        "derive-v4-study-diagnostics",
+                        "--root",
+                        str(self.root),
+                        "--study-id",
+                        "study-source",
+                        "--destination",
+                        str(destination),
+                    ]
+                )
+            except SystemExit:
+                self.fail("stock-mcp CLI does not expose the v4 diagnostic command")
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(diagnostic, json.loads(destination.read_text(encoding="utf-8")))
+        self.assertIn(str(destination), output.getvalue())
+        self.assertIn(diagnostic["diagnostic_hash"], output.getvalue())
+
     def test_cli_runs_a_bounded_resumable_historical_backfill(self) -> None:
         config = self.root / "config"
         config.mkdir(parents=True)

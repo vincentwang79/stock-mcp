@@ -33,6 +33,7 @@ EXPECTED_TOOL_NAMES = frozenset(
         "get_v4_research_arms",
         "get_v4_research_days",
         "get_v4_research_report",
+        "get_v4_research_diagnostics",
         "get_provider_qualification",
         "activate_provider_source",
     }
@@ -55,6 +56,7 @@ READ_TOOL_NAMES = frozenset(
         "get_v4_research_arms",
         "get_v4_research_days",
         "get_v4_research_report",
+        "get_v4_research_diagnostics",
         "get_provider_qualification",
     }
 )

@@ -339,6 +339,29 @@ v4 逐日研究 worker 和查询 DTO 已接入。`start_v4_research` 只接受�
   --destination E:\StockMcp\state\v4-study-amendment.json
 ```
 
+修订报告确认完整后，可继续从同一批持久化逐日结果生成只读诊断，不重跑行情、不联网、
+不写数据库，也不会创建、认证或激活策略：
+
+```powershell
+$studyId = '<已完成的 study_id>'
+$diagnostic = "E:\StockMcp\state\$studyId-diagnostic.json"
+
+& 'E:\StockMcp\current\.venv\Scripts\python.exe' -m stock_mcp.cli `
+  derive-v4-study-diagnostics --root E:\StockMcp `
+  --study-id $studyId `
+  --destination $diagnostic
+
+Get-Content -LiteralPath $diagnostic -Raw | Set-Clipboard
+```
+
+诊断给出七臂绝对主指标的 20 会话 bootstrap 区间、正收益日比例、日收益下侧 5%
+分位、最差连续 20 个信号日区块，以及年度、形态、排名和 10/25/50 bps 成本拆解。
+形态和排名拆解以完整信号日日历为分母；某分组当天无候选时计 0，避免只挑有候选的
+日期造成虚高。报告同时逐项列出统计、完整性、可执行率和 Sina replication 晋级门禁。
+旧研究日没有持久化市场状态，因此该维度明确返回 `unavailable`，程序不会事后猜测。
+更新 ChatGPT Connector 后也可直接只读调用 `get_v4_research_diagnostics(study_id=...)`
+取得相同内容，无需把本地文件复制进对话。
+
 在没有独立、完整的 Sina 价格 replication artifact 时，正常研究报告应为保留 v0.3、
 winner 不合格、proposal 为空。不得把研究完成描述为 Sina replication、provider 资格、
 proposal、策略认证或激活已经完成。首次 Windows 全量运行前仍需先通过开发机固定小数据集

@@ -22,6 +22,7 @@ class V4ResearchMcpDtoContractTest(unittest.TestCase):
             "get_v4_research_arms": (True, False, False),
             "get_v4_research_days": (True, False, False),
             "get_v4_research_report": (True, False, False),
+            "get_v4_research_diagnostics": (True, False, False),
             "get_provider_qualification": (True, False, False),
             "activate_provider_source": (False, True, True),
         }

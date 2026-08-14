@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping
@@ -524,6 +525,38 @@ def derive_v4_study_amendment(repository: Any, *, source_study_id: str) -> dict[
     Any other incomplete evidence remains a hard failure.
     """
 
+    evidence = _load_v4_amended_study(repository, source_study_id=source_study_id)
+    return _v4_amendment_from_evidence(evidence, source_study_id=source_study_id)
+
+
+def _v4_amendment_from_evidence(
+    evidence: Mapping[str, object], *, source_study_id: str
+) -> dict[str, object]:
+    report, statistics = _terminal_report(
+        manifest_hash=evidence["manifest_hash"],
+        signal_dates=evidence["signal_dates"],
+        days_by_arm=evidence["amended_days"],
+    )
+    amendment: dict[str, object] = {
+        "schema": "v4-study-amendment-v1",
+        "policy": "confirmed-entry-expiry-v1",
+        "source_study_id": source_study_id,
+        "source_result_hash": str(evidence["run"].get("result_hash", "")),
+        "source_days_hash": _canonical_hash(evidence["source_day_hashes"]),
+        "manifest_hash": evidence["manifest_hash"],
+        "corrected_day_count": len(
+            {(item["arm_id"], item["signal_date"]) for item in evidence["corrections"]}
+        ),
+        "corrected_outcome_count": len(evidence["corrections"]),
+        "corrections": evidence["corrections"],
+        "report": report,
+        "statistics": statistics,
+    }
+    amendment["amendment_hash"] = _canonical_hash(amendment)
+    return amendment
+
+
+def _load_v4_amended_study(repository: Any, *, source_study_id: str) -> dict[str, object]:
     run = repository.get_v4_study_run(source_study_id)
     if not isinstance(run, Mapping) or run.get("status") != "completed":
         raise ValueError("v4 amendment requires a completed source study")
@@ -577,26 +610,414 @@ def derive_v4_study_amendment(repository: Any, *, source_study_id: str) -> dict[
     )
     if unexpected:
         raise ValueError("v4 amendment found unsupported incomplete evidence")
-    report, statistics = _terminal_report(
-        manifest_hash=manifest_hash,
-        signal_dates=signal_dates,
-        days_by_arm=amended_days,
-    )
-    amendment: dict[str, object] = {
-        "schema": "v4-study-amendment-v1",
-        "policy": "confirmed-entry-expiry-v1",
-        "source_study_id": source_study_id,
-        "source_result_hash": str(run.get("result_hash", "")),
-        "source_days_hash": _canonical_hash(source_day_hashes),
+    return {
+        "run": run,
         "manifest_hash": manifest_hash,
-        "corrected_day_count": len({(item["arm_id"], item["signal_date"]) for item in corrections}),
-        "corrected_outcome_count": len(corrections),
+        "signal_dates": signal_dates,
+        "amended_days": amended_days,
         "corrections": corrections,
-        "report": report,
-        "statistics": statistics,
+        "source_day_hashes": source_day_hashes,
     }
-    amendment["amendment_hash"] = _canonical_hash(amendment)
-    return amendment
+
+
+def derive_v4_study_diagnostics(repository: Any, *, source_study_id: str) -> dict[str, object]:
+    """Derive deterministic, read-only diagnostics from persisted v4 evidence."""
+
+    evidence = _load_v4_amended_study(repository, source_study_id=source_study_id)
+    amendment = _v4_amendment_from_evidence(evidence, source_study_id=source_study_id)
+    signal_dates = tuple(evidence["signal_dates"])
+    days_by_arm = dict(evidence["amended_days"])
+    statistics = dict(amendment["statistics"])
+    baseline_id = _V4_ARM_IDS[0]
+    arm_statistics = dict(statistics["arms"])
+    baseline_rates = _diagnostic_execution_rates(days_by_arm[baseline_id])
+    arms: dict[str, dict[str, object]] = {}
+    for arm_id in _V4_ARM_IDS:
+        days = tuple(days_by_arm[arm_id])
+        values = tuple(int(day["result"]["daily_primary_metric_bps"]) for day in days)
+        rates = _diagnostic_execution_rates(days)
+        arm: dict[str, object] = {
+            "absolute_primary_metric": {
+                "mean_bps": sum(values) / len(values),
+                "ci95_bps": _absolute_block_bootstrap_ci(
+                    values,
+                    seed_material=f"{evidence['manifest_hash']}|v4-diagnostic-v1|{arm_id}",
+                ),
+                "signal_day_count": len(values),
+            },
+            "risk": _diagnostic_risk(values, signal_dates),
+            "execution": rates,
+            "breakdowns": _diagnostic_breakdowns(days, signal_dates),
+        }
+        if arm_id == baseline_id:
+            arm["eligibility"] = {
+                "eligible": False,
+                "status": "baseline_not_a_challenger",
+                "failed_gates": [],
+                "gates": {},
+            }
+        else:
+            reported = dict(arm_statistics[arm_id])
+            arm["paired_delta_vs_baseline"] = {
+                "mean_bps": reported["mean_paired_delta_bps"],
+                "ci95_bps": reported["paired_delta_ci95"],
+            }
+            arm["eligibility"] = _diagnostic_eligibility(
+                statistics=statistics,
+                arm_statistics=reported,
+                signal_day_count=len(values),
+                rates=rates,
+                baseline_rates=baseline_rates,
+            )
+        arms[arm_id] = arm
+    diagnostic: dict[str, object] = {
+        "schema": "v4-study-diagnostic-v1",
+        "source_study_id": source_study_id,
+        "source_result_hash": amendment["source_result_hash"],
+        "source_days_hash": amendment["source_days_hash"],
+        "manifest_hash": amendment["manifest_hash"],
+        "amendment_hash": amendment["amendment_hash"],
+        "primary_metric": _PRIMARY_METRIC,
+        "metric_semantics": "signal_day_candidate_equal_weighted_absolute_and_paired_bps",
+        "breakdown_semantics": "all_signal_days_zero_when_group_has_no_candidate",
+        "signal_day_count": len(signal_dates),
+        "decision": {
+            "winner": amendment["report"]["winner"],
+            "retain_version": amendment["report"]["retain_version"],
+            "proposals": amendment["report"]["proposals"],
+            "family_wise_p_value": statistics["family_wise_p_value"],
+            "sina_replication_complete": statistics["sina_replication_complete"],
+        },
+        "diagnostic_method": {
+            "absolute_ci": "circular_moving_block_bootstrap",
+            "block_sessions": 20,
+            "bootstrap_samples": 10_000,
+            "seed_schema": "sha256(manifest_hash|v4-diagnostic-v1|arm_id)",
+            "daily_downside_tail": "empirical_floor_index_p05",
+            "worst_block": "minimum_non_circular_contiguous_20_signal_day_mean",
+        },
+        "arms": arms,
+        "dimensions": {
+            "year": {"status": "available"},
+            "setup_type": {"status": "available"},
+            "rank": {"status": "available"},
+            "cost_bps": {"status": "available", "values": [10, 25, 50]},
+            "market_regime": {
+                "status": "unavailable",
+                "reason": "market_regime_not_persisted_in_v4_study_days",
+            },
+        },
+        "eligibility_policy": {
+            "minimum_signal_days": 40,
+            "family_wise_p_value_max": 0.05,
+            "paired_ci_lower_bound_min_exclusive_bps": 0,
+            "completeness_rate_bps": 10_000,
+            "minimum_executable_rate_delta_bps": -200,
+            "maximum_unexecutable_rate_delta_bps": 200,
+            "sina_replication": "complete_10000bps_and_nonnegative_primary_metric",
+        },
+    }
+    diagnostic["diagnostic_hash"] = _canonical_hash(diagnostic)
+    return diagnostic
+
+
+def _diagnostic_execution_rates(days: tuple[Mapping[str, object], ...]) -> dict[str, int]:
+    outcomes = tuple(
+        outcome
+        for day in days
+        for outcome in dict(day["result"]).get("candidate_outcomes", {}).values()
+        if isinstance(outcome, Mapping)
+    )
+    executable = sum(
+        1
+        for outcome in outcomes
+        if isinstance(outcome.get("next_open_path"), Mapping)
+        and outcome["next_open_path"].get("status") == "available"
+    )
+    executable_rate = 10_000 if not outcomes else executable * 10_000 // len(outcomes)
+    return {
+        "candidate_count": len(outcomes),
+        "executable_rate_bps": executable_rate,
+        "unexecutable_rate_bps": 0 if not outcomes else 10_000 - executable_rate,
+    }
+
+
+def _diagnostic_eligibility(
+    *,
+    statistics: Mapping[str, object],
+    arm_statistics: Mapping[str, object],
+    signal_day_count: int,
+    rates: Mapping[str, int],
+    baseline_rates: Mapping[str, int],
+) -> dict[str, object]:
+    executable_delta = rates["executable_rate_bps"] - baseline_rates["executable_rate_bps"]
+    unexecutable_delta = rates["unexecutable_rate_bps"] - baseline_rates["unexecutable_rate_bps"]
+    paired_ci = tuple(float(value) for value in arm_statistics["paired_delta_ci95"])
+    gates = {
+        "complete_seven_arm_study": bool(statistics["study_complete"]),
+        "minimum_signal_days": signal_day_count >= 40,
+        "family_wise_p_value": float(statistics["family_wise_p_value"]) <= 0.05,
+        "paired_ci_lower_positive": paired_ci[0] > 0,
+        "outcome_and_benchmark_complete": (arm_statistics.get("completeness_rate_bps") == 10_000),
+        "executable_rate_delta": executable_delta >= -200,
+        "unexecutable_rate_delta": unexecutable_delta <= 200,
+        "sina_replication_complete": bool(statistics["sina_replication_complete"]),
+    }
+    eligible = all(gates.values())
+    reported_eligible = bool(arm_statistics["eligible"])
+    if eligible != reported_eligible:
+        raise ValueError("v4 diagnostic eligibility conflicts with persisted statistics")
+    return {
+        "eligible": eligible,
+        "reported_eligible": reported_eligible,
+        "failed_gates": [name for name, passed in gates.items() if not passed],
+        "gates": {
+            "complete_seven_arm_study": {
+                "passed": gates["complete_seven_arm_study"],
+                "actual": bool(statistics["study_complete"]),
+                "required": True,
+            },
+            "minimum_signal_days": {
+                "passed": gates["minimum_signal_days"],
+                "actual": signal_day_count,
+                "required_minimum": 40,
+            },
+            "family_wise_p_value": {
+                "passed": gates["family_wise_p_value"],
+                "actual": float(statistics["family_wise_p_value"]),
+                "required_maximum": 0.05,
+            },
+            "paired_ci_lower_positive": {
+                "passed": gates["paired_ci_lower_positive"],
+                "actual_bps": paired_ci[0],
+                "required": "> 0",
+            },
+            "outcome_and_benchmark_complete": {
+                "passed": gates["outcome_and_benchmark_complete"],
+                "actual_rate_bps": arm_statistics.get("completeness_rate_bps"),
+                "required_rate_bps": 10_000,
+            },
+            "executable_rate_delta": {
+                "passed": gates["executable_rate_delta"],
+                "actual_bps": executable_delta,
+                "required_minimum_bps": -200,
+            },
+            "unexecutable_rate_delta": {
+                "passed": gates["unexecutable_rate_delta"],
+                "actual_bps": unexecutable_delta,
+                "required_maximum_bps": 200,
+            },
+            "sina_replication_complete": {
+                "passed": gates["sina_replication_complete"],
+                "actual": bool(statistics["sina_replication_complete"]),
+                "required": True,
+            },
+        },
+    }
+
+
+def _absolute_block_bootstrap_ci(values: tuple[int, ...], *, seed_material: str) -> list[float]:
+    if not values:
+        raise ValueError("v4 diagnostics require signal-day values")
+    block = min(20, len(values))
+    full_blocks, remainder = divmod(len(values), block)
+    block_sums = tuple(
+        sum(values[(start + offset) % len(values)] for offset in range(block))
+        for start in range(len(values))
+    )
+    remainder_sums = tuple(
+        sum(values[(start + offset) % len(values)] for offset in range(remainder))
+        for start in range(len(values))
+    )
+    rng = random.Random(int(hashlib.sha256(seed_material.encode()).hexdigest()[:16], 16))
+    samples: list[float] = []
+    for _ in range(10_000):
+        total = sum(block_sums[rng.randrange(len(values))] for _ in range(full_blocks))
+        if remainder:
+            total += remainder_sums[rng.randrange(len(values))]
+        samples.append(total / len(values))
+    samples.sort()
+    return [samples[int(0.025 * 9_999)], samples[int(0.975 * 9_999)]]
+
+
+def _diagnostic_risk(values: tuple[int, ...], signal_dates: tuple[date, ...]) -> dict[str, object]:
+    ordered = sorted(values)
+    risk: dict[str, object] = {
+        "positive_signal_day_rate_bps": sum(value > 0 for value in values) * 10_000 // len(values),
+        "daily_p05_bps": ordered[int(0.05 * (len(ordered) - 1))],
+    }
+    if len(values) < 20:
+        risk["worst_20_session_block"] = {
+            "status": "unavailable",
+            "reason": "fewer_than_20_signal_days",
+        }
+        return risk
+    windows = tuple(
+        (sum(values[index : index + 20]) / 20, index) for index in range(len(values) - 19)
+    )
+    mean, index = min(windows, key=lambda item: (item[0], item[1]))
+    risk["worst_20_session_block"] = {
+        "status": "available",
+        "start_date": signal_dates[index].isoformat(),
+        "end_date": signal_dates[index + 19].isoformat(),
+        "mean_bps": mean,
+    }
+    return risk
+
+
+def _diagnostic_breakdowns(
+    days: tuple[Mapping[str, object], ...], signal_dates: tuple[date, ...]
+) -> dict[str, object]:
+    daily_values = tuple(int(dict(day["result"])["daily_primary_metric_bps"]) for day in days)
+    by_year: dict[str, dict[str, object]] = {}
+    for year in sorted({day.year for day in signal_dates}):
+        indices = tuple(index for index, day in enumerate(signal_dates) if day.year == year)
+        values = tuple(daily_values[index] for index in indices)
+        by_year[str(year)] = _diagnostic_slice(values, active_days=None, candidates=None)
+
+    candidate_days: list[tuple[tuple[dict[str, object], dict[str, object]], ...]] = []
+    setup_types: set[str] = set()
+    ranks: set[int] = set()
+    for day in days:
+        result = dict(day["result"])
+        candidates = result.get("candidates")
+        outcomes = result.get("candidate_outcomes")
+        if not isinstance(candidates, list) or not isinstance(outcomes, Mapping):
+            raise ValueError("v4 diagnostic candidate evidence is incomplete")
+        paired: list[tuple[dict[str, object], dict[str, object]]] = []
+        for raw_candidate in candidates:
+            if not isinstance(raw_candidate, Mapping):
+                raise ValueError("v4 diagnostic candidate evidence is invalid")
+            candidate = dict(raw_candidate)
+            candidate_id = str(candidate.get("candidate_id", ""))
+            raw_outcome = outcomes.get(candidate_id)
+            if not candidate_id or not isinstance(raw_outcome, Mapping):
+                raise ValueError("v4 diagnostic outcome evidence is incomplete")
+            setup_type = str(candidate.get("setup_type", ""))
+            rank = candidate.get("rank")
+            if not setup_type or not isinstance(rank, int) or isinstance(rank, bool) or rank <= 0:
+                raise ValueError("v4 diagnostic grouping evidence is incomplete")
+            setup_types.add(setup_type)
+            ranks.add(rank)
+            paired.append((candidate, dict(raw_outcome)))
+        if {str(candidate.get("candidate_id")) for candidate, _ in paired} != {
+            str(candidate_id) for candidate_id in outcomes
+        }:
+            raise ValueError("v4 diagnostic candidate/outcome identity conflicts")
+        reconstructed = _diagnostic_daily_candidate_metric(tuple(paired), cost_bps=25)
+        if reconstructed != int(result["daily_primary_metric_bps"]):
+            raise ValueError("v4 diagnostic primary metric conflicts with persisted evidence")
+        candidate_days.append(tuple(paired))
+
+    by_setup = {
+        setup_type: _diagnostic_group_slice(
+            tuple(candidate_days),
+            lambda candidate, expected=setup_type: candidate["setup_type"] == expected,
+        )
+        for setup_type in sorted(setup_types)
+    }
+    by_rank = {
+        str(rank): _diagnostic_group_slice(
+            tuple(candidate_days),
+            lambda candidate, expected=rank: candidate["rank"] == expected,
+        )
+        for rank in sorted(ranks)
+    }
+    by_cost = {
+        str(cost): _diagnostic_slice(
+            tuple(
+                _diagnostic_daily_candidate_metric(day_candidates, cost_bps=cost)
+                for day_candidates in candidate_days
+            ),
+            active_days=sum(bool(day_candidates) for day_candidates in candidate_days),
+            candidates=sum(len(day_candidates) for day_candidates in candidate_days),
+        )
+        for cost in (10, 25, 50)
+    }
+    return {
+        "by_year": by_year,
+        "by_setup_type": by_setup,
+        "by_rank": by_rank,
+        "by_cost_bps": by_cost,
+    }
+
+
+def _diagnostic_group_slice(
+    candidate_days: tuple[tuple[tuple[dict[str, object], dict[str, object]], ...], ...],
+    include: Callable[[dict[str, object]], bool],
+) -> dict[str, object]:
+    values: list[int] = []
+    active_days = 0
+    candidate_count = 0
+    for day_candidates in candidate_days:
+        selected = tuple(pair for pair in day_candidates if include(pair[0]))
+        values.append(_diagnostic_daily_candidate_metric(selected, cost_bps=25))
+        active_days += bool(selected)
+        candidate_count += len(selected)
+    return _diagnostic_slice(
+        tuple(values),
+        active_days=active_days,
+        candidates=candidate_count,
+    )
+
+
+def _diagnostic_daily_candidate_metric(
+    candidates: tuple[tuple[dict[str, object], dict[str, object]], ...], *, cost_bps: int
+) -> int:
+    if not candidates:
+        return 0
+    values: list[int] = []
+    for _, outcome in candidates:
+        path = outcome.get("next_open_path")
+        if not isinstance(path, Mapping) or path.get("status") not in {
+            "available",
+            "unexecutable",
+        }:
+            raise ValueError("v4 diagnostic execution path is incomplete")
+        benchmark = path.get("benchmark")
+        matched = (
+            benchmark.get("market_cap_decile_return_bps")
+            if isinstance(benchmark, Mapping)
+            else None
+        )
+        peer = _diagnostic_horizon_value(matched, 20)
+        gross = path.get("gross_return_20d_bps")
+        if not isinstance(gross, int) or isinstance(gross, bool) or not isinstance(peer, int):
+            raise ValueError("v4 diagnostic return evidence is incomplete")
+        charged_cost = 0 if path.get("status") == "unexecutable" else cost_bps
+        cost_values = path.get("net_return_bps_by_cost")
+        cost_path = (
+            cost_values.get(cost_bps, cost_values.get(str(cost_bps)))
+            if isinstance(cost_values, Mapping)
+            else None
+        )
+        net = _diagnostic_horizon_value(cost_path, 20)
+        if not isinstance(net, int) or isinstance(net, bool) or net != gross - charged_cost:
+            raise ValueError("v4 diagnostic cost evidence conflicts with gross return")
+        values.append(net - peer)
+    return _floor_average(values)
+
+
+def _diagnostic_horizon_value(value: object, horizon: int) -> object:
+    if not isinstance(value, Mapping):
+        return None
+    return value.get(horizon, value.get(str(horizon)))
+
+
+def _diagnostic_slice(
+    values: tuple[int, ...], *, active_days: int | None, candidates: int | None
+) -> dict[str, object]:
+    if not values:
+        raise ValueError("v4 diagnostic slice has no signal days")
+    result: dict[str, object] = {
+        "mean_bps": sum(values) / len(values),
+        "signal_day_count": len(values),
+    }
+    if active_days is not None:
+        result["active_signal_day_count"] = active_days
+    if candidates is not None:
+        result["candidate_count"] = candidates
+    return result
 
 
 def _amend_v4_confirmed_entry_expiry(

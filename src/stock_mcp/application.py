@@ -237,6 +237,29 @@ class StockMcpApplication:
             f"v4 research report is not ready (status={run.get('status', 'unknown')})",
         )
 
+    def get_v4_research_diagnostics(self, *, study_id: str) -> Result:
+        coordinator = getattr(self, "_v4_research", None)
+        if coordinator is None:
+            return _error("v4_research_unavailable", "v4 research is unavailable")
+        run = coordinator.get_v4_research(study_id=study_id)
+        if run is None:
+            return _error("v4_research_not_found", "v4 research does not exist")
+        if run.get("status") != "completed":
+            return _error(
+                "v4_research_not_ready",
+                f"v4 research diagnostics are not ready (status={run.get('status', 'unknown')})",
+            )
+        from .v4_research import derive_v4_study_diagnostics
+
+        try:
+            diagnostic = derive_v4_study_diagnostics(
+                self._repository,
+                source_study_id=study_id,
+            )
+        except ValueError as error:
+            return _error("v4_research_diagnostic_rejected", str(error))
+        return _ok(diagnostic)
+
     def get_provider_qualification(self, *, source: str) -> Result:
         qualification = self._repository.get_provider_qualification(source)
         if qualification is None:

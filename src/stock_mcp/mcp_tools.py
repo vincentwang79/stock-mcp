@@ -160,6 +160,10 @@ class GetV4ResearchReportInput(GetV4ResearchInput):
     pass
 
 
+class GetV4ResearchDiagnosticsInput(GetV4ResearchInput):
+    pass
+
+
 class GetProviderQualificationInput(_Dto):
     source: Literal["sina"]
 
@@ -642,6 +646,13 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         ("get_v4_research_arms", GetV4ResearchArmsInput, True, False, False),
         ("get_v4_research_days", GetV4ResearchDaysInput, True, False, False),
         ("get_v4_research_report", GetV4ResearchReportInput, True, False, False),
+        (
+            "get_v4_research_diagnostics",
+            GetV4ResearchDiagnosticsInput,
+            True,
+            False,
+            False,
+        ),
         ("get_provider_qualification", GetProviderQualificationInput, True, False, False),
         ("activate_provider_source", ActivateProviderSourceInput, False, True, False),
     )
@@ -671,6 +682,7 @@ def build_tool_catalog(service: Any) -> tuple[ToolDefinition, ...]:
         "get_v4_research_arms": V4ResearchResult,
         "get_v4_research_days": V4ResearchResult,
         "get_v4_research_report": V4ResearchResult,
+        "get_v4_research_diagnostics": V4ResearchResult,
         "get_provider_qualification": ProviderQualificationResult,
         "activate_provider_source": ProviderQualificationResult,
     }
