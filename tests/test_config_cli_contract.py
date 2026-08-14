@@ -131,7 +131,7 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
 
         self.assertEqual(0, exit_code)
         report = json.loads(output.getvalue())
-        self.assertEqual(12, report["schema"])
+        self.assertEqual(13, report["schema"])
         self.assertEqual("ok", report["integrity"])
         self.assertEqual(0, report["tushare_days"])
         self.assertEqual(0, report["tushare_rows"])
@@ -247,7 +247,7 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual(12, json.loads(completed.stdout)["schema"])
+        self.assertEqual(13, json.loads(completed.stdout)["schema"])
 
     def test_cli_writes_a_read_only_v4_study_amendment(self) -> None:
         destination = self.root / "state" / "v4-amendment.json"

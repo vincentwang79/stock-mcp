@@ -13,9 +13,11 @@ import json
 import math
 import random
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from statistics import median
+
+from stock_mcp.domain import DailyBar, DailyPriceLimit
 
 _HASH_PATTERN_LENGTH = 64
 
@@ -338,6 +340,7 @@ def overnight_intraday_facts(
 def build_research_forward_observation(
     *,
     hypothesis_id: str,
+    symbol: str,
     trade_date: date,
     source_timestamp: datetime,
     raw_inputs: Mapping[str, object],
@@ -345,6 +348,9 @@ def build_research_forward_observation(
     """Build one immutable continuous-feature observation without selecting stocks."""
 
     _require_aware_timestamp(source_timestamp, field="source_timestamp")
+    normalized_symbol = symbol.strip().upper()
+    if not normalized_symbol:
+        raise ValueError("research observation symbol is required")
     normalized_inputs = {
         str(key): list(value) if isinstance(value, tuple) else value
         for key, value in raw_inputs.items()
@@ -385,6 +391,7 @@ def build_research_forward_observation(
     input_payload = {
         "schema": "research-forward-input-v1",
         "hypothesis_id": hypothesis_id,
+        "symbol": normalized_symbol,
         "trade_date": trade_date.isoformat(),
         "source_timestamp": source_timestamp.isoformat(),
         "raw_inputs": normalized_inputs,
@@ -392,12 +399,14 @@ def build_research_forward_observation(
     result_payload = {
         "schema": "research-forward-result-v1",
         "hypothesis_id": hypothesis_id,
+        "symbol": normalized_symbol,
         "trade_date": trade_date.isoformat(),
         "facts": facts,
     }
     return {
         "hypothesis_id": hypothesis_id,
         "trade_date": trade_date.isoformat(),
+        "symbol": normalized_symbol,
         "input_hash": _hash(input_payload),
         "result_hash": _hash(result_payload),
         "observation": facts,
@@ -409,6 +418,7 @@ def record_research_forward_observation(
     repository: object,
     *,
     hypothesis_id: str,
+    symbol: str,
     trade_date: date,
     source_timestamp: datetime,
     raw_inputs: Mapping[str, object],
@@ -417,6 +427,7 @@ def record_research_forward_observation(
 
     observation = build_research_forward_observation(
         hypothesis_id=hypothesis_id,
+        symbol=symbol,
         trade_date=trade_date,
         source_timestamp=source_timestamp,
         raw_inputs=raw_inputs,
@@ -426,6 +437,268 @@ def record_research_forward_observation(
         raise TypeError("repository does not support forward research observations")
     save(observation)
     return observation
+
+
+def build_research_forward_outcomes(
+    *,
+    observation: Mapping[str, object],
+    signal_close_1e4: int,
+    future_bars: Sequence[DailyBar],
+    benchmark_close_path_1e4: Sequence[int],
+    recorded_at: datetime,
+) -> tuple[dict[str, object], ...]:
+    """Build immutable 5/10/20-session diagnostic outcomes for one observation."""
+
+    _require_aware_timestamp(recorded_at, field="recorded_at")
+    required = ("hypothesis_id", "trade_date", "symbol", "result_hash")
+    if any(observation.get(field) in (None, "") for field in required):
+        raise ValueError("forward observation identity is incomplete")
+    result_hash = str(observation["result_hash"])
+    if len(result_hash) != _HASH_PATTERN_LENGTH or any(
+        character not in "0123456789abcdef" for character in result_hash
+    ):
+        raise ValueError("forward observation result hash is invalid")
+    bars = tuple(future_bars)
+    if len(bars) != 20:
+        raise ValueError("forward outcomes require exactly twenty future sessions")
+    symbol = str(observation["symbol"])
+    signal_date = date.fromisoformat(str(observation["trade_date"]))
+    dates = tuple(bar.trade_date for bar in bars)
+    if dates != tuple(sorted(set(dates))) or dates[0] <= signal_date:
+        raise ValueError("forward outcome dates must be unique and strictly after the signal")
+    if any(bar.symbol != symbol for bar in bars) or len({bar.source for bar in bars}) != 1:
+        raise ValueError("forward outcome bars must be one symbol and one source")
+    if any(bar.source_timestamp > recorded_at for bar in bars):
+        raise ValueError("forward outcome cannot be recorded before its source evidence")
+    evidence_available_at = max(bar.source_timestamp for bar in bars)
+    benchmark = tuple(int(value) for value in benchmark_close_path_1e4)
+    if len(benchmark) != 21:
+        raise ValueError("forward outcomes require a twenty-session benchmark path")
+    if signal_close_1e4 <= 0 or any(value <= 0 for value in benchmark):
+        raise ValueError("forward outcome prices must be positive")
+
+    outcomes: list[dict[str, object]] = []
+    for horizon in (5, 10, 20):
+        exit_bar = bars[horizon - 1]
+        gross = _return_bps(exit_bar.close_1e4, signal_close_1e4)
+        benchmark_return = _return_bps(benchmark[horizon], benchmark[0])
+        result = {
+            "schema": "research-forward-outcome-v1",
+            "path": "signal-close-diagnostic",
+            "entry_date": signal_date.isoformat(),
+            "exit_date": exit_bar.trade_date.isoformat(),
+            "gross_return_bps": gross,
+            "benchmark_return_bps": benchmark_return,
+            "excess_return_bps": gross - benchmark_return,
+            "source": exit_bar.source,
+        }
+        hash_payload = {
+            "schema": "research-forward-outcome-hash-v1",
+            "hypothesis_id": str(observation["hypothesis_id"]),
+            "signal_date": signal_date.isoformat(),
+            "symbol": symbol,
+            "horizon_sessions": horizon,
+            "observation_result_hash": result_hash,
+            "outcome": result,
+        }
+        outcomes.append(
+            {
+                "hypothesis_id": str(observation["hypothesis_id"]),
+                "signal_date": signal_date.isoformat(),
+                "symbol": symbol,
+                "horizon_sessions": horizon,
+                "observation_result_hash": result_hash,
+                "outcome": result,
+                "outcome_hash": _hash(hash_payload),
+                "recorded_at": evidence_available_at.isoformat(),
+            }
+        )
+    return tuple(outcomes)
+
+
+def build_price_research_forward_bundle(
+    *,
+    signal_bar: DailyBar,
+    prior_limits: Sequence[DailyPriceLimit],
+    future_bars: Sequence[DailyBar],
+    benchmark_close_path_1e4: Sequence[int],
+    recorded_at: datetime,
+    hypothesis_ids: Sequence[str] = (
+        "no-recent-limit-up-v1",
+        "overnight-intraday-separation-v1",
+    ),
+) -> dict[str, tuple[dict[str, object], ...]]:
+    """Build price-only research evidence without provider access or strategy mutation."""
+
+    requested = tuple(dict.fromkeys(hypothesis_ids))
+    supported = {
+        "no-recent-limit-up-v1",
+        "overnight-intraday-separation-v1",
+    }
+    if not requested or any(item not in supported for item in requested):
+        raise ValueError("price research contains an unsupported hypothesis")
+    observations: list[dict[str, object]] = []
+    if "no-recent-limit-up-v1" in requested:
+        limits = tuple(prior_limits)
+        if len(limits) != 5:
+            raise ValueError("price research requires exactly five prior price-limit sessions")
+        limit_dates = tuple(item.trade_date for item in limits)
+        if (
+            limit_dates != tuple(sorted(set(limit_dates)))
+            or limit_dates[-1] >= signal_bar.trade_date
+        ):
+            raise ValueError("price-limit sessions must be unique and precede the signal")
+        if any(item.symbol != signal_bar.symbol for item in limits):
+            raise ValueError("price-limit sessions must match the signal symbol")
+        if any(item.policy_exception for item in limits):
+            raise ValueError("price-limit policy exceptions cannot enter research evidence")
+        algorithms = tuple(item.algorithm for item in limits)
+        if len(set(algorithms)) != 1:
+            raise ValueError("price-limit research evidence must use one algorithm")
+        observations.append(
+            build_research_forward_observation(
+                hypothesis_id="no-recent-limit-up-v1",
+                symbol=signal_bar.symbol,
+                trade_date=signal_bar.trade_date,
+                source_timestamp=signal_bar.source_timestamp,
+                raw_inputs={
+                    "prior_limit_up_touched": tuple(item.touched_up for item in limits),
+                    "prior_trade_dates": tuple(item.trade_date.isoformat() for item in limits),
+                    "price_limit_algorithm": algorithms[0],
+                },
+            )
+        )
+    if "overnight-intraday-separation-v1" in requested:
+        observations.append(
+            build_research_forward_observation(
+                hypothesis_id="overnight-intraday-separation-v1",
+                symbol=signal_bar.symbol,
+                trade_date=signal_bar.trade_date,
+                source_timestamp=signal_bar.source_timestamp,
+                raw_inputs={
+                    "pre_close_1e4": signal_bar.pre_close_1e4,
+                    "open_1e4": signal_bar.open_1e4,
+                    "close_1e4": signal_bar.close_1e4,
+                    "source": signal_bar.source,
+                },
+            )
+        )
+    outcomes = tuple(
+        outcome
+        for observation in observations
+        for outcome in build_research_forward_outcomes(
+            observation=observation,
+            signal_close_1e4=signal_bar.close_1e4,
+            future_bars=future_bars,
+            benchmark_close_path_1e4=benchmark_close_path_1e4,
+            recorded_at=recorded_at,
+        )
+    )
+    return {"observations": tuple(observations), "outcomes": outcomes}
+
+
+def record_stored_price_research_bundle(
+    repository: object,
+    *,
+    symbol: str,
+    signal_date: date,
+    through: date,
+    source: str,
+    recorded_at: datetime,
+    hypothesis_ids: Sequence[str] = (
+        "no-recent-limit-up-v1",
+        "overnight-intraday-separation-v1",
+    ),
+) -> dict[str, int]:
+    """Load an exact stored calendar path and atomically persist mature price evidence."""
+
+    if through <= signal_date:
+        raise ValueError("stored price research requires dates after the signal")
+    load_days = getattr(repository, "load_expected_trading_days", None)
+    load_history = getattr(repository, "load_symbol_history", None)
+    load_snapshot = getattr(repository, "load_market_snapshot", None)
+    load_limits = getattr(repository, "load_daily_price_limits", None)
+    save_bundle = getattr(repository, "save_research_forward_bundle", None)
+    if not all(
+        callable(item)
+        for item in (load_days, load_history, load_snapshot, load_limits, save_bundle)
+    ):
+        raise TypeError("repository does not support stored price research")
+    sessions = tuple(load_days(signal_date - timedelta(days=120), through, source=source))
+    if signal_date not in sessions:
+        raise ValueError("signal date is absent from the stored trading calendar")
+    signal_index = sessions.index(signal_date)
+    prior_dates = sessions[max(0, signal_index - 5) : signal_index]
+    future_dates = sessions[signal_index + 1 : signal_index + 21]
+    if len(prior_dates) != 5 or len(future_dates) != 20:
+        raise ValueError("stored price research requires five prior and twenty future sessions")
+    history = tuple(load_history(symbol, end_date=future_dates[-1], source=source, limit=26))
+    by_date = {bar.trade_date: bar for bar in history}
+    required_bar_dates = (signal_date, *future_dates)
+    if any(day not in by_date for day in required_bar_dates):
+        raise ValueError("stored price research has an incomplete same-symbol price path")
+    signal_bar = by_date[signal_date]
+    future_bars = tuple(by_date[day] for day in future_dates)
+    if any(bar.source != source for bar in (signal_bar, *future_bars)):
+        raise ValueError("stored price research has mixed price sources")
+
+    prior_limits: list[DailyPriceLimit] = []
+    if "no-recent-limit-up-v1" in hypothesis_ids:
+        for day in prior_dates:
+            facts = load_limits(day, source=source)
+            fact = facts.get(symbol)
+            if not isinstance(fact, Mapping):
+                raise ValueError("stored price research has incomplete prior price-limit evidence")
+            prior_limits.append(
+                DailyPriceLimit(
+                    symbol=symbol,
+                    trade_date=day,
+                    up_limit_1e4=int(fact["limit_up_1e4"]),
+                    down_limit_1e4=int(fact["limit_down_1e4"]),
+                    touched_up=bool(fact["touched_up"]),
+                    touched_down=bool(fact["touched_down"]),
+                    policy_exception=bool(fact["policy_exception"]),
+                    algorithm=str(fact["algorithm"]),
+                )
+            )
+
+    benchmark_path = [100_000]
+    for day in future_dates:
+        snapshot = load_snapshot(day, source=source, history_limit=1)
+        security_by_symbol = {item.symbol: item for item in snapshot.securities}
+        eligible_bars = tuple(
+            bar
+            for bar in snapshot.bars
+            if bar.trade_date == day
+            and security_by_symbol.get(bar.symbol) is not None
+            and security_by_symbol[bar.symbol].board == "MAIN"
+            and not security_by_symbol[bar.symbol].is_st
+        )
+        if not eligible_bars:
+            raise ValueError("stored price research benchmark is incomplete")
+        daily_return = int(
+            (
+                sum(Decimal(_return_bps(bar.close_1e4, bar.pre_close_1e4)) for bar in eligible_bars)
+                / Decimal(len(eligible_bars))
+            ).to_integral_value(rounding=ROUND_HALF_UP)
+        )
+        benchmark_path.append(
+            int(
+                (
+                    Decimal(benchmark_path[-1]) * Decimal(10_000 + daily_return) / Decimal(10_000)
+                ).to_integral_value(rounding=ROUND_HALF_UP)
+            )
+        )
+
+    bundle = build_price_research_forward_bundle(
+        signal_bar=signal_bar,
+        prior_limits=prior_limits,
+        future_bars=future_bars,
+        benchmark_close_path_1e4=benchmark_path,
+        recorded_at=recorded_at,
+        hypothesis_ids=hypothesis_ids,
+    )
+    return save_bundle(observations=bundle["observations"], outcomes=bundle["outcomes"])
 
 
 def normalize_tushare_daily_basic(

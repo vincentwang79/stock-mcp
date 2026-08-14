@@ -53,6 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "derive-v4-study-diagnostics",
             "initialize-research-program",
             "collect-research-facts",
+            "build-research-forward-evidence",
             "migrate",
             "backup",
             "restore",
@@ -85,6 +86,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--sina-backfill-manifest", type=Path)
     parser.add_argument("--trade-date", type=date.fromisoformat)
     parser.add_argument("--through", type=date.fromisoformat)
+    parser.add_argument("--symbol")
+    parser.add_argument("--hypothesis-id", action="append", default=[])
     parser.add_argument("--dataset-hash")
     parser.add_argument("--qualification-id")
     parser.add_argument("--study-id")
@@ -114,7 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             first_batch_hypotheses,
             v4_discovery_trials_from_diagnostic,
         )
-        from .storage import Database
+        from .storage import SCHEMA_VERSION, Database
 
         database = Database(settings.database_path)
         database.initialize()
@@ -136,7 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(
                 {
                     "status": "ready",
-                    "schema": 12,
+                    "schema": SCHEMA_VERSION,
                     "hypothesis_count": len(hypotheses),
                     "trial_count": trial_count,
                 },
@@ -165,6 +168,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             clock=lambda: datetime.now(UTC),
         )
         report = collect_tushare_research_day(database, provider=provider, as_of=args.trade_date)
+        print(json.dumps({"status": "recorded", **report}, ensure_ascii=False))
+        return 0
+
+    if args.command == "build-research-forward-evidence":
+        if args.trade_date is None or args.through is None or not args.symbol:
+            parser.error(
+                "build-research-forward-evidence requires --symbol, --trade-date, and --through"
+            )
+        from .research_program import record_stored_price_research_bundle
+        from .storage import Database
+
+        database = Database(settings.database_path)
+        database.initialize()
+        hypotheses = tuple(args.hypothesis_id) or (
+            "no-recent-limit-up-v1",
+            "overnight-intraday-separation-v1",
+        )
+        report = record_stored_price_research_bundle(
+            database,
+            symbol=str(args.symbol).strip().upper(),
+            signal_date=args.trade_date,
+            through=args.through,
+            source="tushare",
+            recorded_at=datetime.now(UTC),
+            hypothesis_ids=hypotheses,
+        )
         print(json.dumps({"status": "recorded", **report}, ensure_ascii=False))
         return 0
 

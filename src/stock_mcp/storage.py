@@ -29,7 +29,7 @@ from stock_mcp.domain import (
     StrategyVersion,
 )
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 class IdempotencyKeyReuseError(ValueError):
@@ -4495,9 +4495,16 @@ class Database:
         )
 
     def save_research_forward_observation(self, observation: dict[str, object]) -> None:
+        with self._idempotent_write_connection() as connection:
+            self._save_research_forward_observation(connection, observation)
+
+    def _save_research_forward_observation(
+        self, connection: sqlite3.Connection, observation: dict[str, object]
+    ) -> None:
         required = (
             "hypothesis_id",
             "trade_date",
+            "symbol",
             "input_hash",
             "result_hash",
             "observation",
@@ -4508,50 +4515,161 @@ class Database:
         self._validate_research_hash(observation["input_hash"], "input")
         self._validate_research_hash(observation["result_hash"], "result")
         trade_date = self._iso(observation["trade_date"])
-        with self._idempotent_write_connection() as connection:
-            hypothesis = connection.execute(
-                "SELECT frozen_after FROM research_hypotheses WHERE hypothesis_id = ?",
-                (str(observation["hypothesis_id"]),),
-            ).fetchone()
-            if hypothesis is None:
-                raise ValueError("forward research hypothesis does not exist")
-            if hypothesis[0] is not None and trade_date <= str(hypothesis[0]):
-                raise ValueError("forward observation must be after the frozen discovery sample")
-            self._immutable_composite_insert(
-                connection,
-                "research_forward_observations",
-                ("hypothesis_id", "trade_date"),
-                (str(observation["hypothesis_id"]), trade_date),
-                ("input_hash", "result_hash", "observation_json", "recorded_at"),
-                (
-                    str(observation["input_hash"]),
-                    str(observation["result_hash"]),
-                    self._json(observation["observation"]),
-                    self._iso(observation["recorded_at"]),
-                ),
-            )
+        hypothesis = connection.execute(
+            "SELECT frozen_after FROM research_hypotheses WHERE hypothesis_id = ?",
+            (str(observation["hypothesis_id"]),),
+        ).fetchone()
+        if hypothesis is None:
+            raise ValueError("forward research hypothesis does not exist")
+        if hypothesis[0] is not None and trade_date <= str(hypothesis[0]):
+            raise ValueError("forward observation must be after the frozen discovery sample")
+        self._immutable_composite_insert(
+            connection,
+            "research_forward_observations",
+            ("hypothesis_id", "trade_date", "symbol"),
+            (
+                str(observation["hypothesis_id"]),
+                trade_date,
+                str(observation["symbol"]),
+            ),
+            ("input_hash", "result_hash", "observation_json", "recorded_at"),
+            (
+                str(observation["input_hash"]),
+                str(observation["result_hash"]),
+                self._json(observation["observation"]),
+                self._iso(observation["recorded_at"]),
+            ),
+        )
 
     def list_research_forward_observations(
-        self, *, hypothesis_id: str
+        self, *, hypothesis_id: str, symbol: str | None = None
     ) -> tuple[dict[str, object], ...]:
+        parameters: tuple[object, ...] = (hypothesis_id,)
+        symbol_filter = ""
+        if symbol is not None:
+            symbol_filter = " AND symbol = ?"
+            parameters = (hypothesis_id, symbol)
         with self.connect() as connection:
             rows = connection.execute(
-                """
-                SELECT hypothesis_id, trade_date, input_hash, result_hash,
+                f"""
+                SELECT hypothesis_id, trade_date, symbol, input_hash, result_hash,
                        observation_json, recorded_at
                 FROM research_forward_observations
-                WHERE hypothesis_id = ? ORDER BY trade_date
-                """,
-                (hypothesis_id,),
+                WHERE hypothesis_id = ?{symbol_filter}
+                ORDER BY trade_date, symbol
+                """,  # noqa: S608 - filter is a fixed internal fragment
+                parameters,
             ).fetchall()
         return tuple(
             {
                 "hypothesis_id": str(row[0]),
                 "trade_date": str(row[1]),
-                "input_hash": str(row[2]),
-                "result_hash": str(row[3]),
-                "observation": json.loads(str(row[4])),
-                "recorded_at": datetime.fromisoformat(str(row[5])),
+                "symbol": str(row[2]),
+                "input_hash": str(row[3]),
+                "result_hash": str(row[4]),
+                "observation": json.loads(str(row[5])),
+                "recorded_at": datetime.fromisoformat(str(row[6])),
+            }
+            for row in rows
+        )
+
+    def save_research_forward_outcome(self, outcome: dict[str, object]) -> None:
+        with self._idempotent_write_connection() as connection:
+            self._save_research_forward_outcome(connection, outcome)
+
+    def _save_research_forward_outcome(
+        self, connection: sqlite3.Connection, outcome: dict[str, object]
+    ) -> None:
+        required = (
+            "hypothesis_id",
+            "signal_date",
+            "symbol",
+            "horizon_sessions",
+            "observation_result_hash",
+            "outcome",
+            "outcome_hash",
+            "recorded_at",
+        )
+        if any(outcome.get(field) in (None, "") for field in required):
+            raise ValueError("forward research outcome is incomplete")
+        horizon = int(outcome["horizon_sessions"])
+        if horizon not in {5, 10, 20}:
+            raise ValueError("forward research outcome horizon must be 5, 10, or 20 sessions")
+        observation_hash = str(outcome["observation_result_hash"])
+        self._validate_research_hash(observation_hash, "observation result")
+        self._validate_research_hash(outcome["outcome_hash"], "outcome")
+        signal_date = self._iso(outcome["signal_date"])
+        symbol = str(outcome["symbol"])
+        hypothesis_id = str(outcome["hypothesis_id"])
+        observation = connection.execute(
+            """
+            SELECT result_hash FROM research_forward_observations
+            WHERE hypothesis_id = ? AND trade_date = ? AND symbol = ?
+            """,
+            (hypothesis_id, signal_date, symbol),
+        ).fetchone()
+        if observation is None:
+            raise ValueError("forward research outcome requires its observation")
+        if str(observation[0]) != observation_hash:
+            raise ValueError("forward research outcome observation hash conflicts")
+        self._immutable_composite_insert(
+            connection,
+            "research_forward_outcomes",
+            ("hypothesis_id", "signal_date", "symbol", "horizon_sessions"),
+            (hypothesis_id, signal_date, symbol, horizon),
+            ("observation_result_hash", "outcome_json", "outcome_hash", "recorded_at"),
+            (
+                observation_hash,
+                self._json(outcome["outcome"]),
+                str(outcome["outcome_hash"]),
+                self._iso(outcome["recorded_at"]),
+            ),
+        )
+
+    def save_research_forward_bundle(
+        self,
+        *,
+        observations: Iterable[dict[str, object]],
+        outcomes: Iterable[dict[str, object]],
+    ) -> dict[str, int]:
+        observation_records = tuple(dict(item) for item in observations)
+        outcome_records = tuple(dict(item) for item in outcomes)
+        with self._idempotent_write_connection() as connection:
+            for observation in observation_records:
+                self._save_research_forward_observation(connection, observation)
+            for outcome in outcome_records:
+                self._save_research_forward_outcome(connection, outcome)
+        return {"observations": len(observation_records), "outcomes": len(outcome_records)}
+
+    def list_research_forward_outcomes(
+        self, *, hypothesis_id: str, symbol: str | None = None
+    ) -> tuple[dict[str, object], ...]:
+        parameters: tuple[object, ...] = (hypothesis_id,)
+        symbol_filter = ""
+        if symbol is not None:
+            symbol_filter = " AND symbol = ?"
+            parameters = (hypothesis_id, symbol)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT hypothesis_id, signal_date, symbol, horizon_sessions,
+                       observation_result_hash, outcome_json, outcome_hash, recorded_at
+                FROM research_forward_outcomes
+                WHERE hypothesis_id = ?{symbol_filter}
+                ORDER BY signal_date, symbol, horizon_sessions
+                """,  # noqa: S608 - filter is a fixed internal fragment
+                parameters,
+            ).fetchall()
+        return tuple(
+            {
+                "hypothesis_id": str(row[0]),
+                "signal_date": str(row[1]),
+                "symbol": str(row[2]),
+                "horizon_sessions": int(row[3]),
+                "observation_result_hash": str(row[4]),
+                "outcome": json.loads(str(row[5])),
+                "outcome_hash": str(row[6]),
+                "recorded_at": datetime.fromisoformat(str(row[7])),
             }
             for row in rows
         )
@@ -5078,6 +5196,48 @@ class Database:
                 CREATE INDEX IF NOT EXISTS point_in_time_fundamentals_visible_idx
                     ON point_in_time_fundamentals(symbol, source, visible_date);
                 PRAGMA user_version = 12;
+                """
+            )
+        if version < 13:
+            connection.executescript(
+                """
+                ALTER TABLE research_forward_observations
+                    RENAME TO research_forward_observations_v12;
+                CREATE TABLE research_forward_observations (
+                    hypothesis_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    observation_json TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY(hypothesis_id, trade_date, symbol),
+                    FOREIGN KEY(hypothesis_id) REFERENCES research_hypotheses(hypothesis_id)
+                );
+                INSERT INTO research_forward_observations(
+                    hypothesis_id, trade_date, symbol, input_hash, result_hash,
+                    observation_json, recorded_at
+                )
+                SELECT hypothesis_id, trade_date, 'legacy-unspecified', input_hash,
+                       result_hash, observation_json, recorded_at
+                FROM research_forward_observations_v12;
+                DROP TABLE research_forward_observations_v12;
+                CREATE TABLE research_forward_outcomes (
+                    hypothesis_id TEXT NOT NULL,
+                    signal_date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    horizon_sessions INTEGER NOT NULL CHECK(horizon_sessions IN (5, 10, 20)),
+                    observation_result_hash TEXT NOT NULL,
+                    outcome_json TEXT NOT NULL,
+                    outcome_hash TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY(hypothesis_id, signal_date, symbol, horizon_sessions),
+                    FOREIGN KEY(hypothesis_id, signal_date, symbol)
+                        REFERENCES research_forward_observations(
+                            hypothesis_id, trade_date, symbol
+                        )
+                );
+                PRAGMA user_version = 13;
                 """
             )
 

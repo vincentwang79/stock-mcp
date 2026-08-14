@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, date, datetime
+from inspect import signature
 
 from stock_mcp import research_program
+from stock_mcp.domain import DailyBar, DailyPriceLimit
 
 
 class _Repository:
@@ -27,8 +29,10 @@ class ResearchProgramV5ForwardContractTest(unittest.TestCase):
     def test_forward_observation_is_deterministic_and_hypothesis_specific(self) -> None:
         build = getattr(research_program, "build_research_forward_observation", None)
         self.assertTrue(callable(build), "forward evidence needs a deterministic builder")
+        self.assertIn("symbol", signature(build).parameters)
         arguments = {
             "hypothesis_id": "no-recent-limit-up-v1",
+            "symbol": "600001.SH",
             "trade_date": date(2026, 8, 10),
             "source_timestamp": datetime(2026, 8, 10, 10, tzinfo=UTC),
             "raw_inputs": {"prior_limit_up_touched": (False, True, False, False, False)},
@@ -59,6 +63,7 @@ class ResearchProgramV5ForwardContractTest(unittest.TestCase):
 
         salience = build(
             hypothesis_id="extreme-return-abnormal-turnover-v1",
+            symbol="600001.SH",
             trade_date=date(2026, 8, 10),
             source_timestamp=arguments["source_timestamp"],
             raw_inputs={
@@ -71,6 +76,7 @@ class ResearchProgramV5ForwardContractTest(unittest.TestCase):
         self.assertEqual(900, salience["observation"]["industry_relative_return_bps"])
         risk = build(
             hypothesis_id="downside-tail-liquidity-v1",
+            symbol="600001.SH",
             trade_date=date(2026, 8, 10),
             source_timestamp=arguments["source_timestamp"],
             raw_inputs={
@@ -82,6 +88,7 @@ class ResearchProgramV5ForwardContractTest(unittest.TestCase):
         self.assertEqual(-400, risk["observation"]["worst_return_bps"])
         separation = build(
             hypothesis_id="overnight-intraday-separation-v1",
+            symbol="600001.SH",
             trade_date=date(2026, 8, 10),
             source_timestamp=arguments["source_timestamp"],
             raw_inputs={
@@ -91,6 +98,126 @@ class ResearchProgramV5ForwardContractTest(unittest.TestCase):
             },
         )
         self.assertEqual(500, separation["observation"]["overnight_return_bps"])
+
+    def test_forward_outcomes_require_a_complete_strict_twenty_session_path(self) -> None:
+        build = getattr(research_program, "build_research_forward_outcomes", None)
+        self.assertTrue(callable(build), "forward evidence needs deterministic outcomes")
+        observed_at = datetime(2025, 1, 2, 10, tzinfo=UTC)
+        observation = {
+            "hypothesis_id": "overnight-intraday-separation-v1",
+            "trade_date": "2025-01-02",
+            "symbol": "600001.SH",
+            "result_hash": "a" * 64,
+        }
+        future_bars = tuple(
+            DailyBar(
+                symbol="600001.SH",
+                trade_date=date(2025, 1, 2 + index),
+                open_1e4=100_000 + index * 1_000,
+                high_1e4=101_000 + index * 1_000,
+                low_1e4=99_000 + index * 1_000,
+                close_1e4=100_000 + index * 1_000,
+                pre_close_1e4=99_000 + index * 1_000,
+                volume_shares=1_000,
+                amount_fen=1_000_000,
+                source="tushare",
+                source_timestamp=observed_at,
+            )
+            for index in range(1, 21)
+        )
+        outcomes = build(
+            observation=observation,
+            signal_close_1e4=100_000,
+            future_bars=future_bars,
+            benchmark_close_path_1e4=tuple(200_000 + index * 1_000 for index in range(21)),
+            recorded_at=datetime(2025, 1, 22, 10, tzinfo=UTC),
+        )
+        self.assertEqual([5, 10, 20], [item["horizon_sessions"] for item in outcomes])
+        self.assertEqual(500, outcomes[0]["outcome"]["gross_return_bps"])
+        self.assertEqual(250, outcomes[0]["outcome"]["benchmark_return_bps"])
+        self.assertEqual(250, outcomes[0]["outcome"]["excess_return_bps"])
+        repeated_later = build(
+            observation=observation,
+            signal_close_1e4=100_000,
+            future_bars=future_bars,
+            benchmark_close_path_1e4=tuple(200_000 + index * 1_000 for index in range(21)),
+            recorded_at=datetime(2025, 1, 23, 10, tzinfo=UTC),
+        )
+        self.assertEqual(outcomes, repeated_later)
+        with self.assertRaisesRegex(ValueError, "twenty"):
+            build(
+                observation=observation,
+                signal_close_1e4=100_000,
+                future_bars=future_bars[:-1],
+                benchmark_close_path_1e4=tuple(200_000 + index * 1_000 for index in range(20)),
+                recorded_at=datetime(2025, 1, 22, 10, tzinfo=UTC),
+            )
+
+    def test_price_history_builds_two_observations_and_six_outcomes(self) -> None:
+        build = getattr(research_program, "build_price_research_forward_bundle", None)
+        self.assertTrue(callable(build), "stored prices need an automatic research builder")
+        timestamp = datetime(2025, 1, 22, 10, tzinfo=UTC)
+        signal_bar = DailyBar(
+            symbol="600001.SH",
+            trade_date=date(2025, 1, 2),
+            open_1e4=101_000,
+            high_1e4=103_000,
+            low_1e4=100_000,
+            close_1e4=102_000,
+            pre_close_1e4=100_000,
+            volume_shares=1_000,
+            amount_fen=1_000_000,
+            source="tushare",
+            source_timestamp=timestamp,
+        )
+        prior_limits = tuple(
+            DailyPriceLimit(
+                symbol="600001.SH",
+                trade_date=date(2024, 12, 26 + index),
+                up_limit_1e4=110_000,
+                down_limit_1e4=90_000,
+                touched_up=index == 4,
+                touched_down=False,
+                policy_exception=False,
+                algorithm="mainboard-10pct-round-half-up-v1",
+            )
+            for index in range(5)
+        )
+        future_bars = tuple(
+            DailyBar(
+                symbol="600001.SH",
+                trade_date=date(2025, 1, 2 + index),
+                open_1e4=102_000 + index * 500,
+                high_1e4=103_000 + index * 500,
+                low_1e4=101_000 + index * 500,
+                close_1e4=102_000 + index * 500,
+                pre_close_1e4=101_500 + index * 500,
+                volume_shares=1_000,
+                amount_fen=1_000_000,
+                source="tushare",
+                source_timestamp=timestamp,
+            )
+            for index in range(1, 21)
+        )
+        bundle = build(
+            signal_bar=signal_bar,
+            prior_limits=prior_limits,
+            future_bars=future_bars,
+            benchmark_close_path_1e4=tuple(200_000 + index * 500 for index in range(21)),
+            recorded_at=timestamp,
+        )
+        self.assertEqual(2, len(bundle["observations"]))
+        self.assertEqual(6, len(bundle["outcomes"]))
+        no_recent = next(
+            item
+            for item in bundle["observations"]
+            if item["hypothesis_id"] == "no-recent-limit-up-v1"
+        )
+        self.assertEqual(1, no_recent["observation"]["recent_limit_up_days"])
+        self.assertEqual(
+            {"no-recent-limit-up-v1", "overnight-intraday-separation-v1"},
+            {item["hypothesis_id"] for item in bundle["outcomes"]},
+        )
 
     def test_point_in_time_batch_rejects_future_rows_before_any_write(self) -> None:
         ingest = getattr(research_program, "ingest_point_in_time_research_batch", None)

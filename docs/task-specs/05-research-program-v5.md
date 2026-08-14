@@ -37,11 +37,13 @@ Research Program v5 扩大沪深主板候选研究范围，但不把“测试更
 
 ## 终身试验账本
 
-Schema v12 增加不可变研究事实：
+Schema v12 首先增加不可变研究事实；Schema v13 将前向事实纠正为证券级主键并增加成熟
+结果：
 
 - `research_hypotheses`：研究族、机制、冻结公式、数据要求、状态和首次登记时间；
 - `research_trials`：每次实际检验的 manifest、样本角色、结果哈希和终态；
-- `research_forward_observations`：冻结假设在新交易日上的逐日证据；
+- `research_forward_observations`：冻结假设在新交易日、逐证券的证据；
+- `research_forward_outcomes`：与观察结果哈希绑定的 5/10/20 会话诊断结果；
 - `point_in_time_fundamentals`：以实际公告日为可见边界的基本面事实。
 
 记录不得删除或覆盖。同一主键同内容写入幂等，不同内容必须冲突。多重检验的试验总数
@@ -51,7 +53,7 @@ Schema v12 增加不可变研究事实：
 
 | 研究族 | 第一批冻结代表 | 数据边界 | 当前角色 |
 | --- | --- | --- | --- |
-| attention-overreaction | `no-recent-limit-up-v1` | 目标日前 20 日涨停触及次数 | 前向确认候选 |
+| attention-overreaction | `no-recent-limit-up-v1` | 目标日前 5 日涨停触及次数 | 前向确认候选 |
 | salience-turnover | `extreme-return-abnormal-turnover-v1` | 行业相对收益、20 日换手基线 | 探索 |
 | downside-liquidity-risk | `downside-tail-liquidity-v1` | 60 日下行波动、跳空和换手稳定性 | 探索 |
 | overnight-intraday | `overnight-intraday-separation-v1` | 前一收盘、当日开盘和收盘 | 探索 |
@@ -139,3 +141,37 @@ stock-mcp collect-research-facts --root PATH --trade-date YYYY-MM-DD
 该入口会联网，因此标准测试只能使用注入的固定客户端。它不会自动调度、回填未来数据、
 启动策略研究或生成候选。Windows 实机调用仍属于外部门禁；在此之前必须通过本地临时
 SQLite、假客户端、重复行、未来公告、修订隔离和 MCP 只读回归。
+
+## 第三批：证券级历史观察与成熟结果
+
+第三批修正了“同一假设、同一日期只能保存一条观察”的横截面建模缺陷：
+
+- Schema v13 主键固定为 `hypothesis_id + trade_date + symbol`；
+- v12 旧观察保留为 `symbol=legacy-unspecified`，不伪造其证券身份；
+- outcome 主键增加 `horizon_sessions`，只允许 5、10、20 会话；
+- 每个 outcome 必须引用已存在观察的精确 `result_hash`；
+- 观察和全部 outcome 在同一个 SQLite 事务中写入，任何冲突整批回滚；
+- 重跑时间不进入结果身份；同一持久化行情今天或以后重跑必须幂等。
+
+首个离线执行器只处理已有完整价格事实即可支持的两个研究族：
+
+- `no-recent-limit-up-v1`：读取严格相邻的前 5 个交易日涨停事实；存储层仍禁止把
+  `2026-08-07` 及以前数据伪装成新的前向确认样本；
+- `overnight-intraday-separation-v1`：读取信号日同源前收、开盘和收盘。
+
+结果路径为 `signal-close-diagnostic`，只用于研究诊断，不代表可交易入场。它使用后续恰好
+20 个持久化交易会话，输出个股 5/10/20 日毛收益、等权主板非 ST 基准和超额收益；不含
+滑点、成交约束或策略候选语义。缺交易日、缺证券行情、混合价格源、缺涨停事实或空基准
+均显式失败。
+
+离线入口为：
+
+```text
+stock-mcp build-research-forward-evidence --root PATH --symbol 600001.SH \
+  --trade-date YYYY-MM-DD --through YYYY-MM-DD \
+  --hypothesis-id overnight-intraday-separation-v1
+```
+
+`extreme-return-abnormal-turnover-v1` 与 `downside-tail-liquidity-v1` 仍保留纯函数和证券级
+持久化能力，但自动执行必须等点时 `daily_basic` 覆盖完整后再接入；不得使用当前换手率
+回填历史。标准验收继续只使用固定的本地 SQLite 小数据集，不访问 Tushare 或 Windows。

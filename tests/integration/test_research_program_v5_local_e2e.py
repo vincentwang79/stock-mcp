@@ -27,7 +27,7 @@ class ResearchProgramV5LocalE2ETest(unittest.TestCase):
             database = Database(root / "data" / "stock-mcp.sqlite3")
             hypotheses = database.list_research_hypotheses()
             self.assertEqual(11, len(hypotheses))
-            self.assertEqual(12, database.schema_version())
+            self.assertEqual(13, database.schema_version())
 
             timestamp = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
             march = normalize_tushare_fina_indicator(
@@ -68,6 +68,7 @@ class ResearchProgramV5LocalE2ETest(unittest.TestCase):
                 {
                     "hypothesis_id": "no-recent-limit-up-v1",
                     "trade_date": "2026-08-10",
+                    "symbol": "600001.SH",
                     "input_hash": "1" * 64,
                     "result_hash": "2" * 64,
                     "observation": facts,
@@ -129,6 +130,7 @@ class ResearchProgramV5LocalE2ETest(unittest.TestCase):
             self.assertTrue(callable(record), "forward builder needs an immutable storage seam")
             arguments = {
                 "hypothesis_id": "no-recent-limit-up-v1",
+                "symbol": "600001.SH",
                 "trade_date": date(2026, 8, 10),
                 "source_timestamp": datetime(2026, 8, 10, 10, tzinfo=UTC),
                 "raw_inputs": {"prior_limit_up_touched": (False,) * 5},
@@ -167,6 +169,7 @@ class ResearchProgramV5LocalE2ETest(unittest.TestCase):
                 record(
                     database,
                     hypothesis_id=hypothesis_id,
+                    symbol="600001.SH",
                     trade_date=date(2026, 8, 10),
                     source_timestamp=datetime(2026, 8, 10, 10, tzinfo=UTC),
                     raw_inputs=raw_inputs,

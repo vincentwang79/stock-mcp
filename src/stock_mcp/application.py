@@ -187,11 +187,13 @@ class StockMcpApplication:
         observations = self._repository.list_research_forward_observations(
             hypothesis_id=hypothesis_id
         )
+        outcomes = self._repository.list_research_forward_outcomes(hypothesis_id=hypothesis_id)
         return _ok(
             {
                 "hypothesis": dict(hypothesis),
                 "trials": [dict(item) for item in trials],
                 "forward_observations": [dict(item) for item in observations],
+                "forward_outcomes": [dict(item) for item in outcomes],
             }
         )
 
