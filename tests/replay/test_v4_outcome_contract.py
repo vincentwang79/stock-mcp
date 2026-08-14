@@ -471,6 +471,55 @@ class V4OutcomeContractTest(unittest.TestCase):
         self.assertEqual(10_000, result["next_open_path"]["benchmark"]["completeness_rate_bps"])
         validate_v4_outcome_batch(candidates=(candidate,), outcomes={"candidate-no-entry": result})
 
+    def test_confirmed_entry_delayed_past_the_horizon_is_a_zero_return_terminal(self) -> None:
+        """A fully observed one-price delay is an execution fact, not a data gap."""
+
+        signal_date = date(2026, 1, 1)
+        sessions = tuple(signal_date + timedelta(days=index) for index in range(1, 26))
+        rows = []
+        for index, day in enumerate(sessions, start=1):
+            if index in {5, 6}:
+                bar = _bar(day.isoformat(), 100_000, 100_000, 100_000, 100_000)
+            elif index == 4:
+                bar = _bar(day.isoformat(), 100_000, 111_000, 99_000, 110_000)
+            else:
+                bar = _bar(day.isoformat(), 100_000, 102_000, 99_000, 100_000)
+            rows.append(
+                {
+                    **bar,
+                    "symbol": "600001.SH",
+                    "market_cap_fen": 100,
+                    "signal_market_cap_fen": 100,
+                    "source": "tushare",
+                }
+            )
+        candidate = {
+            "candidate_id": "candidate-confirmed-late",
+            "symbol": "600001.SH",
+            "trade_date": signal_date,
+            "market_cap_fen": 100,
+            "confirmation_condition": "close >= 110000",
+            "invalidation_condition": "close <= 90000",
+        }
+
+        result = outcomes.evaluate_v4_candidate_outcomes(
+            candidates=(candidate,),
+            bars_by_symbol={"600001.SH": rows},
+            status_by_symbol={"600001.SH": {day.isoformat(): 1 for day in sessions}},
+            mainboard_bars=rows,
+            source="tushare",
+            as_of=sessions[-1],
+        )["candidate-confirmed-late"]
+
+        confirmed = result["confirmed_next_open_path"]
+        self.assertEqual("confirmed", confirmed["status"])
+        self.assertEqual("unexecutable", confirmed["execution_status"])
+        self.assertEqual(0, confirmed["gross_return_20d_bps"])
+        self.assertEqual("complete", result["completeness_status"])
+        validate_v4_outcome_batch(
+            candidates=(candidate,), outcomes={"candidate-confirmed-late": result}
+        )
+
     def test_corporate_action_chain_does_not_manufacture_an_invalidation(self) -> None:
         signal_date = date(2026, 1, 1)
         sessions = tuple(signal_date + timedelta(days=index) for index in range(1, 26))

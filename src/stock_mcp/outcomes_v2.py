@@ -97,14 +97,22 @@ def evaluate_v4_candidate_outcomes(
             entry_open=True,
             expected_horizon_sessions=len(expected_dates),
         )
-        if next_entry is None and len(expected_dates) == 25 and len(post) >= 25:
-            next_path = _zero_return_terminal("unexecutable", costs=(10, 25, 50))
+        next_path = _terminalize_unexecutable_path(
+            next_path,
+            observed_rows=post,
+            expected_dates=expected_dates,
+        )
         confirmed_path = _path(
             post,
             confirmed_entry,
             costs=(10, 25, 50),
             entry_open=True,
             expected_horizon_sessions=len(expected_dates),
+        )
+        confirmed_path = _terminalize_unexecutable_path(
+            confirmed_path,
+            observed_rows=post,
+            expected_dates=expected_dates,
         )
         market_cap = candidate.get("market_cap_fen")
         signal_path["benchmark"] = _benchmark_path(
@@ -162,11 +170,14 @@ def evaluate_v4_candidate_outcomes(
             and (
                 paths["confirmed_next_open_path"]["status"] != "confirmed"  # type: ignore[index]
                 or (
-                    paths["confirmed_next_open_path"]["execution_status"] == "available"  # type: ignore[index]
-                    and paths["confirmed_next_open_path"]["benchmark"][  # type: ignore[index]
-                        "completeness_rate_bps"
-                    ]
-                    == 10_000
+                    paths["confirmed_next_open_path"]["execution_status"] == "unexecutable"  # type: ignore[index]
+                    or (
+                        paths["confirmed_next_open_path"]["execution_status"] == "available"  # type: ignore[index]
+                        and paths["confirmed_next_open_path"]["benchmark"][  # type: ignore[index]
+                            "completeness_rate_bps"
+                        ]
+                        == 10_000
+                    )
                 )
             )
             else "incomplete"
@@ -201,6 +212,8 @@ def validate_v4_outcome_batch(
             raise ValueError("v4 benchmark evidence is incomplete")
         confirmed = outcome.get("confirmed_next_open_path")
         if isinstance(confirmed, Mapping) and confirmed.get("status") == "confirmed":
+            if confirmed.get("execution_status") == "unexecutable":
+                continue
             confirmed_benchmark = confirmed.get("benchmark")
             if not (
                 confirmed.get("execution_status") == "available"
@@ -375,6 +388,23 @@ def _zero_return_terminal(status: str, *, costs: tuple[int, ...]) -> dict[str, o
         "mfe_20d_bps": 0,
         "mae_20d_bps": 0,
     }
+
+
+def _terminalize_unexecutable_path(
+    path: dict[str, object],
+    *,
+    observed_rows: Sequence[Mapping[str, object]],
+    expected_dates: Sequence[date],
+) -> dict[str, object]:
+    """Turn a fully observed but too-late entry into a recorded zero-return outcome."""
+
+    if (
+        len(expected_dates) == 25
+        and len(observed_rows) >= 25
+        and path.get("status") in {"partial", "unavailable"}
+    ):
+        return _zero_return_terminal("unexecutable", costs=(10, 25, 50))
+    return path
 
 
 def _condition(value: object) -> Callable[[int | Fraction], bool]:
