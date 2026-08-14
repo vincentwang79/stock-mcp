@@ -46,6 +46,11 @@ def _decimal_text(value: object) -> str | None:
     return normalized or "0"
 
 
+def _require_aware_timestamp(value: datetime, *, field: str) -> None:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError(f"{field} must be a timezone-aware datetime")
+
+
 def first_batch_hypotheses(*, registered_at: datetime) -> tuple[dict[str, object], ...]:
     """Return the first frozen research agenda without registering anything."""
 
@@ -330,6 +335,99 @@ def overnight_intraday_facts(
     }
 
 
+def build_research_forward_observation(
+    *,
+    hypothesis_id: str,
+    trade_date: date,
+    source_timestamp: datetime,
+    raw_inputs: Mapping[str, object],
+) -> dict[str, object]:
+    """Build one immutable continuous-feature observation without selecting stocks."""
+
+    _require_aware_timestamp(source_timestamp, field="source_timestamp")
+    normalized_inputs = {
+        str(key): list(value) if isinstance(value, tuple) else value
+        for key, value in raw_inputs.items()
+    }
+    if hypothesis_id == "no-recent-limit-up-v1":
+        raw_touched = tuple(raw_inputs.get("prior_limit_up_touched", ()))
+        if any(not isinstance(value, bool) for value in raw_touched):
+            raise ValueError("prior limit-up evidence must contain only boolean values")
+        touched = tuple(bool(value) for value in raw_touched)
+        if len(touched) != 5:
+            raise ValueError("no-recent-limit-up requires exactly five prior sessions")
+        count = sum(touched)
+        facts: dict[str, object] = {
+            "recent_limit_up_days": count,
+            "passes_no_recent_limit_up": count == 0,
+        }
+    elif hypothesis_id == "extreme-return-abnormal-turnover-v1":
+        facts = extreme_return_abnormal_turnover_facts(
+            current_return_bps=int(raw_inputs["current_return_bps"]),
+            industry_return_bps=int(raw_inputs["industry_return_bps"]),
+            prior_turnover_bps=tuple(int(value) for value in raw_inputs["prior_turnover_bps"]),
+            current_turnover_bps=int(raw_inputs["current_turnover_bps"]),
+        )
+    elif hypothesis_id == "downside-tail-liquidity-v1":
+        facts = downside_tail_liquidity_facts(
+            prior_returns_bps=tuple(int(value) for value in raw_inputs["prior_returns_bps"]),
+            overnight_gaps_bps=tuple(int(value) for value in raw_inputs["overnight_gaps_bps"]),
+            turnover_bps=tuple(int(value) for value in raw_inputs["turnover_bps"]),
+        )
+    elif hypothesis_id == "overnight-intraday-separation-v1":
+        facts = overnight_intraday_facts(
+            pre_close_1e4=int(raw_inputs["pre_close_1e4"]),
+            open_1e4=int(raw_inputs["open_1e4"]),
+            close_1e4=int(raw_inputs["close_1e4"]),
+        )
+    else:
+        raise ValueError("research hypothesis does not have a forward feature builder")
+    input_payload = {
+        "schema": "research-forward-input-v1",
+        "hypothesis_id": hypothesis_id,
+        "trade_date": trade_date.isoformat(),
+        "source_timestamp": source_timestamp.isoformat(),
+        "raw_inputs": normalized_inputs,
+    }
+    result_payload = {
+        "schema": "research-forward-result-v1",
+        "hypothesis_id": hypothesis_id,
+        "trade_date": trade_date.isoformat(),
+        "facts": facts,
+    }
+    return {
+        "hypothesis_id": hypothesis_id,
+        "trade_date": trade_date.isoformat(),
+        "input_hash": _hash(input_payload),
+        "result_hash": _hash(result_payload),
+        "observation": facts,
+        "recorded_at": source_timestamp.isoformat(),
+    }
+
+
+def record_research_forward_observation(
+    repository: object,
+    *,
+    hypothesis_id: str,
+    trade_date: date,
+    source_timestamp: datetime,
+    raw_inputs: Mapping[str, object],
+) -> dict[str, object]:
+    """Build and immutably persist one forward feature observation."""
+
+    observation = build_research_forward_observation(
+        hypothesis_id=hypothesis_id,
+        trade_date=trade_date,
+        source_timestamp=source_timestamp,
+        raw_inputs=raw_inputs,
+    )
+    save = getattr(repository, "save_research_forward_observation", None)
+    if not callable(save):
+        raise TypeError("repository does not support forward research observations")
+    save(observation)
+    return observation
+
+
 def normalize_tushare_daily_basic(
     row: Mapping[str, object], *, source_timestamp: datetime
 ) -> dict[str, object]:
@@ -382,6 +480,107 @@ def normalize_tushare_fina_indicator(
         "source_timestamp": source_timestamp.isoformat(),
     }
     result["payload_hash"] = _hash(payload)
+    return result
+
+
+def ingest_point_in_time_research_batch(
+    repository: object,
+    *,
+    as_of: date,
+    source_timestamp: datetime,
+    daily_basic_rows: Sequence[Mapping[str, object]] = (),
+    fina_indicator_rows: Sequence[Mapping[str, object]] = (),
+) -> dict[str, int]:
+    """Validate a complete caller-supplied provider batch before one repository write."""
+
+    _require_aware_timestamp(source_timestamp, field="source_timestamp")
+    daily = tuple(
+        normalize_tushare_daily_basic(row, source_timestamp=source_timestamp)
+        for row in daily_basic_rows
+    )
+    financial = tuple(
+        normalize_tushare_fina_indicator(row, source_timestamp=source_timestamp)
+        for row in fina_indicator_rows
+    )
+    if any(str(item["visible_date"]) != as_of.isoformat() for item in daily):
+        raise ValueError("daily_basic batch contains a different or future trade date")
+    if any(str(item["visible_date"]) > as_of.isoformat() for item in financial):
+        raise ValueError("fina_indicator batch contains future announcement evidence")
+    records = (*daily, *financial)
+    save = getattr(repository, "save_point_in_time_fundamentals", None)
+    if not callable(save):
+        raise TypeError("repository does not support point-in-time fundamentals")
+    saved = int(save(records))
+    return {
+        "daily_basic": len(daily),
+        "fina_indicator": len(financial),
+        "saved": saved,
+    }
+
+
+def point_in_time_research_facts(
+    repository: object, *, symbol: str, as_of: date
+) -> dict[str, object]:
+    """Build a non-imputed valuation/profitability view as it was visible on a date."""
+
+    load = getattr(repository, "load_point_in_time_fundamentals", None)
+    if not callable(load):
+        raise TypeError("repository does not support point-in-time fundamentals")
+    records = tuple(load(symbol=symbol, as_of=as_of))
+
+    def day_text(value: object) -> str:
+        return value.isoformat() if isinstance(value, date) else str(value)
+
+    daily = tuple(
+        item
+        for item in records
+        if item.get("interface") == "daily_basic"
+        and day_text(item.get("report_period")) == as_of.isoformat()
+    )
+    financial = tuple(item for item in records if item.get("interface") == "fina_indicator")
+    selected_daily = max(daily, key=lambda item: day_text(item.get("visible_date")), default=None)
+    selected_financial = max(
+        financial,
+        key=lambda item: (
+            day_text(item.get("report_period")),
+            day_text(item.get("visible_date")),
+            str(item.get("revision_key")),
+        ),
+        default=None,
+    )
+    valuation = (
+        {}
+        if selected_daily is None
+        else {
+            key: value
+            for key, value in dict(selected_daily.get("payload", {})).items()
+            if key in {"turnover_rate_f", "pe_ttm", "pb", "float_share", "circ_mv"}
+        }
+    )
+    profitability = (
+        {}
+        if selected_financial is None
+        else {
+            key: value
+            for key, value in dict(selected_financial.get("payload", {})).items()
+            if key in {"roe", "roa", "gross_margin", "update_flag"}
+        }
+    )
+    result: dict[str, object] = {
+        "schema": "point-in-time-research-facts-v1",
+        "symbol": symbol,
+        "as_of": as_of.isoformat(),
+        "coverage_status": "complete" if valuation and profitability else "partial",
+        "valuation": valuation,
+        "valuation_visible_date": (
+            None if selected_daily is None else day_text(selected_daily.get("visible_date"))
+        ),
+        "profitability": profitability,
+        "profitability_visible_date": (
+            None if selected_financial is None else day_text(selected_financial.get("visible_date"))
+        ),
+    }
+    result["facts_hash"] = _hash(result)
     return result
 
 

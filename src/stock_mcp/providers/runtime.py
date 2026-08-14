@@ -13,6 +13,7 @@ from stock_mcp.providers.normalization import (
     normalize_akshare_snapshot,
     normalize_tushare_daily,
 )
+from stock_mcp.research_program import ingest_point_in_time_research_batch
 
 
 class ProviderRuntimeError(ValueError):
@@ -100,6 +101,90 @@ class TushareDailyProvider:
             if len(closes) == 20 and bar.close_1e4 > sum(closes) / len(closes):
                 above += 1
         return above * 10_000 // len(bars)
+
+
+class TushareResearchFactProvider:
+    """Daily point-in-time research facts backed by an injected Tushare client."""
+
+    source = "tushare"
+
+    def __init__(self, *, client: object, clock: Clock) -> None:
+        self._client = client
+        self._clock = clock
+
+    def fetch(self, as_of: date) -> dict[str, object]:
+        encoded_date = as_of.strftime("%Y%m%d")
+        daily_call = getattr(self._client, "daily_basic", None)
+        financial_call = getattr(self._client, "fina_indicator_vip", None)
+        if not callable(daily_call) or not callable(financial_call):
+            raise ProviderRuntimeError(
+                "Tushare research client requires daily_basic() and fina_indicator_vip()"
+            )
+        daily = self._research_records(daily_call(trade_date=encoded_date))
+        financial = self._research_records(financial_call(ann_date=encoded_date))
+        if not daily:
+            raise ProviderRuntimeError("Tushare daily_basic returned no rows")
+        self._reject_duplicates(daily, fields=("ts_code",), label="daily_basic")
+        self._reject_duplicates(
+            financial,
+            fields=("ts_code", "ann_date", "end_date"),
+            optional_fields=("update_flag",),
+            label="fina_indicator_vip",
+        )
+        return {
+            "as_of": as_of,
+            "source_timestamp": _timestamp(self._clock()),
+            "daily_basic_rows": daily,
+            "fina_indicator_rows": financial,
+        }
+
+    @staticmethod
+    def _research_records(response: object) -> tuple[Mapping[str, object], ...]:
+        to_dict = getattr(response, "to_dict", None)
+        if callable(to_dict):
+            response = to_dict(orient="records")
+        if isinstance(response, Mapping | str | bytes):
+            raise ProviderRuntimeError("Tushare research response must contain row mappings")
+        try:
+            records = tuple(response)  # type: ignore[arg-type]
+        except TypeError as error:
+            raise ProviderRuntimeError("Tushare research response must be iterable") from error
+        if not all(isinstance(row, Mapping) for row in records):
+            raise ProviderRuntimeError("Tushare research response contains a non-mapping row")
+        return records  # type: ignore[return-value]
+
+    @staticmethod
+    def _reject_duplicates(
+        rows: Sequence[Mapping[str, object]],
+        *,
+        fields: tuple[str, ...],
+        label: str,
+        optional_fields: tuple[str, ...] = (),
+    ) -> None:
+        required_keys = [tuple(str(row.get(field) or "") for field in fields) for row in rows]
+        if any(not all(key) for key in required_keys):
+            raise ProviderRuntimeError(f"Tushare {label} response has an incomplete key")
+        keys = [
+            (*required, *(str(row.get(field) or "") for field in optional_fields))
+            for required, row in zip(required_keys, rows, strict=True)
+        ]
+        if len(keys) != len(set(keys)):
+            raise ProviderRuntimeError(f"Tushare {label} response contains duplicate rows")
+
+
+def collect_tushare_research_day(
+    repository: object, *, provider: TushareResearchFactProvider, as_of: date
+) -> dict[str, int]:
+    """Fetch both interfaces before atomically handing normalized facts to storage."""
+
+    batch = provider.fetch(as_of)
+    return ingest_point_in_time_research_batch(
+        repository,
+        as_of=as_of,
+        source_timestamp=batch["source_timestamp"],  # type: ignore[arg-type]
+        daily_basic_rows=batch["daily_basic_rows"],  # type: ignore[arg-type]
+        fina_indicator_rows=batch["fina_indicator_rows"],  # type: ignore[arg-type]
+    )
 
 
 class BaoStockTradingCalendar:

@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from hashlib import sha256
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from stock_mcp.backfill import BackfillResult
@@ -176,6 +177,58 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         database = Database(self.root / "data" / "stock-mcp.sqlite3")
         self.assertEqual(11, len(database.list_research_hypotheses()))
         self.assertEqual(6, len(database.list_research_trials()))
+
+    def test_cli_collects_one_research_fact_day_with_an_injected_sdk(self) -> None:
+        config = self.root / "config"
+        config.mkdir(parents=True)
+        (config / "secrets.env").write_text(
+            "TUSHARE_TOKEN=fixed-offline-test-token\n", encoding="utf-8"
+        )
+
+        class Client:
+            def daily_basic(self, **_arguments):
+                return [
+                    {
+                        "ts_code": "600001.SH",
+                        "trade_date": "20260814",
+                        "pe_ttm": 8.5,
+                    }
+                ]
+
+            def fina_indicator_vip(self, **_arguments):
+                return [
+                    {
+                        "ts_code": "600001.SH",
+                        "ann_date": "20260814",
+                        "end_date": "20260630",
+                        "roe": 10.5,
+                        "update_flag": "1",
+                    }
+                ]
+
+        output = StringIO()
+        module = SimpleNamespace(pro_api=lambda _token: Client())
+        with (
+            patch.dict(sys.modules, {"tushare": module}),
+            redirect_stdout(output),
+        ):
+            exit_code = main(
+                [
+                    "collect-research-facts",
+                    "--root",
+                    str(self.root),
+                    "--trade-date",
+                    "2026-08-14",
+                ]
+            )
+        self.assertEqual(0, exit_code)
+        self.assertNotIn("fixed-offline-test-token", output.getvalue())
+        from stock_mcp.storage import Database
+
+        facts = Database(self.root / "data" / "stock-mcp.sqlite3").load_point_in_time_fundamentals(
+            symbol="600001.SH", as_of=date(2026, 8, 14)
+        )
+        self.assertEqual(2, len(facts))
 
     def test_standalone_database_inspector_works_before_source_install(self) -> None:
         self.assertEqual(0, main(["migrate", "--root", str(self.root)]))

@@ -99,7 +99,7 @@ Deflated Sharpe Ratio 和 Probability of Backtest Overfitting 仅作为辅助诊
 1. 建立 Schema v12 终身账本、点时基本面和前向观察持久化；
 2. 登记现有 v4 六臂及失败结果，冻结 `no-recent-limit-up-v1`；
 3. 提供三类价格/交易行为探索信号的纯函数，不启动真实全量研究；
-4. 提供 Tushare `daily_basic` 与 `fina_indicator` 的离线规范化入口；
+4. 提供 Tushare `daily_basic` 与 `fina_indicator_vip` 的离线规范化入口；
 5. 提供终身试验计数、White RC 与 Romano-Wolf 结构化诊断；
 6. MCP 第一批只增加只读研究账本查询，不公开自动注册、自动选参或自动晋级写操作。
 
@@ -116,3 +116,26 @@ stock-mcp initialize-research-program --root PATH [--study-id V4_STUDY_ID]
 
 不带 `--study-id` 时只登记 11 个冻结定义；带入已完成研究 ID 时，还会从持久化诊断生成
 六条不可变 `discovery_exhausted` trial。该命令不联网、不启动研究，也不创建或激活策略。
+
+## 第二批：前向事实与点时数据链
+
+第二批只扩大研究证据，不改变当前策略：
+
+- `no-recent-limit-up-v1` 使用目标日前恰好 5 个交易日的涨停触及布尔事实；
+- `extreme-return-abnormal-turnover-v1` 保存行业相对收益与换手异常连续值；
+- `downside-tail-liquidity-v1` 保存下行半偏差、最差收益、最差隔夜跳空和换手离散度；
+- `overnight-intraday-separation-v1` 分离隔夜与日内收益；
+- 每条观察绑定假设 ID、交易日、来源时间、原始输入哈希和结果哈希；同日不同内容冲突；
+- 这些观察不改变 v0.3 的资格、分数、排名或候选数量，也不等同于 20 日 outcome。
+
+Tushare 点时收集以一个交易日为原子批次：先同时取得 `daily_basic` 与当日公告的
+`fina_indicator_vip`，检查键唯一、交易日和公告日边界，再一次性规范化并写入。任一接口失败、
+出现重复键或未来公告时整批不得写入。显式运行入口为：
+
+```text
+stock-mcp collect-research-facts --root PATH --trade-date YYYY-MM-DD
+```
+
+该入口会联网，因此标准测试只能使用注入的固定客户端。它不会自动调度、回填未来数据、
+启动策略研究或生成候选。Windows 实机调用仍属于外部门禁；在此之前必须通过本地临时
+SQLite、假客户端、重复行、未来公告、修订隔离和 MCP 只读回归。

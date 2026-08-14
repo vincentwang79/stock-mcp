@@ -52,6 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "derive-v4-study-report",
             "derive-v4-study-diagnostics",
             "initialize-research-program",
+            "collect-research-facts",
             "migrate",
             "backup",
             "restore",
@@ -142,6 +143,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ensure_ascii=False,
             )
         )
+        return 0
+
+    if args.command == "collect-research-facts":
+        if args.trade_date is None:
+            parser.error("collect-research-facts requires --trade-date")
+        if not settings.tushare_token:
+            raise ValueError("Tushare token is required for research fact collection")
+        import tushare  # type: ignore[import-not-found]
+
+        from .providers.runtime import (
+            TushareResearchFactProvider,
+            collect_tushare_research_day,
+        )
+        from .storage import Database
+
+        database = Database(settings.database_path)
+        database.initialize()
+        provider = TushareResearchFactProvider(
+            client=tushare.pro_api(settings.tushare_token),
+            clock=lambda: datetime.now(UTC),
+        )
+        report = collect_tushare_research_day(database, provider=provider, as_of=args.trade_date)
+        print(json.dumps({"status": "recorded", **report}, ensure_ascii=False))
         return 0
 
     if args.command == "inspect-database":

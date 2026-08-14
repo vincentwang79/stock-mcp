@@ -120,6 +120,111 @@ class ResearchProgramV5LocalE2ETest(unittest.TestCase):
             self.assertEqual(6, listed["data"]["lifetime_trial_count"])
             self.assertEqual(1, len(detail["data"]["forward_observations"]))
 
+    def test_actual_sqlite_records_forward_features_and_preserves_revision_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(0, main(("initialize-research-program", "--root", str(root))))
+            database = Database(root / "data" / "stock-mcp.sqlite3")
+            record = getattr(research_program, "record_research_forward_observation", None)
+            self.assertTrue(callable(record), "forward builder needs an immutable storage seam")
+            arguments = {
+                "hypothesis_id": "no-recent-limit-up-v1",
+                "trade_date": date(2026, 8, 10),
+                "source_timestamp": datetime(2026, 8, 10, 10, tzinfo=UTC),
+                "raw_inputs": {"prior_limit_up_touched": (False,) * 5},
+            }
+            first = record(database, **arguments)
+            self.assertEqual(first, record(database, **arguments))
+            with self.assertRaisesRegex(ValueError, "conflict"):
+                record(
+                    database,
+                    **{
+                        **arguments,
+                        "raw_inputs": {
+                            "prior_limit_up_touched": (False, False, False, False, True)
+                        },
+                    },
+                )
+            additional_forward_inputs = {
+                "extreme-return-abnormal-turnover-v1": {
+                    "current_return_bps": 1_100,
+                    "industry_return_bps": 250,
+                    "prior_turnover_bps": (100, 120, 140),
+                    "current_turnover_bps": 210,
+                },
+                "downside-tail-liquidity-v1": {
+                    "prior_returns_bps": (-300, -100, 50, 200),
+                    "overnight_gaps_bps": (-180, 20, 40),
+                    "turnover_bps": (100, 120, 110),
+                },
+                "overnight-intraday-separation-v1": {
+                    "pre_close_1e4": 100_000,
+                    "open_1e4": 102_000,
+                    "close_1e4": 103_000,
+                },
+            }
+            for hypothesis_id, raw_inputs in additional_forward_inputs.items():
+                record(
+                    database,
+                    hypothesis_id=hypothesis_id,
+                    trade_date=date(2026, 8, 10),
+                    source_timestamp=datetime(2026, 8, 10, 10, tzinfo=UTC),
+                    raw_inputs=raw_inputs,
+                )
+
+            research_program.ingest_point_in_time_research_batch(
+                database,
+                as_of=date(2026, 3, 31),
+                source_timestamp=datetime(2026, 3, 31, 10, tzinfo=UTC),
+                daily_basic_rows=(
+                    {"ts_code": "600001.SH", "trade_date": "20260331", "pe_ttm": 8.5},
+                ),
+                fina_indicator_rows=(
+                    {
+                        "ts_code": "600001.SH",
+                        "ann_date": "20260320",
+                        "end_date": "20251231",
+                        "roe": 12.5,
+                        "update_flag": "1",
+                    },
+                ),
+            )
+            research_program.ingest_point_in_time_research_batch(
+                database,
+                as_of=date(2026, 4, 30),
+                source_timestamp=datetime(2026, 4, 30, 10, tzinfo=UTC),
+                daily_basic_rows=({"ts_code": "600001.SH", "trade_date": "20260430", "pe_ttm": 9},),
+                fina_indicator_rows=(
+                    {
+                        "ts_code": "600001.SH",
+                        "ann_date": "20260410",
+                        "end_date": "20251231",
+                        "roe": 11.8,
+                        "update_flag": "1",
+                    },
+                ),
+            )
+            march = research_program.point_in_time_research_facts(
+                database, symbol="600001.SH", as_of=date(2026, 3, 31)
+            )
+            april = research_program.point_in_time_research_facts(
+                database, symbol="600001.SH", as_of=date(2026, 4, 30)
+            )
+            self.assertEqual("12.5", march["profitability"]["roe"])
+            self.assertEqual("11.8", april["profitability"]["roe"])
+            application = StockMcpApplication(database, object(), object())
+            detail = {tool.name: tool for tool in build_tool_catalog(application)}[
+                "get_research_hypothesis"
+            ].handler(hypothesis_id="no-recent-limit-up-v1")
+            self.assertTrue(detail["ok"])
+            self.assertEqual(1, len(detail["data"]["forward_observations"]))
+            for hypothesis_id in additional_forward_inputs:
+                observations = database.list_research_forward_observations(
+                    hypothesis_id=hypothesis_id
+                )
+                self.assertEqual(1, len(observations))
+                self.assertRegex(observations[0]["result_hash"], r"^[0-9a-f]{64}$")
+
 
 if __name__ == "__main__":
     unittest.main()
