@@ -41,6 +41,14 @@ class V4StudyAmendmentContractTest(unittest.TestCase):
         self.assertEqual(10_000, amendment["report"]["outcome_completeness_rate_bps"])
         self.assertFalse(amendment["report"]["sina_replication_complete"])
         self.assertEqual([], amendment["report"]["proposals"])
+        self.assertEqual(
+            "v0.3-policy-1",
+            amendment["statistics"]["baseline"]["arm_id"],
+        )
+        self.assertEqual(
+            "paired_delta_vs_v0.3-policy-1",
+            amendment["statistics"]["arm_statistic_semantics"],
+        )
         self.assertRegex(str(amendment["source_days_hash"]), r"^[0-9a-f]{64}$")
         self.assertRegex(str(amendment["amendment_hash"]), r"^[0-9a-f]{64}$")
 

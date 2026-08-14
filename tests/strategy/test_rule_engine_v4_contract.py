@@ -69,6 +69,33 @@ class V4ResearchStrategyContractTest(unittest.TestCase):
         )
         self.assertEqual("retain_baseline", result["winner"]["decision"])
 
+    def test_statistics_expose_baseline_and_explicit_paired_differences(self) -> None:
+        result = strategy.evaluate_v4_research_statistics(
+            manifest_hash="a" * 64,
+            primary_metric="20d_25bps_market_cap_matched_excess_bps",
+            daily_candidate_returns={
+                "v0.3-policy-1": (100, 200, 300, 400),
+                "v4-trend-quality": (110, 215, 320, 425),
+            },
+        )
+
+        self.assertEqual(
+            {
+                "arm_id": "v0.3-policy-1",
+                "mean_absolute_primary_bps": 250.0,
+                "signal_day_count": 4,
+            },
+            result["baseline"],
+        )
+        challenger = result["arms"]["v4-trend-quality"]
+        self.assertEqual(267.5, challenger["mean_absolute_primary_bps"])
+        self.assertEqual(17.5, challenger["mean_paired_delta_bps"])
+        self.assertEqual(challenger["ci95"], challenger["paired_delta_ci95"])
+        self.assertEqual(
+            "paired_delta_vs_v0.3-policy-1",
+            result["arm_statistic_semantics"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

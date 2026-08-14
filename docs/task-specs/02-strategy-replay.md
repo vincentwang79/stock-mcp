@@ -106,7 +106,9 @@ v4 manifest 门禁要求纳入证券逐日状态全覆盖；价格与状态双�
 
 报告规则修正不得要求重新读取行情或覆盖旧研究。受支持的窄范围修订可以只读消费已经
 持久化的逐日结果，输出绑定 source study/result/day hashes 的独立 amendment；无法识别的
-不完整证据仍须显式失败。
+不完整证据仍须显式失败。统计输出必须单独给出基线绝对主指标均值，并把 challenger 的
+绝对均值、相对基线的配对日差值及配对 bootstrap 区间明确命名；兼容字段
+`mean_primary_bps` 仍表示配对差值，不能误读为 challenger 的绝对均值。
 
 主研究没有独立的 Sina 价格 replication 证据时，完整运行的合法终态仍是
 `retain_baseline`，不得生成 proposal。该状态表示主研究执行成功但胜出门禁未满足，不表示

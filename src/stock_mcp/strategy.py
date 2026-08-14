@@ -324,6 +324,9 @@ def evaluate_v4_research_statistics(
         and replication_evidence.get("completeness_rate_bps") == 10_000
         and float(replication_evidence.get("primary_metric_bps", -1)) >= 0
     )
+    absolute_means = {
+        name: sum(values) / len(values) for name, values in daily_candidate_returns.items()
+    }
     means = {name: sum(values) / len(values) for name, values in challengers.items()}
     boot_means: dict[str, list[float]] = {name: [] for name in challengers}
     white_maxima: list[float] = []
@@ -364,8 +367,13 @@ def evaluate_v4_research_statistics(
             and unexecutable_delta <= 200
         )
         arm_results[name] = {
+            # Kept for compatibility with already persisted v4 reports.  Its
+            # value is a paired delta, not an absolute arm mean.
             "mean_primary_bps": mean,
             "ci95": [lower, upper],
+            "mean_absolute_primary_bps": absolute_means[name],
+            "mean_paired_delta_bps": mean,
+            "paired_delta_ci95": [lower, upper],
             "eligible": eligible,
             "completeness_rate_bps": metadata.get("completeness_rate_bps"),
             "executable_rate_bps": metadata.get("executable_rate_bps"),
@@ -392,6 +400,12 @@ def evaluate_v4_research_statistics(
         "family_wise_p_value": family_p,
         "study_complete": study_complete,
         "sina_replication_complete": replication_ok,
+        "arm_statistic_semantics": f"paired_delta_vs_{baseline_id}",
+        "baseline": {
+            "arm_id": baseline_id,
+            "mean_absolute_primary_bps": absolute_means[baseline_id],
+            "signal_day_count": len(baseline),
+        },
         "arms": arm_results,
         "winner": {
             "eligible": winner_name is not None,
