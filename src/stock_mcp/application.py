@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 from .domain import Candidate, DailyReview, Evidence, StrategyVersion
+from .research_program import build_forward_research_report
 from .strategy import validate_strategy_parameters
 
 Result = dict[str, Any]
@@ -196,6 +197,28 @@ class StockMcpApplication:
                 "forward_outcomes": [dict(item) for item in outcomes],
             }
         )
+
+    def get_research_forward_report(
+        self, *, hypothesis_id: str, horizon_sessions: int = 20
+    ) -> Result:
+        hypothesis = self._repository.get_research_hypothesis(hypothesis_id)
+        if hypothesis is None:
+            return _error("research_hypothesis_not_found", "research hypothesis does not exist")
+        observations = self._repository.list_research_forward_observations(
+            hypothesis_id=hypothesis_id
+        )
+        outcomes = self._repository.list_research_forward_outcomes(hypothesis_id=hypothesis_id)
+        try:
+            report = build_forward_research_report(
+                hypothesis=hypothesis,
+                observations=observations,
+                outcomes=outcomes,
+                horizon_sessions=horizon_sessions,
+                as_of=datetime.now(UTC),
+            )
+        except ValueError as error:
+            return _error("research_forward_report_invalid", str(error))
+        return _ok(report)
 
     def start_v4_research(self, *, manifest_hash: str, idempotency_key: str) -> Result:
         coordinator = getattr(self, "_v4_research", None)

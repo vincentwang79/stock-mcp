@@ -38,6 +38,7 @@ EXPECTED_TOOL_NAMES = frozenset(
         "activate_provider_source",
         "list_research_hypotheses",
         "get_research_hypothesis",
+        "get_research_forward_report",
     }
 )
 
@@ -62,6 +63,7 @@ READ_TOOL_NAMES = frozenset(
         "get_provider_qualification",
         "list_research_hypotheses",
         "get_research_hypothesis",
+        "get_research_forward_report",
     }
 )
 WRITE_TOOL_NAMES = EXPECTED_TOOL_NAMES - READ_TOOL_NAMES

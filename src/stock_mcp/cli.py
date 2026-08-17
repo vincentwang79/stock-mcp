@@ -54,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "initialize-research-program",
             "collect-research-facts",
             "build-research-forward-evidence",
+            "derive-research-forward-report",
             "migrate",
             "backup",
             "restore",
@@ -88,6 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--through", type=date.fromisoformat)
     parser.add_argument("--symbol")
     parser.add_argument("--hypothesis-id", action="append", default=[])
+    parser.add_argument("--horizon-sessions", type=int, choices=(5, 10, 20), default=20)
     parser.add_argument("--dataset-hash")
     parser.add_argument("--qualification-id")
     parser.add_argument("--study-id")
@@ -195,6 +197,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             hypothesis_ids=hypotheses,
         )
         print(json.dumps({"status": "recorded", **report}, ensure_ascii=False))
+        return 0
+
+    if args.command == "derive-research-forward-report":
+        if len(args.hypothesis_id) != 1:
+            parser.error("derive-research-forward-report requires exactly one --hypothesis-id")
+        from .research_program import build_forward_research_report
+        from .storage import Database
+
+        database = Database(settings.database_path)
+        database.initialize()
+        hypothesis_id = str(args.hypothesis_id[0])
+        hypothesis = database.get_research_hypothesis(hypothesis_id)
+        if hypothesis is None:
+            raise ValueError("research hypothesis does not exist")
+        report = build_forward_research_report(
+            hypothesis=hypothesis,
+            observations=database.list_research_forward_observations(hypothesis_id=hypothesis_id),
+            outcomes=database.list_research_forward_outcomes(hypothesis_id=hypothesis_id),
+            horizon_sessions=args.horizon_sessions,
+            as_of=datetime.now(UTC),
+        )
+        print(json.dumps(report, ensure_ascii=False))
         return 0
 
     if args.command == "inspect-database":

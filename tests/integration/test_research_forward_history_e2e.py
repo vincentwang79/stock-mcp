@@ -103,6 +103,30 @@ class ResearchForwardHistoryE2ETest(unittest.TestCase):
                 json.loads(completed.stdout),
             )
 
+            derived = subprocess.run(
+                (
+                    sys.executable,
+                    "-m",
+                    "stock_mcp.cli",
+                    "derive-research-forward-report",
+                    "--root",
+                    str(root),
+                    "--hypothesis-id",
+                    "overnight-intraday-separation-v1",
+                    "--horizon-sessions",
+                    "20",
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, derived.returncode, derived.stderr)
+            forward_report = json.loads(derived.stdout)
+            self.assertEqual("research-forward-report-v1", forward_report["schema"])
+            self.assertEqual("descriptive-only", forward_report["analysis_mode"])
+            self.assertEqual(1, forward_report["evidence"]["mature_observation_count"])
+            self.assertFalse(forward_report["decision"]["promotion_eligible"])
+
 
 def _bar(symbol: str, session: date, close: int, timestamp: datetime) -> DailyBar:
     return DailyBar(

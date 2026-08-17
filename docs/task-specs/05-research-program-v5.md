@@ -175,3 +175,32 @@ stock-mcp build-research-forward-evidence --root PATH --symbol 600001.SH \
 `extreme-return-abnormal-turnover-v1` 与 `downside-tail-liquidity-v1` 仍保留纯函数和证券级
 持久化能力，但自动执行必须等点时 `daily_basic` 覆盖完整后再接入；不得使用当前换手率
 回填历史。标准验收继续只使用固定的本地 SQLite 小数据集，不访问 Tushare 或 Windows。
+
+## 第四批：逐日等权前向报告
+
+第四批把证券级成熟 outcome 汇总为只读证据报告，但不把报告伪装成策略晋级：
+
+- 先在每个信号日、每个组内等权，再跨信号日等权；证券数量多的日期不得获得更高权重；
+- `no-recent-limit-up-v1` 使用已经冻结的 `passes_no_recent_limit_up` 布尔事实，比较
+  “无近期涨停”与“存在近期涨停”两个同期横截面组；只有同日两组都存在时才进入配对差值；
+- 其他尚未冻结方向或对照定义的连续因子只能生成 `descriptive-only` 报告，不能事后选择
+  分位点、方向或阈值；
+- 只使用查询时已经可见、与 observation `result_hash` 精确绑定的 5/10/20 会话 outcome；
+  未成熟 outcome 单独计为 pending，v12 的 `legacy-unspecified` 观察单独排除；
+- discovery 冻结日及以前的观察不进入 forward 报告；重叠日序列使用冻结的 circular moving
+  block 方法描述相关性，不把普通独立同分布区间用于重叠 outcome；
+- manifest 绑定假设定义、horizon、观察哈希和 outcome 哈希；相同证据、不同读取顺序或读取
+  时间生成相同报告和结果哈希；
+- 报告固定返回 `status=evidence_only` 与 `promotion_eligible=false`。独立审阅、跨源复制、
+  proposal、治理回放、认证和激活仍是互不替代的后续动作。
+
+本地离线入口为：
+
+```text
+stock-mcp derive-research-forward-report --root PATH \
+  --hypothesis-id no-recent-limit-up-v1 --horizon-sessions 20
+```
+
+ChatGPT 只读入口为 `get_research_forward_report`。开发验收使用固定临时 SQLite，覆盖同日多证券、
+不同日期证券数不等、配对/非配对日期、未成熟结果、legacy 排除、哈希冲突、重复读取和 CLI
+子进程；不访问实时行情，也不宣称 Windows 全量规模已经通过。

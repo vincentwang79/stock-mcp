@@ -701,6 +701,281 @@ def record_stored_price_research_bundle(
     return save_bundle(observations=bundle["observations"], outcomes=bundle["outcomes"])
 
 
+def build_forward_research_report(
+    *,
+    hypothesis: Mapping[str, object],
+    observations: Sequence[Mapping[str, object]],
+    outcomes: Sequence[Mapping[str, object]],
+    horizon_sessions: int,
+    as_of: datetime,
+    block_sessions: int = 20,
+    bootstrap_samples: int = 10_000,
+) -> dict[str, object]:
+    """Summarize visible mature evidence without creating a promotion decision."""
+
+    _require_aware_timestamp(as_of, field="as_of")
+    hypothesis_id = str(hypothesis.get("hypothesis_id") or "")
+    definition_hash = str(hypothesis.get("definition_hash") or "")
+    if not hypothesis_id or len(definition_hash) != _HASH_PATTERN_LENGTH:
+        raise ValueError("forward research hypothesis identity is incomplete")
+    if horizon_sessions not in {5, 10, 20}:
+        raise ValueError("forward research report horizon must be 5, 10, or 20 sessions")
+    if block_sessions < 1 or bootstrap_samples < 1:
+        raise ValueError("forward research report bootstrap settings must be positive")
+    frozen_after_text = hypothesis.get("frozen_after")
+    frozen_after = (
+        None if frozen_after_text in (None, "") else date.fromisoformat(str(frozen_after_text))
+    )
+
+    selected_observations: list[dict[str, object]] = []
+    excluded_legacy = 0
+    excluded_discovery = 0
+    for item in observations:
+        if str(item.get("hypothesis_id") or "") != hypothesis_id:
+            raise ValueError("forward research observation hypothesis conflicts")
+        symbol = str(item.get("symbol") or "")
+        if symbol == "legacy-unspecified":
+            excluded_legacy += 1
+            continue
+        trade_date = date.fromisoformat(str(item.get("trade_date") or ""))
+        if frozen_after is not None and trade_date <= frozen_after:
+            excluded_discovery += 1
+            continue
+        recorded_at = _as_aware_datetime(item.get("recorded_at"), field="observation recorded_at")
+        if recorded_at > as_of:
+            continue
+        result_hash = str(item.get("result_hash") or "")
+        input_hash = str(item.get("input_hash") or "")
+        _require_research_hash(result_hash, field="observation result")
+        _require_research_hash(input_hash, field="observation input")
+        facts = item.get("observation")
+        if not isinstance(facts, Mapping):
+            raise ValueError("forward research observation facts are incomplete")
+        selected_observations.append(
+            {
+                "hypothesis_id": hypothesis_id,
+                "trade_date": trade_date,
+                "symbol": symbol,
+                "input_hash": input_hash,
+                "result_hash": result_hash,
+                "observation": dict(facts),
+                "recorded_at": recorded_at,
+            }
+        )
+    selected_observations.sort(key=lambda item: (item["trade_date"], item["symbol"]))
+
+    outcome_by_key: dict[tuple[date, str], dict[str, object]] = {}
+    for item in outcomes:
+        if str(item.get("hypothesis_id") or "") != hypothesis_id:
+            raise ValueError("forward research outcome hypothesis conflicts")
+        if int(item.get("horizon_sessions") or 0) != horizon_sessions:
+            continue
+        signal_date = date.fromisoformat(str(item.get("signal_date") or ""))
+        symbol = str(item.get("symbol") or "")
+        key = (signal_date, symbol)
+        if key in outcome_by_key:
+            raise ValueError("forward research outcome key is duplicated")
+        recorded_at = _as_aware_datetime(item.get("recorded_at"), field="outcome recorded_at")
+        outcome_hash = str(item.get("outcome_hash") or "")
+        _require_research_hash(outcome_hash, field="outcome")
+        result = item.get("outcome")
+        if not isinstance(result, Mapping):
+            raise ValueError("forward research outcome payload is incomplete")
+        outcome_by_key[key] = {
+            "observation_result_hash": str(item.get("observation_result_hash") or ""),
+            "outcome_hash": outcome_hash,
+            "outcome": dict(result),
+            "recorded_at": recorded_at,
+        }
+
+    mature: list[dict[str, object]] = []
+    pending = 0
+    for observation in selected_observations:
+        key = (observation["trade_date"], str(observation["symbol"]))
+        outcome = outcome_by_key.get(key)
+        if outcome is None or outcome["recorded_at"] > as_of:
+            pending += 1
+            continue
+        if outcome["observation_result_hash"] != observation["result_hash"]:
+            raise ValueError("forward research outcome observation hash conflicts")
+        payload = outcome["outcome"]
+        if payload.get("path") != "signal-close-diagnostic":
+            raise ValueError("forward research outcome path is unsupported")
+        excess = payload.get("excess_return_bps")
+        if not isinstance(excess, int):
+            raise ValueError("forward research outcome excess return is incomplete")
+        mature.append({**observation, **outcome, "excess_return_bps": excess})
+
+    by_date: dict[date, list[int]] = {}
+    for item in mature:
+        by_date.setdefault(item["trade_date"], []).append(int(item["excess_return_bps"]))
+    daily_all = tuple(_rounded_mean(by_date[day]) for day in sorted(by_date))
+
+    analysis_mode = "descriptive-only"
+    treatment_daily: tuple[int, ...] = ()
+    control_daily: tuple[int, ...] = ()
+    paired_deltas: tuple[int, ...] = ()
+    unpaired_dates = len(by_date)
+    failed_gates = ["contrast_not_frozen", "independent_review_required"]
+    if hypothesis_id == "no-recent-limit-up-v1":
+        analysis_mode = "paired-cohort"
+        treatment_by_date: dict[date, list[int]] = {}
+        control_by_date: dict[date, list[int]] = {}
+        for item in mature:
+            passes = item["observation"].get("passes_no_recent_limit_up")
+            if not isinstance(passes, bool):
+                raise ValueError("no-recent-limit-up cohort fact is incomplete")
+            target = treatment_by_date if passes else control_by_date
+            target.setdefault(item["trade_date"], []).append(int(item["excess_return_bps"]))
+        paired_dates = tuple(sorted(set(treatment_by_date) & set(control_by_date)))
+        treatment_daily = tuple(_rounded_mean(treatment_by_date[day]) for day in paired_dates)
+        control_daily = tuple(_rounded_mean(control_by_date[day]) for day in paired_dates)
+        paired_deltas = tuple(
+            treatment - control
+            for treatment, control in zip(treatment_daily, control_daily, strict=True)
+        )
+        unpaired_dates = len(set(by_date) - set(paired_dates))
+        failed_gates = ["independent_review_required", "strategy_governance_not_requested"]
+
+    manifest_payload = {
+        "schema": "research-forward-report-manifest-v1",
+        "hypothesis_id": hypothesis_id,
+        "definition_hash": definition_hash,
+        "frozen_after": None if frozen_after is None else frozen_after.isoformat(),
+        "horizon_sessions": horizon_sessions,
+        "observation_evidence": [
+            {
+                "trade_date": item["trade_date"].isoformat(),
+                "symbol": item["symbol"],
+                "input_hash": item["input_hash"],
+                "result_hash": item["result_hash"],
+            }
+            for item in selected_observations
+        ],
+        "outcome_evidence": [
+            {
+                "signal_date": item["trade_date"].isoformat(),
+                "symbol": item["symbol"],
+                "observation_result_hash": item["observation_result_hash"],
+                "outcome_hash": item["outcome_hash"],
+            }
+            for item in mature
+        ],
+    }
+    manifest_hash = _hash(manifest_payload)
+    summary = {
+        "daily_equal_weight_excess_mean_bps": _optional_rounded_mean(daily_all),
+        "treatment_daily_mean_excess_bps": _optional_rounded_mean(treatment_daily),
+        "control_daily_mean_excess_bps": _optional_rounded_mean(control_daily),
+        "paired_delta_mean_bps": _optional_rounded_mean(paired_deltas),
+        "paired_delta_ci_95_bps": _bootstrap_mean_interval(
+            paired_deltas,
+            manifest_hash=manifest_hash,
+            block_sessions=block_sessions,
+            bootstrap_samples=bootstrap_samples,
+        ),
+        "positive_paired_day_ratio_bps": (
+            None
+            if not paired_deltas
+            else _rounded_ratio_bps(sum(value > 0 for value in paired_deltas), len(paired_deltas))
+        ),
+    }
+    visible_timestamps = [item["recorded_at"] for item in selected_observations]
+    visible_timestamps.extend(item["recorded_at"] for item in mature)
+    signal_dates = tuple(sorted(by_date))
+    report: dict[str, object] = {
+        "schema": "research-forward-report-v1",
+        "hypothesis_id": hypothesis_id,
+        "horizon_sessions": horizon_sessions,
+        "analysis_mode": analysis_mode,
+        "manifest_hash": manifest_hash,
+        "evidence_available_through": (
+            None if not visible_timestamps else max(visible_timestamps).isoformat()
+        ),
+        "sample_boundary": {
+            "frozen_after_exclusive": None if frozen_after is None else frozen_after.isoformat(),
+            "overlap_method": "circular_moving_block",
+            "block_sessions": block_sessions,
+        },
+        "evidence": {
+            "observation_count": len(selected_observations),
+            "mature_observation_count": len(mature),
+            "pending_observation_count": pending,
+            "excluded_legacy_observation_count": excluded_legacy,
+            "excluded_discovery_observation_count": excluded_discovery,
+            "signal_date_count": len(signal_dates),
+            "paired_signal_date_count": len(paired_deltas),
+            "unpaired_signal_date_count": unpaired_dates,
+            "first_signal_date": None if not signal_dates else signal_dates[0].isoformat(),
+            "last_signal_date": None if not signal_dates else signal_dates[-1].isoformat(),
+        },
+        "summary": summary,
+        "decision": {
+            "status": "evidence_only",
+            "promotion_eligible": False,
+            "failed_gates": failed_gates,
+        },
+    }
+    report["result_hash"] = _hash(report)
+    return report
+
+
+def _as_aware_datetime(value: object, *, field: str) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    _require_aware_timestamp(parsed, field=field)
+    return parsed
+
+
+def _require_research_hash(value: str, *, field: str) -> None:
+    if len(value) != _HASH_PATTERN_LENGTH or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(f"forward research {field} hash must be lowercase SHA-256")
+
+
+def _rounded_mean(values: Sequence[int]) -> int:
+    if not values:
+        raise ValueError("research mean requires observations")
+    return int(
+        (Decimal(sum(values)) / Decimal(len(values))).to_integral_value(rounding=ROUND_HALF_UP)
+    )
+
+
+def _optional_rounded_mean(values: Sequence[int]) -> int | None:
+    return None if not values else _rounded_mean(values)
+
+
+def _rounded_ratio_bps(numerator: int, denominator: int) -> int:
+    return int(
+        (Decimal(numerator) * Decimal(10_000) / Decimal(denominator)).to_integral_value(
+            rounding=ROUND_HALF_UP
+        )
+    )
+
+
+def _bootstrap_mean_interval(
+    values: Sequence[int],
+    *,
+    manifest_hash: str,
+    block_sessions: int,
+    bootstrap_samples: int,
+) -> list[int] | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return [int(values[0]), int(values[0])]
+    rng = random.Random(
+        int(hashlib.sha256(f"{manifest_hash}|v5-forward-report-v1".encode()).hexdigest(), 16)
+    )
+    samples = sorted(
+        _rounded_mean(_circular_blocks(values, block=min(block_sessions, len(values)), rng=rng))
+        for _ in range(bootstrap_samples)
+    )
+    lower = samples[int((len(samples) - 1) * 0.025)]
+    upper = samples[int((len(samples) - 1) * 0.975)]
+    return [lower, upper]
+
+
 def normalize_tushare_daily_basic(
     row: Mapping[str, object], *, source_timestamp: datetime
 ) -> dict[str, object]:
