@@ -54,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "initialize-research-program",
             "collect-research-facts",
             "build-research-forward-evidence",
+            "run-research-forward-batch",
             "derive-research-forward-report",
             "migrate",
             "backup",
@@ -197,6 +198,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             hypothesis_ids=hypotheses,
         )
         print(json.dumps({"status": "recorded", **report}, ensure_ascii=False))
+        return 0
+
+    if args.command == "run-research-forward-batch":
+        if args.trade_date is None:
+            parser.error("run-research-forward-batch requires --trade-date")
+        from .research_program import run_stored_price_research_batch
+        from .storage import Database
+
+        database = Database(settings.database_path)
+        database.initialize()
+        report = run_stored_price_research_batch(
+            database,
+            trade_date=args.trade_date,
+            source="tushare",
+            recorded_at=datetime.now(UTC),
+        )
+        print(json.dumps(report, ensure_ascii=False))
         return 0
 
     if args.command == "derive-research-forward-report":

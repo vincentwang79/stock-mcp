@@ -3592,6 +3592,14 @@ class Database:
                 raise ValueError("terminal pipeline runs are immutable")
             if run.snapshot is not None:
                 self._save_market_snapshot(connection, run.snapshot)
+                self._save_snapshot_price_limits(connection, run.snapshot)
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO expected_trading_days(source, trade_date)
+                    VALUES (?, ?)
+                    """,
+                    (run.snapshot.source, run.trade_date.isoformat()),
+                )
                 cutoff = (run.trade_date - timedelta(days=3 * 366)).isoformat()
                 connection.execute(
                     "DELETE FROM snapshot_securities WHERE trade_date < ?", (cutoff,)
@@ -3617,6 +3625,55 @@ class Database:
                     *values,
                 ),
             )
+
+    def _save_snapshot_price_limits(
+        self, connection: sqlite3.Connection, snapshot: MarketSnapshot
+    ) -> None:
+        """Persist deterministic same-day limit facts with a live normalized snapshot."""
+
+        from .v3 import derive_daily_price_limit
+
+        security_by_symbol = {security.symbol: security for security in snapshot.securities}
+        facts: dict[str, str] = {}
+        for bar in snapshot.bars:
+            if bar.trade_date != snapshot.trade_date or bar.source != snapshot.source:
+                continue
+            security = security_by_symbol.get(bar.symbol)
+            if security is None:
+                continue
+            fact = derive_daily_price_limit(bar, security)
+            facts[bar.symbol] = self._json(
+                {
+                    "limit_up_1e4": fact.up_limit_1e4,
+                    "limit_down_1e4": fact.down_limit_1e4,
+                    "touched_up": fact.touched_up,
+                    "touched_down": fact.touched_down,
+                    "policy_exception": fact.policy_exception,
+                    "algorithm": fact.algorithm,
+                }
+            )
+        existing_rows = connection.execute(
+            """
+            SELECT symbol, fact_json FROM daily_price_limits
+            WHERE trade_date = ? AND source = ? ORDER BY symbol
+            """,
+            (snapshot.trade_date.isoformat(), snapshot.source),
+        ).fetchall()
+        existing = {str(row[0]): str(row[1]) for row in existing_rows}
+        if existing:
+            if existing != facts:
+                raise ValueError("daily_price_limits facts are immutable; conflicting batch")
+            return
+        connection.executemany(
+            """
+            INSERT INTO daily_price_limits(trade_date, source, symbol, fact_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                (snapshot.trade_date.isoformat(), snapshot.source, symbol, encoded)
+                for symbol, encoded in sorted(facts.items())
+            ),
+        )
 
     def load_pipeline_run(self, trade_date: date, pipeline_version: str) -> object | None:
         from .pipeline import PipelineRun
@@ -4558,6 +4615,51 @@ class Database:
                 WHERE hypothesis_id = ?{symbol_filter}
                 ORDER BY trade_date, symbol
                 """,  # noqa: S608 - filter is a fixed internal fragment
+                parameters,
+            ).fetchall()
+        return tuple(
+            {
+                "hypothesis_id": str(row[0]),
+                "trade_date": str(row[1]),
+                "symbol": str(row[2]),
+                "input_hash": str(row[3]),
+                "result_hash": str(row[4]),
+                "observation": json.loads(str(row[5])),
+                "recorded_at": datetime.fromisoformat(str(row[6])),
+            }
+            for row in rows
+        )
+
+    def list_pending_research_forward_observations(
+        self,
+        *,
+        hypothesis_ids: Iterable[str],
+        mature_on_or_before: date,
+    ) -> tuple[dict[str, object], ...]:
+        """Return mature observations that still lack their 20-session outcome."""
+
+        normalized = tuple(dict.fromkeys(str(item) for item in hypothesis_ids if str(item)))
+        if not normalized:
+            return ()
+        placeholders = ",".join("?" for _ in normalized)
+        parameters: tuple[object, ...] = (*normalized, mature_on_or_before.isoformat())
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT o.hypothesis_id, o.trade_date, o.symbol, o.input_hash,
+                       o.result_hash, o.observation_json, o.recorded_at
+                FROM research_forward_observations AS o
+                WHERE o.hypothesis_id IN ({placeholders})
+                  AND o.trade_date <= ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM research_forward_outcomes AS r
+                      WHERE r.hypothesis_id = o.hypothesis_id
+                        AND r.signal_date = o.trade_date
+                        AND r.symbol = o.symbol
+                        AND r.horizon_sessions = 20
+                  )
+                ORDER BY o.trade_date, o.symbol, o.hypothesis_id
+                """,  # noqa: S608 - placeholders are generated, values remain bound
                 parameters,
             ).fetchall()
         return tuple(

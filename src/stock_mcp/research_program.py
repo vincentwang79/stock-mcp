@@ -20,6 +20,7 @@ from statistics import median
 from stock_mcp.domain import DailyBar, DailyPriceLimit
 
 _HASH_PATTERN_LENGTH = 64
+_FORWARD_SAMPLE_START = date(2026, 8, 8)
 
 
 def _canonical_json(value: object) -> str:
@@ -699,6 +700,241 @@ def record_stored_price_research_bundle(
         hypothesis_ids=hypothesis_ids,
     )
     return save_bundle(observations=bundle["observations"], outcomes=bundle["outcomes"])
+
+
+def run_stored_price_research_batch(
+    repository: object,
+    *,
+    trade_date: date,
+    source: str,
+    recorded_at: datetime,
+    hypothesis_ids: Sequence[str] = (
+        "no-recent-limit-up-v1",
+        "overnight-intraday-separation-v1",
+    ),
+) -> dict[str, object]:
+    """Observe published candidates and append every newly mature stored-price outcome.
+
+    The batch performs no provider I/O.  Existing observations and outcomes are
+    immutable, so a process crash can be recovered by invoking the same trade date
+    again.  Missing future prices block only the affected candidate observations.
+    """
+
+    _require_aware_timestamp(recorded_at, field="recorded_at")
+    if trade_date < _FORWARD_SAMPLE_START:
+        raise ValueError("forward sample begins after the exhausted discovery window")
+    requested = tuple(dict.fromkeys(str(item) for item in hypothesis_ids))
+    supported = {
+        "no-recent-limit-up-v1",
+        "overnight-intraday-separation-v1",
+    }
+    if not requested or any(item not in supported for item in requested):
+        raise ValueError("forward research batch contains an unsupported hypothesis")
+    get_review = getattr(repository, "get_daily_review", None)
+    load_days = getattr(repository, "load_expected_trading_days", None)
+    load_snapshot = getattr(repository, "load_market_snapshot", None)
+    load_history = getattr(repository, "load_symbol_history", None)
+    load_limits = getattr(repository, "load_daily_price_limits", None)
+    list_observations = getattr(repository, "list_research_forward_observations", None)
+    list_pending = getattr(repository, "list_pending_research_forward_observations", None)
+    save_bundle = getattr(repository, "save_research_forward_bundle", None)
+    if not all(
+        callable(item)
+        for item in (
+            get_review,
+            load_days,
+            load_snapshot,
+            load_history,
+            load_limits,
+            list_observations,
+            list_pending,
+            save_bundle,
+        )
+    ):
+        raise TypeError("repository does not support the forward research batch")
+
+    review = get_review(trade_date)
+    if review is None:
+        raise ValueError("forward research batch requires a published daily review")
+    if review.source != source:
+        raise ValueError("forward research batch requires one published price source")
+    snapshot = load_snapshot(trade_date, source=source, history_limit=1)
+    if snapshot.source != source:
+        raise ValueError("forward research batch snapshot source conflicts")
+    signal_bars = {bar.symbol: bar for bar in snapshot.bars if bar.trade_date == trade_date}
+    sessions = tuple(load_days(trade_date - timedelta(days=120), trade_date, source=source))
+    if trade_date not in sessions:
+        raise ValueError("forward research batch trade date is absent from the calendar")
+    signal_index = sessions.index(trade_date)
+    prior_dates = sessions[max(0, signal_index - 5) : signal_index]
+    if review.candidates and len(prior_dates) != 5:
+        raise ValueError("forward research batch requires five prior sessions")
+    limit_batches = (
+        {day: load_limits(day, source=source) for day in prior_dates}
+        if "no-recent-limit-up-v1" in requested
+        else {}
+    )
+    existing_keys = {
+        (str(item["hypothesis_id"]), str(item["trade_date"]), str(item["symbol"]))
+        for hypothesis_id in requested
+        for item in list_observations(hypothesis_id=hypothesis_id)
+        if str(item["trade_date"]) == trade_date.isoformat()
+    }
+    observations: list[dict[str, object]] = []
+    for candidate in review.candidates:
+        signal_bar = signal_bars.get(candidate.symbol)
+        if signal_bar is None:
+            raise ValueError("forward research candidate price is incomplete")
+        if signal_bar.source != source:
+            raise ValueError("forward research candidate has a mixed price source")
+        if "no-recent-limit-up-v1" in requested:
+            prior_touched: list[bool] = []
+            algorithms: list[str] = []
+            for day in prior_dates:
+                fact = limit_batches[day].get(candidate.symbol)
+                if not isinstance(fact, Mapping):
+                    raise ValueError("forward research prior price-limit evidence is incomplete")
+                if bool(fact.get("policy_exception")):
+                    raise ValueError("forward research price-limit policy exception is unsupported")
+                prior_touched.append(bool(fact["touched_up"]))
+                algorithms.append(str(fact["algorithm"]))
+            if len(set(algorithms)) != 1:
+                raise ValueError("forward research price-limit algorithms conflict")
+            observations.append(
+                build_research_forward_observation(
+                    hypothesis_id="no-recent-limit-up-v1",
+                    symbol=candidate.symbol,
+                    trade_date=trade_date,
+                    source_timestamp=signal_bar.source_timestamp,
+                    raw_inputs={
+                        "prior_limit_up_touched": tuple(prior_touched),
+                        "prior_trade_dates": tuple(day.isoformat() for day in prior_dates),
+                        "price_limit_algorithm": algorithms[0],
+                        "candidate_id": candidate.candidate_id,
+                        "strategy_version": candidate.strategy_version,
+                    },
+                )
+            )
+        if "overnight-intraday-separation-v1" in requested:
+            observations.append(
+                build_research_forward_observation(
+                    hypothesis_id="overnight-intraday-separation-v1",
+                    symbol=candidate.symbol,
+                    trade_date=trade_date,
+                    source_timestamp=signal_bar.source_timestamp,
+                    raw_inputs={
+                        "pre_close_1e4": signal_bar.pre_close_1e4,
+                        "open_1e4": signal_bar.open_1e4,
+                        "close_1e4": signal_bar.close_1e4,
+                        "source": signal_bar.source,
+                        "candidate_id": candidate.candidate_id,
+                        "strategy_version": candidate.strategy_version,
+                    },
+                )
+            )
+    save_bundle(observations=observations, outcomes=())
+    new_observations = sum(
+        (
+            str(item["hypothesis_id"]),
+            str(item["trade_date"]),
+            str(item["symbol"]),
+        )
+        not in existing_keys
+        for item in observations
+    )
+
+    calendar = tuple(load_days(_FORWARD_SAMPLE_START, trade_date, source=source))
+    if len(calendar) < 21:
+        pending: tuple[Mapping[str, object], ...] = ()
+    else:
+        pending = tuple(
+            list_pending(
+                hypothesis_ids=requested,
+                mature_on_or_before=calendar[-21],
+            )
+        )
+    grouped: dict[date, dict[str, list[Mapping[str, object]]]] = {}
+    for observation in pending:
+        grouped.setdefault(date.fromisoformat(str(observation["trade_date"])), {}).setdefault(
+            str(observation["symbol"]), []
+        ).append(observation)
+
+    outcomes: list[dict[str, object]] = []
+    matured_observations = 0
+    blocked_observations = 0
+    for signal_date, by_symbol in sorted(grouped.items()):
+        signal_calendar = tuple(load_days(signal_date, trade_date, source=source))
+        if not signal_calendar or signal_calendar[0] != signal_date:
+            raise ValueError("forward research maturity calendar is inconsistent")
+        future_dates = signal_calendar[1:21]
+        if len(future_dates) != 20:
+            continue
+        benchmark_path = _stored_benchmark_close_path(
+            repository, future_dates=future_dates, source=source
+        )
+        for symbol, symbol_observations in sorted(by_symbol.items()):
+            history = tuple(
+                load_history(symbol, end_date=future_dates[-1], source=source, limit=21)
+            )
+            bars_by_date = {bar.trade_date: bar for bar in history}
+            signal_bar = bars_by_date.get(signal_date)
+            if signal_bar is None or any(day not in bars_by_date for day in future_dates):
+                blocked_observations += len(symbol_observations)
+                continue
+            future_bars = tuple(bars_by_date[day] for day in future_dates)
+            for observation in symbol_observations:
+                outcomes.extend(
+                    build_research_forward_outcomes(
+                        observation=observation,
+                        signal_close_1e4=signal_bar.close_1e4,
+                        future_bars=future_bars,
+                        benchmark_close_path_1e4=benchmark_path,
+                        recorded_at=recorded_at,
+                    )
+                )
+                matured_observations += 1
+    save_bundle(observations=(), outcomes=outcomes)
+    return {
+        "status": "completed",
+        "trade_date": trade_date.isoformat(),
+        "source": source,
+        "candidate_count": len(review.candidates),
+        "observations_recorded": new_observations,
+        "matured_observations": matured_observations,
+        "outcomes_recorded": len(outcomes),
+        "blocked_observations": blocked_observations,
+    }
+
+
+def _stored_benchmark_close_path(
+    repository: object, *, future_dates: Sequence[date], source: str
+) -> tuple[int, ...]:
+    load_snapshot = repository.load_market_snapshot
+    path = [100_000]
+    for day in future_dates:
+        snapshot = load_snapshot(day, source=source, history_limit=1)
+        security_by_symbol = {item.symbol: item for item in snapshot.securities}
+        eligible_bars = tuple(
+            bar
+            for bar in snapshot.bars
+            if bar.trade_date == day
+            and security_by_symbol.get(bar.symbol) is not None
+            and security_by_symbol[bar.symbol].board == "MAIN"
+            and not security_by_symbol[bar.symbol].is_st
+        )
+        if not eligible_bars:
+            raise ValueError("forward research benchmark is incomplete")
+        daily_return = _rounded_mean(
+            tuple(_return_bps(bar.close_1e4, bar.pre_close_1e4) for bar in eligible_bars)
+        )
+        path.append(
+            int(
+                (
+                    Decimal(path[-1]) * Decimal(10_000 + daily_return) / Decimal(10_000)
+                ).to_integral_value(rounding=ROUND_HALF_UP)
+            )
+        )
+    return tuple(path)
 
 
 def build_forward_research_report(

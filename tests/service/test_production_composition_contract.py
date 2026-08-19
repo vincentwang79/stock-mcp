@@ -95,6 +95,11 @@ class ProductionCompositionContractTest(unittest.TestCase):
                 return primary, backup
 
             settings = Settings(root=root, tushare_token="fixture")
+            research_calls: list[tuple[date, datetime]] = []
+
+            def research_batch(*, trade_date: date, recorded_at: datetime) -> None:
+                research_calls.append((trade_date, recorded_at))
+                raise ValueError("fixture research evidence unavailable")
 
             def context(_day: date):
                 return securities, BaoStockTradingCalendar({DAY})
@@ -108,6 +113,8 @@ class ProductionCompositionContractTest(unittest.TestCase):
                 minimum_main_board_count=2,
                 required_prior_sessions=2,
                 required_observation_sessions=0,
+                research_batch=research_batch,
+                forward_research_start=DAY,
             )()
             second = ProductionPostMarketTask(
                 settings,
@@ -118,12 +125,22 @@ class ProductionCompositionContractTest(unittest.TestCase):
                 minimum_main_board_count=2,
                 required_prior_sessions=2,
                 required_observation_sessions=0,
+                research_batch=research_batch,
+                forward_research_start=DAY,
             )()
 
             self.assertEqual("ready", first.status)
             self.assertEqual("ready", second.status)
             self.assertEqual(1, primary.calls)
             self.assertEqual(1, provider_loads)
+            self.assertEqual([(DAY, as_of)], research_calls)
+            self.assertEqual(
+                (DAY,), database.load_expected_trading_days(DAY, DAY, source="tushare")
+            )
+            self.assertEqual(
+                set(security.symbol for security in securities),
+                set(database.load_daily_price_limits(DAY, source="tushare")),
+            )
             self.assertEqual("published", database.get_daily_review(DAY).status)
             self.assertTrue(tuple((root / "backups").glob("stock-mcp-*.sqlite3")))
             self.assertFalse((root / "state" / "schedule-state.json").exists())

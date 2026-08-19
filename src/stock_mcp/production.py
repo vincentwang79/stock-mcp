@@ -13,7 +13,7 @@ import json
 import math
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -310,6 +310,8 @@ class ProductionPostMarketTask:
         minimum_main_board_count: int = _MINIMUM_MAIN_BOARD_COUNT,
         required_prior_sessions: int = 20,
         required_observation_sessions: int = 20,
+        research_batch: Callable[..., object] | None = None,
+        forward_research_start: date = date(2026, 8, 8),
     ) -> None:
         if minimum_main_board_count < 1:
             raise ValueError("minimum_main_board_count must be positive")
@@ -325,6 +327,8 @@ class ProductionPostMarketTask:
         self.minimum_main_board_count = minimum_main_board_count
         self.required_prior_sessions = required_prior_sessions
         self.required_observation_sessions = required_observation_sessions
+        self.research_batch = research_batch or self._run_research_batch
+        self.forward_research_start = forward_research_start
         self.pipeline_repository = SQLitePipelineRepository(database)
         self.schedule_state = SQLiteScheduleState(database, self.pipeline_repository)
 
@@ -396,6 +400,21 @@ class ProductionPostMarketTask:
             ).run(target)
 
         def backup(_run: PipelineRun) -> None:
+            if (
+                _run.trade_date >= self.forward_research_start
+                and _run.review is not None
+                and _run.snapshot is not None
+                and _run.snapshot.source == "tushare"
+            ):
+                try:
+                    self.research_batch(trade_date=_run.trade_date, recorded_at=now)
+                except Exception as error:
+                    print(
+                        "stock-mcp: forward-research-batch failed "
+                        f"trade_date={_run.trade_date.isoformat()} "
+                        f"error={type(error).__name__}",
+                        flush=True,
+                    )
             BackupManager(self.settings.root / "backups", retention=14).create(
                 self.database, label=now.date().isoformat()
             )
@@ -406,6 +425,16 @@ class ProductionPostMarketTask:
             backup=backup,
             state_repository=self.schedule_state,
         ).tick(now)
+
+    def _run_research_batch(self, *, trade_date: date, recorded_at: datetime) -> object:
+        from .research_program import run_stored_price_research_batch
+
+        return run_stored_price_research_batch(
+            self.database,
+            trade_date=trade_date,
+            source="tushare",
+            recorded_at=recorded_at.astimezone(UTC),
+        )
 
     def _load_providers(self, securities: tuple[Security, ...]) -> tuple[Any, Any]:
         import akshare  # type: ignore[import-not-found]

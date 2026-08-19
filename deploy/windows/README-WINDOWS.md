@@ -367,6 +367,38 @@ winner 不合格、proposal 为空。不得把研究完成描述为 Sina replica
 proposal、策略认证或激活已经完成。首次 Windows 全量运行前仍需先通过开发机固定小数据集
 E2E；Windows 全量耗时和资源占用属于外部门禁。
 
+## 前向研究证据的盘后增量运行
+
+服务从 `2026-08-08` 之后的已发布日报候选中自动记录两个只读研究假设。日常发布事务会
+同时保存当天 Tushare 交易日和确定性主板涨跌停事实；盘后备份前，服务记录候选观察，并为
+已经经过 20 个后续交易会话的旧观察追加 5/10/20 日 outcome。研究失败不会撤销日报，日志
+只打印日期和异常类型。Sina 降级日报、没有正式发布的观察期日报和零候选日不会伪造观察。
+
+安装新版本并重启服务后，可对某个已经发布的日期人工幂等重跑：
+
+```powershell
+$py = 'E:\StockMcp\current\.venv\Scripts\python.exe'
+
+& $py -m stock_mcp.cli run-research-forward-batch `
+  --root E:\StockMcp `
+  --trade-date YYYY-MM-DD
+```
+
+成功 JSON 包含 `candidate_count`、`observations_recorded`、`matured_observations`、
+`outcomes_recorded` 和 `blocked_observations`。相同日期重跑时新增计数应为 0；缺少目标会话
+行情的候选保留为 pending，并计入 blocked，不使用未来恢复交易价格或其他来源补齐。
+
+积累满 20 个后续会话后，用 ChatGPT 的只读 `get_research_forward_report` 或 CLI 查询：
+
+```powershell
+& $py -m stock_mcp.cli derive-research-forward-report `
+  --root E:\StockMcp `
+  --hypothesis-id no-recent-limit-up-v1 `
+  --horizon-sessions 20
+```
+
+报告仍固定为 `evidence_only`，不能代替独立审阅、Sina 复制、proposal、认证或激活。
+
 ## 构建发布包
 
 从源码根目录运行 `fetch-tools.ps1`，根据 `tools-manifest.json` 下载固定版本的工具资产，同时验证压缩包和解压后二进制文件的 SHA-256，并生成 `tools-cache`。然后运行：
