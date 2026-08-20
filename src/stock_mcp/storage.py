@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -470,6 +470,19 @@ class Database:
     def save_daily_security_statuses(self, statuses: Iterable[dict[str, object] | object]) -> None:
         with self._idempotent_write_connection() as connection:
             self._save_daily_security_statuses(connection, statuses)
+
+    def load_daily_security_statuses(
+        self, start: date, end: date, *, source: str
+    ) -> dict[tuple[str, date], str]:
+        if end < start:
+            raise ValueError("daily security status range is invalid")
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT symbol,trade_date,tradestatus FROM daily_security_status "
+                "WHERE source=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date,symbol",
+                (source, start.isoformat(), end.isoformat()),
+            ).fetchall()
+        return {(str(row[0]), date.fromisoformat(str(row[1]))): str(row[2]) for row in rows}
 
     def _save_daily_security_statuses(
         self, connection: sqlite3.Connection, statuses: Iterable[dict[str, object] | object]
@@ -2293,30 +2306,44 @@ class Database:
         json_column: str,
         trade_date: date,
         source: str,
-        facts: dict[str, object],
+        facts: Mapping[str, object],
+    ) -> int:
+        if table not in {"daily_price_limits", "v3_snapshot_features"}:
+            raise ValueError("unsupported v3 fact table")
+        with self._idempotent_write_connection() as connection:
+            return self._save_v3_fact_batch_connection(
+                connection, table, json_column, trade_date, source, facts
+            )
+
+    def _save_v3_fact_batch_connection(
+        self,
+        connection: sqlite3.Connection,
+        table: str,
+        json_column: str,
+        trade_date: date,
+        source: str,
+        facts: Mapping[str, object],
     ) -> int:
         if table not in {"daily_price_limits", "v3_snapshot_features"}:
             raise ValueError("unsupported v3 fact table")
         canonical = {symbol: self._json(value) for symbol, value in sorted(facts.items())}
-        with self._idempotent_write_connection() as connection:
-            rows = connection.execute(
-                f"SELECT symbol, {json_column} FROM {table} "
-                "WHERE trade_date = ? AND source = ? ORDER BY symbol",
-                (trade_date.isoformat(), source),
-            ).fetchall()
-            existing = {str(row[0]): str(row[1]) for row in rows}
-            if existing:
-                if existing != canonical:
-                    raise ValueError(f"{table} facts are immutable; conflicting batch")
-                return 0
-            connection.executemany(
-                f"INSERT INTO {table}(trade_date, source, symbol, {json_column}) "
-                "VALUES (?, ?, ?, ?)",
-                (
-                    (trade_date.isoformat(), source, symbol, encoded)
-                    for symbol, encoded in canonical.items()
-                ),
-            )
+        rows = connection.execute(
+            f"SELECT symbol, {json_column} FROM {table} "
+            "WHERE trade_date = ? AND source = ? ORDER BY symbol",
+            (trade_date.isoformat(), source),
+        ).fetchall()
+        existing = {str(row[0]): str(row[1]) for row in rows}
+        if existing:
+            if existing != canonical:
+                raise ValueError(f"{table} facts are immutable; conflicting batch")
+            return 0
+        connection.executemany(
+            f"INSERT INTO {table}(trade_date, source, symbol, {json_column}) VALUES (?, ?, ?, ?)",
+            (
+                (trade_date.isoformat(), source, symbol, encoded)
+                for symbol, encoded in canonical.items()
+            ),
+        )
         return len(canonical)
 
     def _load_v3_fact_batch(
@@ -3574,6 +3601,8 @@ class Database:
             raise ValueError("pipeline snapshot date must match the run")
         if run.review is not None and run.review.trade_date != run.trade_date:
             raise ValueError("pipeline review date must match the run")
+        if run.snapshot_features is not None and run.snapshot is None:
+            raise ValueError("pipeline v3 features require a market snapshot")
         stored_review = None
         if run.review is not None:
             visibility = "published" if run.status == "ready" else "observation"
@@ -3593,6 +3622,15 @@ class Database:
             if run.snapshot is not None:
                 self._save_market_snapshot(connection, run.snapshot)
                 self._save_snapshot_price_limits(connection, run.snapshot)
+                if run.snapshot_features is not None:
+                    self._save_v3_fact_batch_connection(
+                        connection,
+                        "v3_snapshot_features",
+                        "feature_json",
+                        run.trade_date,
+                        run.snapshot.source,
+                        run.snapshot_features,
+                    )
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO expected_trading_days(source, trade_date)

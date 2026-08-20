@@ -7,11 +7,12 @@ provider snapshot or records an explicit non-screening/failed outcome.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Protocol
 
-from .domain import DailyReview, MarketSnapshot, StrategyVersion
+from .domain import DailyReview, MarketSnapshot, StrategyVersion, V3MarketInput
 from .review import MixedSourceSnapshotError, generate_daily_review
 from .strategy import validate_strategy_parameters
 
@@ -47,6 +48,7 @@ class PipelineRun:
     snapshot: MarketSnapshot | None
     review: DailyReview | None
     error: str | None = None
+    snapshot_features: Mapping[str, object] | None = None
 
 
 class DailyReviewPipeline:
@@ -70,6 +72,8 @@ class DailyReviewPipeline:
         required_prior_sessions: int = 20,
         observation_only: bool = False,
         max_attempts: int = 1,
+        review_input_builder: Callable[[MarketSnapshot], tuple[V3MarketInput, Mapping[str, object]]]
+        | None = None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
@@ -90,6 +94,7 @@ class DailyReviewPipeline:
         self._required_prior_sessions = required_prior_sessions
         self._observation_only = observation_only
         self._max_attempts = max_attempts
+        self._review_input_builder = review_input_builder
 
     def run(self, trade_date: date) -> PipelineRun:
         """Run or reuse the immutable publication for ``trade_date``."""
@@ -148,7 +153,11 @@ class DailyReviewPipeline:
             return None
 
     def _publish_ready(self, snapshot: MarketSnapshot, attempts: int) -> PipelineRun:
-        insufficient = self._symbols_without_required_history(snapshot)
+        insufficient = (
+            ()
+            if self._review_input_builder is not None
+            else self._symbols_without_required_history(snapshot)
+        )
         if insufficient:
             if snapshot.source == "sina":
                 degraded = PipelineRun(
@@ -180,8 +189,12 @@ class DailyReviewPipeline:
             )
             self._repository.save_run(observation)
             return observation
+        snapshot_features: Mapping[str, object] | None = None
         try:
-            review = generate_daily_review(snapshot, self._strategy)
+            review_input: MarketSnapshot | V3MarketInput = snapshot
+            if self._review_input_builder is not None:
+                review_input, snapshot_features = self._review_input_builder(snapshot)
+            review = generate_daily_review(review_input, self._strategy)
         except (MixedSourceSnapshotError, ValueError) as error:
             # The snapshot was validated before this point, but preserving an
             # explicit failed record is safer than leaking a partially published
@@ -206,6 +219,7 @@ class DailyReviewPipeline:
                 snapshot=snapshot,
                 review=review,
                 error="live observation period is not yet complete",
+                snapshot_features=snapshot_features,
             )
             self._repository.save_run(observation)
             return observation
@@ -216,6 +230,7 @@ class DailyReviewPipeline:
             attempts=attempts,
             snapshot=snapshot,
             review=review,
+            snapshot_features=snapshot_features,
         )
         self._repository.save_run(ready)
         return ready

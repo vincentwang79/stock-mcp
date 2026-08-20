@@ -11,6 +11,7 @@ from .domain import (
     Security,
     SetupType,
     StrategyVersion,
+    V3MarketInput,
 )
 from .strategy import validate_strategy_parameters
 
@@ -20,18 +21,21 @@ class MixedSourceSnapshotError(ValueError):
 
 
 def generate_daily_review(
-    snapshot: MarketSnapshot,
+    snapshot: MarketSnapshot | V3MarketInput,
     strategy: StrategyVersion,
 ) -> DailyReview:
     """Dispatch to the immutable engine named by the stored strategy version."""
     parameters = validate_strategy_parameters(strategy.parameters, require_complete=True)
     engine_version = parameters["rule_engine_version"]
     if engine_version == 1:
+        if not isinstance(snapshot, MarketSnapshot):
+            raise ValueError("rule engine v1 requires a MarketSnapshot")
         return _generate_daily_review_v1(snapshot, strategy)
     if engine_version == 2:
+        if not isinstance(snapshot, MarketSnapshot):
+            raise ValueError("rule engine v2 requires a MarketSnapshot")
         return _generate_daily_review_v2(snapshot, strategy)
     if engine_version == 3:
-        from .domain import V3MarketInput
         from .v3 import generate_v3_daily_review
 
         if not isinstance(snapshot, V3MarketInput):

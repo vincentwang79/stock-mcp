@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from stock_mcp.providers.runtime import BaoStockTradingCalendar
 from stock_mcp.replay import HistoricalReplayService
 from stock_mcp.storage import Database
 from stock_mcp.strategy import DatabaseStrategyRegistry
+from stock_mcp.v3 import v3_proposal_parameters
 
 DAY = date(2026, 8, 7)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -31,6 +33,125 @@ class _Provider:
 
 
 class ProductionCompositionContractTest(unittest.TestCase):
+    def test_v3_live_observation_excludes_one_suspended_history_without_blocking_market(
+        self,
+    ) -> None:
+        """A legitimate per-security suspension cannot degrade the whole market day."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "current").mkdir()
+            (root / "current" / "a_share_mainboard_code_name.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "standard": "fixture-industry-v1",
+                            "mode": "retrospective_current_mapping",
+                            "as_of": "2026-08-10",
+                        },
+                        "stocks": [
+                            {"code": "600001", "exchange": "SSE", "industry": "银行"},
+                            {"code": "600002", "exchange": "SSE", "industry": "制造"},
+                            {"code": "600003", "exchange": "SSE", "industry": "制造"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            database = Database(root / "data" / "stock-mcp.sqlite3")
+            database.initialize()
+            strategy = StrategyVersion(
+                version="v0.3-policy-1",
+                status="proposed",
+                parameters=v3_proposal_parameters(1),
+            )
+            database.save_strategy_version(strategy)
+            database.set_active_strategy_version(strategy.version)
+            securities = (
+                Security("600001.SH", "完整历史", "SSE", "MAIN", date(2020, 1, 1), "银行", False),
+                Security("600002.SH", "停牌历史", "SSE", "MAIN", date(2020, 1, 1), "制造", False),
+                Security(
+                    "600003.SH",
+                    "新上市",
+                    "SSE",
+                    "MAIN",
+                    DAY - timedelta(days=10),
+                    "制造",
+                    False,
+                ),
+            )
+            sessions = tuple(DAY - timedelta(days=60 - index) for index in range(61))
+            as_of = datetime(2026, 8, 7, 16, 30, tzinfo=SHANGHAI)
+            complete_bars = tuple(
+                _stable_bar(securities[0].symbol, session, as_of) for session in sessions
+            )
+            missing_session = sessions[-10]
+            database.save_daily_security_statuses(
+                (
+                    {
+                        "symbol": securities[1].symbol,
+                        "trade_date": missing_session,
+                        "source": "baostock",
+                        "tradestatus": "0",
+                        "is_st": False,
+                        "source_timestamp": as_of,
+                        "batch_sha256": "a" * 64,
+                    },
+                )
+            )
+            suspended_bars = tuple(
+                _stable_bar(securities[1].symbol, session, as_of)
+                for session in sessions
+                if session != missing_session
+            )
+            older_substitute = _stable_bar(
+                securities[1].symbol, sessions[0] - timedelta(days=1), as_of
+            )
+            newly_listed_bar = _stable_bar(securities[2].symbol, DAY, as_of)
+            snapshot = MarketSnapshot(
+                DAY,
+                "tushare",
+                as_of,
+                securities,
+                (*complete_bars, older_substitute, *suspended_bars, newly_listed_bar),
+                5_000,
+                5_000,
+            )
+            primary = _Provider(snapshot)
+            research_calls: list[date] = []
+
+            outcome = ProductionPostMarketTask(
+                Settings(root=root, tushare_token="fixture"),
+                database,
+                clock=lambda: as_of,
+                context_loader=lambda _day: (
+                    securities,
+                    BaoStockTradingCalendar(sessions),
+                ),
+                provider_loader=lambda _securities: (primary, _Provider(snapshot)),
+                minimum_main_board_count=3,
+                required_prior_sessions=60,
+                required_observation_sessions=20,
+                research_batch=lambda **values: research_calls.append(values["trade_date"]),
+                forward_research_start=DAY,
+            )()
+
+            self.assertEqual("degraded_observation", outcome.status)
+            self.assertIsNotNone(outcome.run)
+            self.assertIsNotNone(outcome.run.review)
+            self.assertEqual(strategy.version, outcome.run.review.strategy_version)
+            self.assertNotIn(
+                securities[1].symbol,
+                {candidate.symbol for candidate in outcome.run.review.candidates},
+            )
+            self.assertEqual((), outcome.run.review.candidates)
+            self.assertEqual(1, database.count_live_observation_sessions("pipeline-v0.1"))
+            self.assertEqual(
+                set(security.symbol for security in securities),
+                set(database.load_v3_snapshot_features(DAY, source="tushare")),
+            )
+            self.assertEqual([], research_calls)
+
     def test_real_sqlite_task_publishes_backs_up_and_reuses_terminal_state(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -237,6 +358,22 @@ class ProductionCompositionContractTest(unittest.TestCase):
             persisted = final_task.schedule_state.get(DAY)
             self.assertIsNotNone(persisted)
             self.assertEqual("failed", persisted.status)
+
+
+def _stable_bar(symbol: str, trade_date: date, timestamp: datetime) -> DailyBar:
+    return DailyBar(
+        symbol,
+        trade_date,
+        100_000,
+        101_000,
+        99_000,
+        100_000,
+        100_000,
+        1_000_000,
+        10_000_000_000,
+        "tushare",
+        timestamp,
+    )
 
 
 if __name__ == "__main__":

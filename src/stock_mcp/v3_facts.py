@@ -15,8 +15,135 @@ from .domain import (
     V3MarketInput,
     V3SecurityInput,
 )
-from .industry import load_industry_reference
+from .industry import RecordedIndustryReference, load_industry_reference
 from .v3 import adjusted_close_chain, derive_daily_price_limit
+
+
+def build_live_v3_market_input(
+    snapshot: MarketSnapshot,
+    *,
+    prior_dates: tuple[date, ...],
+    industry_reference: RecordedIndustryReference,
+    trading_statuses: Mapping[tuple[str, date], str],
+) -> tuple[V3MarketInput, dict[str, object]]:
+    """Build one live v3 input while degrading incomplete securities individually.
+
+    ``snapshot`` may contain older per-security bars returned by a bounded history
+    query.  Only bars on the exact recorded market calendar are retained, so a
+    suspension cannot be silently replaced by an older bar and cannot block
+    otherwise complete securities.
+    """
+
+    target = snapshot.trade_date
+    if len(prior_dates) != 60 or tuple(sorted(set(prior_dates))) != prior_dates:
+        raise ValueError("live v3 input requires sixty unique prior market sessions")
+    if any(day >= target for day in prior_dates):
+        raise ValueError("live v3 prior calendar contains target or future dates")
+    if industry_reference.as_of is None:
+        raise ValueError("live v3 industry reference requires an as-of date")
+    bars_by_symbol: dict[str, list[Any]] = {}
+    for bar in snapshot.bars:
+        if bar.source != snapshot.source or bar.trade_date > target:
+            raise ValueError("live v3 input contains mixed-source or future bars")
+        bars_by_symbol.setdefault(bar.symbol, []).append(bar)
+    security_by_symbol = {security.symbol: security for security in snapshot.securities}
+    prior_date_set = set(prior_dates)
+    target_bars = {
+        symbol: matches[0]
+        for symbol, bars in bars_by_symbol.items()
+        if len(matches := [bar for bar in bars if bar.trade_date == target]) == 1
+        and symbol in security_by_symbol
+    }
+    if not target_bars:
+        raise ValueError("live v3 input contains no target-day securities")
+
+    security_inputs: list[V3SecurityInput] = []
+    features: dict[str, object] = {}
+    eligible_count = 0
+    advance_count = 0
+    ma20_eligible_count = 0
+    above_ma20_count = 0
+    industries: dict[str, str] = {}
+    for symbol in sorted(target_bars):
+        security = security_by_symbol[symbol]
+        target_bar = target_bars[symbol]
+        prior = tuple(
+            sorted(
+                (bar for bar in bars_by_symbol[symbol] if bar.trade_date in prior_date_set),
+                key=lambda bar: bar.trade_date,
+            )
+        )
+        limit = derive_daily_price_limit(target_bar, security)
+        industry = industry_reference.industries.get(symbol, "unavailable")
+        industries[symbol] = industry
+        security_inputs.append(V3SecurityInput(security, prior, target_bar, limit, industry))
+        features[symbol] = {
+            "industry": industry,
+            "industry_group": None if industry == "unavailable" else industry,
+            "price_limit_state": _price_limit_state(limit),
+            "industry_standard": industry_reference.standard,
+            "industry_mode": industry_reference.mode,
+            "industry_as_of": industry_reference.as_of.isoformat(),
+            "industry_mapping_sha256": industry_reference.mapping_sha256,
+        }
+        otherwise_eligible = (
+            security.board == "MAIN"
+            and not security.is_st
+            and (target - security.list_date).days >= 180
+            and not limit.policy_exception
+        )
+        observed_prior_dates = {bar.trade_date for bar in prior}
+        missing_dates = tuple(day for day in prior_dates if day not in observed_prior_dates)
+        if otherwise_eligible and any(
+            trading_statuses.get((symbol, missing_date)) != "0" for missing_date in missing_dates
+        ):
+            raise ValueError(
+                f"live v3 history is missing without a recorded suspension for {symbol}"
+            )
+        basic_eligible = (
+            otherwise_eligible and tuple(bar.trade_date for bar in prior) == prior_dates
+        )
+        if not basic_eligible:
+            continue
+        eligible_count += 1
+        if target_bar.close_1e4 > target_bar.pre_close_1e4:
+            advance_count += 1
+        adjusted = adjusted_close_chain(prior, target_bar)
+        if len(adjusted) >= 20:
+            ma20_eligible_count += 1
+            if adjusted[-1] > sum(adjusted[-20:]) / 20:
+                above_ma20_count += 1
+    if not eligible_count:
+        raise ValueError("live v3 market breadth has no eligible main-board securities")
+    coverage_bps = ma20_eligible_count * 10_000 // eligible_count
+    if coverage_bps < 9_700:
+        raise ValueError("live v3 ma20 coverage is below 9700 bps")
+    reference = IndustryClassificationReference(
+        classification_standard=industry_reference.standard,
+        classification_mode=industry_reference.mode,
+        classification_as_of=industry_reference.as_of,
+        classification_mapping_sha256=industry_reference.mapping_sha256,
+        industries=industries,
+    )
+    return (
+        V3MarketInput(
+            trade_date=target,
+            source=snapshot.source,
+            source_timestamp=snapshot.source_timestamp,
+            prior_dates=prior_dates,
+            securities=tuple(security_inputs),
+            breadth=V3BreadthFacts(
+                advance_count=advance_count,
+                eligible_count=eligible_count,
+                above_ma20_count=above_ma20_count,
+                ma20_eligible_count=ma20_eligible_count,
+                advance_ratio_bps=advance_count * 10_000 // eligible_count,
+                above_ma20_ratio_bps=above_ma20_count * 10_000 // ma20_eligible_count,
+            ),
+            industry_reference=reference,
+        ),
+        features,
+    )
 
 
 def load_v3_market_input(

@@ -200,6 +200,14 @@ class BaoStockTradingCalendar:
     def is_trading_day(self, target: date) -> bool:
         return target in self._trading_days
 
+    def prior_trading_days(self, target: date, count: int) -> tuple[date, ...]:
+        if count < 0:
+            raise ValueError("trading-day count cannot be negative")
+        prior = tuple(sorted(day for day in self._trading_days if day < target))
+        if len(prior) < count:
+            raise ValueError(f"calendar does not contain {count} prior trading sessions")
+        return prior[-count:]
+
 
 class AKShareSnapshotProvider:
     """Explicit current-day spot snapshot; never a historical daily mirror."""

@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 from .backup import BackupManager
 from .config import Settings
 from .domain import DailyBar, MarketSnapshot, Security
+from .industry import load_industry_reference
 from .pipeline import DailyReviewPipeline, PipelineRun
 from .providers.metadata import normalize_baostock_securities
 from .providers.runtime import (
@@ -31,6 +32,7 @@ from .providers.runtime import (
 from .providers.sina_normalization import derive_sina_share_metrics, normalize_sina_spot
 from .scheduler import PostMarketCoordinator, ScheduleOutcome
 from .strategy import DatabaseStrategyRegistry
+from .v3_facts import build_live_v3_market_input
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _MINIMUM_MAIN_BOARD_COUNT = 2_000
@@ -386,6 +388,24 @@ class ProductionPostMarketTask:
                 )
             primary, backup = self.provider_loader(securities)
             observed = self.database.count_live_observation_sessions("pipeline-v0.1")
+            review_input_builder = None
+            if int(strategy.parameters["rule_engine_version"]) == 3:
+
+                def review_input_builder(snapshot: MarketSnapshot):
+                    industry_reference = load_industry_reference(
+                        self.settings.root / "current" / "a_share_mainboard_code_name.json"
+                    )
+                    prior_dates = calendar.prior_trading_days(target, 60)
+                    trading_statuses = self.database.load_daily_security_statuses(
+                        prior_dates[0], prior_dates[-1], source="baostock"
+                    )
+                    return build_live_v3_market_input(
+                        snapshot,
+                        prior_dates=prior_dates,
+                        industry_reference=industry_reference,
+                        trading_statuses=trading_statuses,
+                    )
+
             return DailyReviewPipeline(
                 calendar=calendar,
                 primary_provider=primary,
@@ -397,11 +417,13 @@ class ProductionPostMarketTask:
                 required_prior_sessions=self.required_prior_sessions,
                 observation_only=observed < self.required_observation_sessions,
                 max_attempts=1,
+                review_input_builder=review_input_builder,
             ).run(target)
 
         def backup(_run: PipelineRun) -> None:
             if (
-                _run.trade_date >= self.forward_research_start
+                _run.status == "ready"
+                and _run.trade_date >= self.forward_research_start
                 and _run.review is not None
                 and _run.snapshot is not None
                 and _run.snapshot.source == "tushare"
@@ -464,7 +486,10 @@ def _load_baostock_context(
         basic = _baostock_rows(baostock.query_stock_basic())
         industry = _baostock_rows(baostock.query_stock_industry())
         calendar_rows = _baostock_rows(
-            baostock.query_trade_dates(start_date=target.isoformat(), end_date=target.isoformat())
+            baostock.query_trade_dates(
+                start_date=(target - timedelta(days=180)).isoformat(),
+                end_date=target.isoformat(),
+            )
         )
     finally:
         baostock.logout()

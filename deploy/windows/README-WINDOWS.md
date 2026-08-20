@@ -374,6 +374,47 @@ E2E；Windows 全量耗时和资源占用属于外部门禁。
 已经经过 20 个后续交易会话的旧观察追加 5/10/20 日 outcome。研究失败不会撤销日报，日志
 只打印日期和异常类型。Sina 降级日报、没有正式发布的观察期日报和零候选日不会伪造观察。
 
+规则引擎 v3 的实时输入按 BaoStock 日历固定前 60 个交易会话。某只股票缺少历史价格时，
+只有 SQLite 已记录同日 BaoStock `tradeStatus=0` 才按合法停牌单独排除；状态为可交易或没有
+状态证据时，任务必须失败并等待重试。程序不会用第 61 个更早价格补位，也不会因为一只合法
+停牌证券而丢弃全市场日报。新上市证券按自身资格排除；防御市场和零候选均可正常发布。
+当天 v3 行业解释、涨跌停、Tushare 快照和日报在同一事务内保存。
+
+更新含该修复的版本后，先顺序重启 MCP 与 Tunnel，并验证本机就绪：
+
+```powershell
+Stop-Service StockMcpTunnel -Force -ErrorAction SilentlyContinue
+Restart-Service StockMcpService -Force
+
+$stable = 0
+for ($attempt = 1; $attempt -le 24; $attempt++) {
+    Start-Sleep -Seconds 5
+    try {
+        $mcp = Invoke-RestMethod http://127.0.0.1:8765/readyz -TimeoutSec 3
+        if ((Get-Service StockMcpService).Status -eq 'Running' -and $mcp.status -eq 'ready') {
+            $stable++
+        } else {
+            $stable = 0
+        }
+    } catch {
+        $stable = 0
+    }
+    if ($stable -ge 6) { break }
+}
+if ($stable -lt 6) { throw 'StockMcpService 未能连续稳定运行 30 秒。' }
+
+Start-Service StockMcpTunnel
+Invoke-RestMethod http://127.0.0.1:8766/readyz -TimeoutSec 10
+```
+
+预期：两个服务均为 `Running`，8765 返回 `status=ready`，8766 返回 `ready`。不要删除或
+改写修复前的失败流水线记录；它是有效审计证据。应等待下一个交易日 16:30 后的新任务，
+然后只读检查：流水线具有非空 `strategy_version=v0.3-policy-1`，观察期内状态为
+`degraded_observation` 且存在 observation 日报；20 个成功观察日后才允许 `ready` 和前向
+研究批处理。合法停牌证券不会成为候选，但其他证券继续评审。任何
+`missing without a recorded suspension` 表示真实价格/状态证据仍不完整，必须补数据而不是
+放宽门禁。
+
 安装新版本并重启服务后，可对某个已经发布的日期人工幂等重跑：
 
 ```powershell
