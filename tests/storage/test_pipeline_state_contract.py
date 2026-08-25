@@ -226,6 +226,53 @@ class SQLitePipelineStateContractTest(unittest.TestCase):
         self.assertEqual("degraded_observation", restored.status)
         self.assertEqual(replace(_review(), status="observation"), restored.review)
 
+    def test_live_observation_gate_counts_only_the_active_strategy_version(self) -> None:
+        repository = SQLitePipelineRepository(self.database)
+        repository.save_run(
+            PipelineRun(
+                trade_date=TRADE_DATE,
+                pipeline_version=PIPELINE_VERSION,
+                status="degraded_observation",
+                attempts=1,
+                snapshot=None,
+                review=_review(),
+                error="live observation period is not yet complete",
+            )
+        )
+        other_version = "v0.2"
+        self.database.save_strategy_version(
+            StrategyVersion(version=other_version, status="active", parameters=_parameters())
+        )
+        other_review = replace(
+            _review(),
+            trade_date=TRADE_DATE + timedelta(days=1),
+            strategy_version=other_version,
+        )
+        repository.save_run(
+            PipelineRun(
+                trade_date=other_review.trade_date,
+                pipeline_version=PIPELINE_VERSION,
+                status="degraded_observation",
+                attempts=1,
+                snapshot=None,
+                review=other_review,
+                error="live observation period is not yet complete",
+            )
+        )
+
+        self.assertEqual(
+            1,
+            self.database.count_live_observation_sessions(
+                PIPELINE_VERSION, strategy_version=STRATEGY_VERSION
+            ),
+        )
+        self.assertEqual(
+            1,
+            self.database.count_live_observation_sessions(
+                PIPELINE_VERSION, strategy_version=other_version
+            ),
+        )
+
     def test_observation_candidates_are_auditable_but_not_public_or_writable(self) -> None:
         repository = SQLitePipelineRepository(self.database)
         review = _candidate_review()

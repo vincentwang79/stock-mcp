@@ -61,6 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "restore",
             "backfill",
             "build-v3-facts",
+            "bootstrap-live-observation",
             "build-v4-status-facts",
             "backfill-baostock-statuses",
             "prepare-sina-backfill-manifest",
@@ -410,6 +411,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0 if report.get("ready") is True else 2
+
+    if args.command == "bootstrap-live-observation":
+        from .production import bootstrap_historical_v3_observations
+        from .storage import Database
+        from .strategy import DatabaseStrategyRegistry
+
+        if args.start is None or args.end is None:
+            parser.error("bootstrap-live-observation requires --start and --end")
+        database = Database(settings.database_path)
+        database.initialize()
+        strategies = DatabaseStrategyRegistry(database)
+        active_version = strategies.active_version
+        if active_version is None:
+            raise ValueError("historical observation bootstrap requires an active strategy")
+        report = bootstrap_historical_v3_observations(
+            database=database,
+            root=settings.root,
+            strategy=strategies.get(active_version),
+            start=args.start,
+            end=args.end,
+            recorded_at=datetime.now(UTC),
+        )
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 0
 
     if args.command == "build-v4-status-facts":
         from .storage import Database

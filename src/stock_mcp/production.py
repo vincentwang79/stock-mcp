@@ -14,6 +14,7 @@ import math
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -32,10 +33,96 @@ from .providers.runtime import (
 from .providers.sina_normalization import derive_sina_share_metrics, normalize_sina_spot
 from .scheduler import PostMarketCoordinator, ScheduleOutcome
 from .strategy import DatabaseStrategyRegistry
+from .v3 import canonical_v3_market_input_hash, canonical_v3_result_hash, generate_v3_daily_review
 from .v3_facts import build_live_v3_market_input
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _MINIMUM_MAIN_BOARD_COUNT = 2_000
+_HISTORICAL_OBSERVATION_POLICY = "historical-production-simulation-v1"
+
+
+def bootstrap_historical_v3_observations(
+    *,
+    database: Any,
+    root: Path,
+    strategy: Any,
+    start: date,
+    end: date,
+    recorded_at: datetime,
+) -> dict[str, object]:
+    """Persist one explicitly non-live, recorded-fact v3 observation window.
+
+    The simulation is deliberately separate from ``pipeline_runs`` and
+    ``daily_reviews``.  It provides reproducible evidence that the deployed
+    v3 path can screen a bounded historical window, but can never claim that
+    those dates were observed by the live scheduler.
+    """
+
+    if start > end:
+        raise ValueError("historical observation bootstrap range is invalid")
+    if int(strategy.parameters.get("rule_engine_version", 0)) != 3:
+        raise ValueError("historical observation bootstrap requires rule engine v3")
+    if recorded_at.tzinfo is None or recorded_at.utcoffset() is None:
+        raise ValueError("historical observation bootstrap timestamp must be timezone-aware")
+    sessions = tuple(database.load_expected_trading_days(start, end, source="tushare"))
+    if len(sessions) != 20 or sessions[0] != start or sessions[-1] != end:
+        raise ValueError(
+            "historical observation bootstrap requires exactly twenty recorded Tushare sessions"
+        )
+    industry_reference = load_industry_reference(
+        root / "current" / "a_share_mainboard_code_name.json"
+    )
+    days: list[dict[str, object]] = []
+    for target in sessions:
+        snapshot = database.load_market_snapshot(target, source="tushare", history_limit=61)
+        prior_dates = tuple(
+            database.load_expected_trading_days(
+                target - timedelta(days=180), target - timedelta(days=1), source="tushare"
+            )
+        )[-60:]
+        if len(prior_dates) != 60:
+            raise ValueError(
+                "historical observation bootstrap lacks sixty prior sessions for "
+                f"{target.isoformat()}"
+            )
+        statuses = database.load_daily_security_statuses(
+            prior_dates[0], prior_dates[-1], source="baostock"
+        )
+        market, _features = build_live_v3_market_input(
+            snapshot,
+            prior_dates=prior_dates,
+            industry_reference=industry_reference,
+            trading_statuses=statuses,
+        )
+        review = generate_v3_daily_review(market, strategy)
+        days.append(
+            {
+                "trade_date": target.isoformat(),
+                "input_hash": canonical_v3_market_input_hash(market),
+                "result_hash": canonical_v3_result_hash(market, strategy, review),
+                "candidate_count": len(review.candidates),
+                "market_regime": str(review.market_regime),
+                "source_timestamp": market.source_timestamp.isoformat(),
+            }
+        )
+    evidence = database.record_historical_observation_bootstrap(
+        pipeline_version="pipeline-v0.1",
+        strategy_version=strategy.version,
+        source="tushare",
+        policy_version=_HISTORICAL_OBSERVATION_POLICY,
+        days=tuple(days),
+        recorded_at=recorded_at.astimezone(UTC).isoformat(),
+    )
+    return {
+        **evidence,
+        "schema": _HISTORICAL_OBSERVATION_POLICY,
+        "evidence_class": "historical_simulation_not_live",
+        "strategy_version": strategy.version,
+        "source": "tushare",
+        "candidate_count": sum(int(day["candidate_count"]) for day in days),
+        "zero_candidate_days": sum(int(day["candidate_count"]) == 0 for day in days),
+        "live_observations_required": 3,
+    }
 
 
 class LazyAKShareQuoteProvider:
@@ -387,7 +474,16 @@ class ProductionPostMarketTask:
                     error="no active strategy version",
                 )
             primary, backup = self.provider_loader(securities)
-            observed = self.database.count_live_observation_sessions("pipeline-v0.1")
+            observed = self.database.count_live_observation_sessions(
+                "pipeline-v0.1", strategy_version=strategy.version
+            )
+            required_live_observations = self.required_observation_sessions
+            if int(strategy.parameters["rule_engine_version"]) == 3:
+                historical_observed = self.database.count_recent_historical_observation_sessions(
+                    "pipeline-v0.1", strategy.version, anchor_date=target
+                )
+                if historical_observed >= 20:
+                    required_live_observations = min(required_live_observations, 3)
             review_input_builder = None
             if int(strategy.parameters["rule_engine_version"]) == 3:
 
@@ -415,7 +511,7 @@ class ProductionPostMarketTask:
                 pipeline_version="pipeline-v0.1",
                 expected_main_board_count=expected_main_board_count,
                 required_prior_sessions=self.required_prior_sessions,
-                observation_only=observed < self.required_observation_sessions,
+                observation_only=observed < required_live_observations,
                 max_attempts=1,
                 review_input_builder=review_input_builder,
             ).run(target)

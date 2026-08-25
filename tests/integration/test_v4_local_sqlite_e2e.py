@@ -505,7 +505,7 @@ def _seed_fixed_v11_database(
     database = Database(directory / "fixed-v11.sqlite3")
     database.initialize()
     with database.connect() as connection:
-        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 13
+        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION == 14
 
     sessions = tuple(date(2026, 1, 2) + timedelta(days=index) for index in range(88))
     database.save_expected_trading_days("tushare", sessions)

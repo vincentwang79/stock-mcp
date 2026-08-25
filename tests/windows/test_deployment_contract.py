@@ -21,6 +21,9 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertNotIn(r"current\.venv\Scripts\stock-mcp.exe", diagnose)
         self.assertIn(r"current\.venv\Scripts\python.exe", readme)
         self.assertIn("-m stock_mcp.cli build-v3-facts", readme)
+        self.assertIn("-m stock_mcp.cli bootstrap-live-observation", readme)
+        self.assertIn("历史仿真不等于真实观察", readme)
+        self.assertIn("Schema v14", readme)
         self.assertIn("-m stock_mcp.cli approve-strategy", readme)
         self.assertIn("-m stock_mcp.cli doctor", diagnose)
 

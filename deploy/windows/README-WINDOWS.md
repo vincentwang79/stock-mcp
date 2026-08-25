@@ -4,6 +4,9 @@
 
 Schema v11 加入可选新浪数据链路和 v0.4 研究表，但默认不启动新浪网络任务。`config\app.toml` 的 `[sina] shadow_enabled=false` 是安全默认值；安装、配置和升级均不会自动回填新浪、启动 20 日 shadow、激活数据源、创建 v0.4 策略或改变当前 v0.3 日报。
 
+Schema v14 追加 v3 历史生产仿真证据表；升级只迁移 SQLite 元数据，不会自动生成仿真、
+不会改变策略状态，也不会将历史结果伪装为真实观察。
+
 所有安装和运维操作都必须遵守仓库根目录的[项目基本规则](../../GROUND_RULES.md)。
 
 > **重要：源码仓库不包含 `stock-mcp-windows-x64.zip`。**
@@ -408,12 +411,50 @@ Invoke-RestMethod http://127.0.0.1:8766/readyz -TimeoutSec 10
 ```
 
 预期：两个服务均为 `Running`，8765 返回 `status=ready`，8766 返回 `ready`。不要删除或
-改写修复前的失败流水线记录；它是有效审计证据。应等待下一个交易日 16:30 后的新任务，
-然后只读检查：流水线具有非空 `strategy_version=v0.3-policy-1`，观察期内状态为
-`degraded_observation` 且存在 observation 日报；20 个成功观察日后才允许 `ready` 和前向
-研究批处理。合法停牌证券不会成为候选，但其他证券继续评审。任何
-`missing without a recorded suspension` 表示真实价格/状态证据仍不完整，必须补数据而不是
-放宽门禁。
+改写修复前的失败流水线记录；它是有效审计证据。
+
+### v3 历史生产仿真与真实观察门禁
+
+如果最近 20 个**已记录、连续且完整**的 Tushare 交易日及其 BaoStock 状态事实已经可用，
+管理员可在停服维护窗口执行一次只读历史生产仿真。它逐日复用生产 v3 输入构建、停牌处理、
+行业参考和规则引擎，保存不可变输入/结果哈希；不访问实时行情，不写入历史日报、候选、
+流水线运行或前向研究事实。例如，若数据库完整覆盖 2026-07-27 至 2026-08-21 的恰好
+20 个交易日：
+
+```powershell
+$py = 'E:\StockMcp\current\.venv\Scripts\python.exe'
+
+& $py -m stock_mcp.cli bootstrap-live-observation `
+  --root E:\StockMcp `
+  --start 2026-07-27 `
+  --end 2026-08-21
+```
+
+成功 JSON 必须显示 `evidence_class="historical_simulation_not_live"`、`session_count=20`、
+`source="tushare"` 和不可变 `manifest_hash`。任一日期缺失、非交易日范围、少于 60 个前序
+交易会话、无记录的停牌、行业文件缺失或事实冲突都会非零退出；不得以手工改库、补未来行情或
+其他价格源绕过。
+
+**历史仿真不等于真实观察。** 它只证明已入库的历史事实可以按当前部署代码完整重放，不能
+声称服务当时真实运行过。因此，满足最近 20 日仿真后，后续仍须积累至少 **3 个**成功真实
+盘后会话，期间流水线应为 `degraded_observation` 且存在对应 `observation` 日报；第 4 个
+成功真实会话开始才允许状态进入 `ready` 和前向研究批处理。若没有有效仿真，仍保持原来的
+20 个真实会话门槛。仿真证据在目标日期之后 35 天失效，数据/策略更新或时间过期后需重新
+生成，不能长期绕过真实运行验证。
+
+每个交易日 16:30 后可只读检查：流水线具有非空
+`strategy_version=v0.3-policy-1`，观察期状态与证据计数一致：
+
+```powershell
+& $py E:\code\stock-mcp\scripts\live_observation_status.py `
+  --database E:\StockMcp\data\stock-mcp.sqlite3 `
+  --after YYYY-MM-DD
+```
+
+输出中的 `historical_simulation_sessions=20` 与 `required_live_observation_sessions=3` 表示
+两段式门禁已被识别；`live_observation_sessions` 只统计真实服务的成功盘后会话。合法停牌
+证券不会成为候选，但其他证券继续评审。任何 `missing without a recorded suspension` 表示
+真实价格/状态证据仍不完整，必须补数据而不是放宽门禁。
 
 安装新版本并重启服务后，可对某个已经发布的日期人工幂等重跑：
 

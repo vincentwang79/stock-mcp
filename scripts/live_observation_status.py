@@ -73,11 +73,33 @@ def _report(connection: sqlite3.Connection, *, after: str) -> dict[str, object]:
     target_bars = fact_count("daily_bars")
     limits = fact_count("daily_price_limits")
     features = fact_count("v3_snapshot_features")
-    live_sessions = _count(
-        connection,
-        "SELECT COUNT(*) FROM pipeline_runs WHERE pipeline_version='pipeline-v0.1' "
-        "AND status='degraded_observation' AND strategy_version IS NOT NULL",
-    )
+    live_sessions = 0
+    if strategy_version:
+        live_sessions = _count(
+            connection,
+            "SELECT COUNT(*) FROM pipeline_runs WHERE pipeline_version='pipeline-v0.1' "
+            "AND status='degraded_observation' AND strategy_version=?",
+            (strategy_version,),
+        )
+    historical_simulation_sessions = 0
+    if strategy_version:
+        try:
+            bootstrap = _row(
+                connection,
+                "SELECT session_count FROM historical_observation_bootstrap_runs "
+                "WHERE pipeline_version='pipeline-v0.1' AND strategy_version=? "
+                "AND source='tushare' "
+                "AND policy_version='historical-production-simulation-v1' "
+                "AND session_count=20 AND end_date>=date(?, '-35 days') AND end_date<? "
+                "ORDER BY end_date DESC, recorded_at DESC LIMIT 1",
+                (strategy_version, trade_date, trade_date),
+            )
+            historical_simulation_sessions = 0 if bootstrap is None else int(bootstrap[0])
+        except sqlite3.OperationalError:
+            # Older installations have no bootstrap tables; report no evidence rather
+            # than treating a schema upgrade as a successful simulation.
+            historical_simulation_sessions = 0
+    required_live_observation_sessions = 3 if historical_simulation_sessions == 20 else 20
     forward_observations = _count(connection, "SELECT COUNT(*) FROM research_forward_observations")
 
     failures: list[str] = []
@@ -130,6 +152,8 @@ def _report(connection: sqlite3.Connection, *, after: str) -> dict[str, object]:
         "price_limit_count": limits,
         "v3_feature_count": features,
         "live_observation_sessions": live_sessions,
+        "historical_simulation_sessions": historical_simulation_sessions,
+        "required_live_observation_sessions": required_live_observation_sessions,
         "forward_observation_count": forward_observations,
         "validation": {"status": "pass" if not failures else "fail", "failures": failures},
     }

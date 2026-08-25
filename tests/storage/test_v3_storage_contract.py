@@ -75,7 +75,7 @@ class V3StorageContractTest(unittest.TestCase):
         Database(legacy).initialize()
 
         with sqlite3.connect(legacy) as connection:
-            self.assertEqual(13, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(14, connection.execute("PRAGMA user_version").fetchone()[0])
             tables = {
                 row[0]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")

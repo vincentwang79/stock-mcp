@@ -46,6 +46,8 @@ class LiveObservationStatusContractTest(unittest.TestCase):
         self.assertEqual(3, report["price_limit_count"])
         self.assertEqual(3, report["v3_feature_count"])
         self.assertEqual(1, report["live_observation_sessions"])
+        self.assertEqual(20, report["historical_simulation_sessions"])
+        self.assertEqual(3, report["required_live_observation_sessions"])
         self.assertEqual(0, report["forward_observation_count"])
         self.assertEqual("pass", report["validation"]["status"])
         self.assertEqual([], report["validation"]["failures"])
@@ -90,6 +92,24 @@ class LiveObservationStatusContractTest(unittest.TestCase):
                 CREATE TABLE daily_price_limits(trade_date TEXT, source TEXT);
                 CREATE TABLE v3_snapshot_features(trade_date TEXT, source TEXT);
                 CREATE TABLE research_forward_observations(observation_id TEXT);
+                CREATE TABLE historical_observation_bootstrap_runs(
+                    bootstrap_id TEXT PRIMARY KEY,
+                    pipeline_version TEXT,
+                    strategy_version TEXT,
+                    source TEXT,
+                    policy_version TEXT,
+                    start_date TEXT,
+                    end_date TEXT,
+                    session_count INTEGER,
+                    manifest_hash TEXT,
+                    manifest_json TEXT,
+                    recorded_at TEXT
+                );
+                INSERT INTO historical_observation_bootstrap_runs VALUES(
+                    'fixture-bootstrap', 'pipeline-v0.1', 'v0.3-policy-1', 'tushare',
+                    'historical-production-simulation-v1', '2026-07-27', '2026-08-21', 20,
+                    'fixture', '{}', '2026-08-24T09:00:00+00:00'
+                );
                 """
             )
             for table in ("daily_bars", "daily_price_limits", "v3_snapshot_features"):

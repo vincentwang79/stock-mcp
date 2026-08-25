@@ -29,7 +29,7 @@ from stock_mcp.domain import (
     StrategyVersion,
 )
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 class IdempotencyKeyReuseError(ValueError):
@@ -3824,19 +3824,178 @@ class Database:
             }
         return {"trade_date": trade_date, **record}
 
-    def count_live_observation_sessions(self, pipeline_version: str) -> int:
+    def count_live_observation_sessions(
+        self, pipeline_version: str, *, strategy_version: str | None = None
+    ) -> int:
+        """Count only durable observation runs, optionally for one strategy version."""
+
+        parameters: tuple[str, ...] = (pipeline_version,)
+        strategy_clause = ""
+        if strategy_version is not None:
+            strategy_clause = " AND strategy_version = ?"
+            parameters = (*parameters, strategy_version)
         with self.connect() as connection:
             return int(
                 connection.execute(
-                    """
+                    (
+                        """
                     SELECT COUNT(*) FROM pipeline_runs
                     WHERE pipeline_version = ?
                       AND status = 'degraded_observation'
                       AND strategy_version IS NOT NULL
-                    """,
-                    (pipeline_version,),
+                    """
+                        + strategy_clause
+                    ),
+                    parameters,
                 ).fetchone()[0]
             )
+
+    def record_historical_observation_bootstrap(
+        self,
+        *,
+        pipeline_version: str,
+        strategy_version: str,
+        source: str,
+        policy_version: str,
+        days: tuple[Mapping[str, object], ...],
+        recorded_at: str,
+    ) -> dict[str, object]:
+        """Persist one immutable, explicitly non-live, 20-session simulation."""
+
+        if len(days) != 20:
+            raise ValueError("historical observation bootstrap requires exactly twenty sessions")
+        normalized_days: list[dict[str, object]] = []
+        for item in days:
+            trade_date = date.fromisoformat(str(item.get("trade_date") or ""))
+            input_hash = str(item.get("input_hash") or "")
+            result_hash = str(item.get("result_hash") or "")
+            self._validate_research_hash(input_hash, "bootstrap input")
+            self._validate_research_hash(result_hash, "bootstrap result")
+            candidate_count = int(item.get("candidate_count", -1))
+            if not 0 <= candidate_count <= 3:
+                raise ValueError("historical observation bootstrap candidate count is invalid")
+            market_regime = str(item.get("market_regime") or "")
+            if market_regime not in {"offensive", "neutral", "defensive"}:
+                raise ValueError("historical observation bootstrap market regime is invalid")
+            source_timestamp = str(item.get("source_timestamp") or "")
+            datetime.fromisoformat(source_timestamp)
+            normalized_days.append(
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "input_hash": input_hash,
+                    "result_hash": result_hash,
+                    "candidate_count": candidate_count,
+                    "market_regime": market_regime,
+                    "source_timestamp": source_timestamp,
+                }
+            )
+        normalized_days.sort(key=lambda item: str(item["trade_date"]))
+        if len({str(item["trade_date"]) for item in normalized_days}) != len(normalized_days):
+            raise ValueError("historical observation bootstrap contains duplicate sessions")
+        manifest = {
+            "schema": "historical-production-simulation-v1",
+            "pipeline_version": pipeline_version,
+            "strategy_version": strategy_version,
+            "source": source,
+            "policy_version": policy_version,
+            "days": normalized_days,
+        }
+        manifest_json = self._json(manifest)
+        manifest_hash = hashlib.sha256(manifest_json.encode("utf-8")).hexdigest()
+        start_date = str(normalized_days[0]["trade_date"])
+        end_date = str(normalized_days[-1]["trade_date"])
+        bootstrap_id = f"historical-observation-{manifest_hash}"
+        with self._idempotent_write_connection() as connection:
+            existing = connection.execute(
+                """
+                SELECT bootstrap_id, manifest_hash, session_count, recorded_at
+                FROM historical_observation_bootstrap_runs
+                WHERE pipeline_version=? AND strategy_version=? AND source=?
+                  AND policy_version=? AND start_date=? AND end_date=?
+                """,
+                (pipeline_version, strategy_version, source, policy_version, start_date, end_date),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[1]) != manifest_hash:
+                    raise ValueError("historical observation bootstrap evidence is immutable")
+                return {
+                    "bootstrap_id": str(existing[0]),
+                    "manifest_hash": manifest_hash,
+                    "session_count": int(existing[2]),
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "recorded_at": str(existing[3]),
+                }
+            connection.execute(
+                """
+                INSERT INTO historical_observation_bootstrap_runs(
+                    bootstrap_id, pipeline_version, strategy_version, source, policy_version,
+                    start_date, end_date, session_count, manifest_hash, manifest_json, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    bootstrap_id,
+                    pipeline_version,
+                    strategy_version,
+                    source,
+                    policy_version,
+                    start_date,
+                    end_date,
+                    len(normalized_days),
+                    manifest_hash,
+                    manifest_json,
+                    recorded_at,
+                ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO historical_observation_bootstrap_days(
+                    bootstrap_id, trade_date, input_hash, result_hash, candidate_count,
+                    market_regime, source_timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        bootstrap_id,
+                        item["trade_date"],
+                        item["input_hash"],
+                        item["result_hash"],
+                        item["candidate_count"],
+                        item["market_regime"],
+                        item["source_timestamp"],
+                    )
+                    for item in normalized_days
+                ),
+            )
+        return {
+            "bootstrap_id": bootstrap_id,
+            "manifest_hash": manifest_hash,
+            "session_count": len(normalized_days),
+            "start_date": start_date,
+            "end_date": end_date,
+            "recorded_at": recorded_at,
+        }
+
+    def count_recent_historical_observation_sessions(
+        self, pipeline_version: str, strategy_version: str, *, anchor_date: date
+    ) -> int:
+        """Return verified simulation coverage recent enough for one live gate reduction."""
+
+        earliest_end = (anchor_date - timedelta(days=35)).isoformat()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT session_count
+                FROM historical_observation_bootstrap_runs
+                WHERE pipeline_version=? AND strategy_version=? AND source='tushare'
+                  AND policy_version='historical-production-simulation-v1'
+                  AND session_count=20 AND end_date>=? AND end_date<?
+                ORDER BY end_date DESC, recorded_at DESC
+                LIMIT 1
+                """,
+                (pipeline_version, strategy_version, earliest_end, anchor_date.isoformat()),
+            ).fetchone()
+        return 0 if row is None else int(row[0])
 
     def get_candidate(self, candidate_id: str) -> Candidate | None:
         with self.connect() as connection:
@@ -5378,6 +5537,41 @@ class Database:
                         )
                 );
                 PRAGMA user_version = 13;
+                """
+            )
+        if version < 14:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS historical_observation_bootstrap_runs (
+                    bootstrap_id TEXT PRIMARY KEY,
+                    pipeline_version TEXT NOT NULL,
+                    strategy_version TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    policy_version TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    session_count INTEGER NOT NULL CHECK(session_count = 20),
+                    manifest_hash TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    UNIQUE(
+                        pipeline_version, strategy_version, source, policy_version,
+                        start_date, end_date
+                    )
+                );
+                CREATE TABLE IF NOT EXISTS historical_observation_bootstrap_days (
+                    bootstrap_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    input_hash TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    candidate_count INTEGER NOT NULL CHECK(candidate_count BETWEEN 0 AND 3),
+                    market_regime TEXT NOT NULL,
+                    source_timestamp TEXT NOT NULL,
+                    PRIMARY KEY(bootstrap_id, trade_date),
+                    FOREIGN KEY(bootstrap_id)
+                        REFERENCES historical_observation_bootstrap_runs(bootstrap_id)
+                );
+                PRAGMA user_version = 14;
                 """
             )
 

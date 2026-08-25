@@ -90,7 +90,7 @@ class StrategyReplayPersistenceContractTest(unittest.TestCase):
         list_jobs = self._require(migrated, "list_strategy_replay_jobs")
         self.assertEqual((job,), list_jobs())
         with sqlite3.connect(legacy_path) as connection:
-            self.assertEqual(13, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(14, connection.execute("PRAGMA user_version").fetchone()[0])
 
     def test_replay_day_is_idempotent_only_for_the_same_immutable_input_and_output(self) -> None:
         job = self._create_job()
