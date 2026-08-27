@@ -206,6 +206,73 @@ class LiveEvidenceSynchronizerContractTest(unittest.TestCase):
         self.assertEqual("ready", resumed["status"])
         self.assertEqual((sessions[-2],), resumed["repaired_price_dates"])
 
+    def test_failed_repairs_keep_safe_nested_provider_reasons(self) -> None:
+        sessions = tuple(date(2026, 5, 1) + timedelta(days=index) for index in range(61))
+        target = sessions[-1]
+        database = _Database(set(sessions[:-1]), set(sessions[:-1]))
+
+        def fail_prices(_days: tuple[date, ...]) -> None:
+            raise LiveEvidenceSyncError(
+                {
+                    "schema": "live-evidence-window-v1",
+                    "status": "incomplete",
+                    "remaining_price_dates": (target.isoformat(),),
+                    "price_failures": (
+                        {
+                            "trade_date": target.isoformat(),
+                            "error_class": "ProviderRuntimeError",
+                            "message": "Tushare returned no bars for the configured universe",
+                        },
+                    ),
+                }
+            )
+
+        def fail_statuses(_days: tuple[date, ...]) -> None:
+            raise ValueError("BaoStock status day main-board coverage is incomplete")
+
+        synchronizer = LiveEvidenceSynchronizer(
+            database,
+            price_sync=fail_prices,
+            status_sync=fail_statuses,
+            minimum_price_count=1,
+            minimum_status_count=1,
+        )
+
+        with self.assertRaises(LiveEvidenceSyncError) as raised:
+            synchronizer.sync(
+                target,
+                calendar=_Calendar(sessions),
+                expected_symbols=frozenset({"600001.SH"}),
+                include_target_price=True,
+            )
+
+        self.assertEqual(
+            (
+                {
+                    "stage": "price_sync",
+                    "error_class": "LiveEvidenceSyncError",
+                    "details": {
+                        "schema": "live-evidence-window-v1",
+                        "status": "incomplete",
+                        "remaining_price_dates": (target.isoformat(),),
+                        "price_failures": (
+                            {
+                                "trade_date": target.isoformat(),
+                                "error_class": "ProviderRuntimeError",
+                                "message": "Tushare returned no bars for the configured universe",
+                            },
+                        ),
+                    },
+                },
+                {
+                    "stage": "status_sync",
+                    "error_class": "ValueError",
+                    "message": "BaoStock status day main-board coverage is incomplete",
+                },
+            ),
+            raised.exception.report["repair_errors"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

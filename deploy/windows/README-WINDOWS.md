@@ -439,10 +439,16 @@ if ($LASTEXITCODE -ne 0) {
 `status_gap_days_after=0`、`simulation_session_count=20`、
 `historical_simulation_sessions=20`、`required_live_observation_sessions=3`、
 `evidence_class="operator_reconciliation_not_live"`、64 字符的 `input_hash/result_hash`，
-以及实际存在的 `backup_path`。它不会改写旧 `schedule_outcomes`、旧 `pipeline_runs`、日报、
+以及实际存在的 `backup_path`。`requested_through` 是管理员请求的上界；如果它恰好是上海
+本地当天，但 Tushare 和 BaoStock 的完整盘后事实尚未同时发布，命令只在此前 79 个会话均
+完整时退到上一交易日，并通过 `trade_date` 与 `skipped_incomplete_trade_dates` 明确记录，
+不把当天伪装成成功。旧日期、旧窗口或部分来源异常不会触发该回退，仍会显式失败。
+
+它不会改写旧 `schedule_outcomes`、旧 `pipeline_runs`、日报、
 候选或真实观察计数；2026-08-25/26 等既有失败记录必须继续保留。失败时异常中的
-`remaining_price_dates`、`remaining_status_dates` 或 `live-v3-evidence-audit-v1` 报告是完整
-剩余缺口，不得用 Sina、AKShare、较早收盘价或手工改库绕过。
+`remaining_price_dates`、`remaining_status_dates`、`repair_errors.details.price_failures` 或
+`live-v3-evidence-audit-v1` 报告是完整剩余缺口，不得用 Sina、AKShare、较早收盘价或手工
+改库绕过。`repaired_*_dates` 只列出复核后确实完整的日期，不再把“尝试过但仍缺失”记为已修复。
 
 命令成功后按顺序启动服务并检查就绪：
 
@@ -455,7 +461,11 @@ if ($mcp.status -ne 'ready') { throw 'MCP is not ready.' }
 Start-Service StockMcpTunnel
 Start-Sleep -Seconds 5
 $tunnel = Invoke-RestMethod 'http://127.0.0.1:8766/readyz' -TimeoutSec 5
-if ($tunnel -ne 'ready' -and $tunnel.status -ne 'ready') {
+$tunnelReady = ($tunnel -eq 'ready')
+if (-not $tunnelReady -and $tunnel.PSObject.Properties.Name -contains 'status') {
+    $tunnelReady = ($tunnel.status -eq 'ready')
+}
+if (-not $tunnelReady) {
     throw 'Tunnel is not ready.'
 }
 ```

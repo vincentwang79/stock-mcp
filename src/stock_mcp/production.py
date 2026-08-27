@@ -22,7 +22,7 @@ from .backup import BackupManager
 from .config import Settings
 from .domain import DailyBar, MarketSnapshot, Security
 from .industry import load_industry_reference
-from .live_evidence import synchronize_production_live_evidence
+from .live_evidence import LiveEvidenceSyncError, synchronize_production_live_evidence
 from .pipeline import DailyReviewPipeline, PipelineRun
 from .providers.metadata import normalize_baostock_securities
 from .providers.runtime import (
@@ -150,13 +150,32 @@ def reconcile_live_observation(
     expected_symbols = frozenset(
         security.symbol for security in securities if security.board == "MAIN"
     )
-    synchronization = evidence_synchronizer(
-        target=target,
-        calendar=calendar,
-        expected_symbols=expected_symbols,
-        include_target_price=True,
-        simulation_sessions=20,
-    )
+    skipped_incomplete_trade_dates: list[date] = []
+    try:
+        synchronization = evidence_synchronizer(
+            target=target,
+            calendar=calendar,
+            expected_symbols=expected_symbols,
+            include_target_price=True,
+            simulation_sessions=20,
+        )
+    except LiveEvidenceSyncError as error:
+        if not _can_use_previous_complete_session(
+            error,
+            target=target,
+            through=through,
+            recorded_at=recorded_at,
+        ):
+            raise
+        skipped_incomplete_trade_dates.append(target)
+        target = calendar.prior_trading_days(target, 1)[-1]
+        synchronization = evidence_synchronizer(
+            target=target,
+            calendar=calendar,
+            expected_symbols=expected_symbols,
+            include_target_price=True,
+            simulation_sessions=20,
+        )
     if synchronization.get("status") != "ready":
         raise ValueError("live observation evidence window remains incomplete")
     sessions = tuple(
@@ -198,7 +217,11 @@ def reconcile_live_observation(
     return {
         "schema": "live-observation-reconciliation-v1",
         "window_status": "ready",
+        "requested_through": through.isoformat(),
         "trade_date": target.isoformat(),
+        "skipped_incomplete_trade_dates": [
+            value.isoformat() for value in skipped_incomplete_trade_dates
+        ],
         "price_gap_days_after": int(synchronization["price_gap_days_after"]),
         "status_gap_days_after": int(synchronization["status_gap_days_after"]),
         "repaired_price_dates": encoded_dates("repaired_price_dates"),
@@ -214,6 +237,25 @@ def reconcile_live_observation(
         "backup_path": str(backup_path),
         "bootstrap_manifest_hash": str(bootstrap["manifest_hash"]),
     }
+
+
+def _can_use_previous_complete_session(
+    error: LiveEvidenceSyncError,
+    *,
+    target: date,
+    through: date,
+    recorded_at: datetime,
+) -> bool:
+    """Permit a truthful same-day fallback only when no older evidence gap remains."""
+
+    if through != target or through != recorded_at.astimezone(_SHANGHAI).date():
+        return False
+    remaining = {
+        str(value)
+        for name in ("remaining_price_dates", "remaining_status_dates")
+        for value in error.report.get(name, ())
+    }
+    return remaining == {target.isoformat()}
 
 
 class LazyAKShareQuoteProvider:

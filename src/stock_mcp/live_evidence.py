@@ -67,19 +67,21 @@ class LiveEvidenceSynchronizer:
         price_required = required if include_target_price else prior
         missing_prices = self._missing_price_dates(price_required)
         missing_statuses = self._missing_status_dates(required, expected_symbols)
-        repair_errors: list[dict[str, str]] = []
+        repair_errors: list[dict[str, object]] = []
         if missing_prices:
             try:
                 self._price_sync(missing_prices)
             except Exception as error:
-                repair_errors.append({"stage": "price_sync", "error_class": type(error).__name__})
+                repair_errors.append(_repair_error("price_sync", error))
         if missing_statuses:
             try:
                 self._status_sync(missing_statuses)
             except Exception as error:
-                repair_errors.append({"stage": "status_sync", "error_class": type(error).__name__})
+                repair_errors.append(_repair_error("status_sync", error))
         remaining_prices = self._missing_price_dates(price_required)
         remaining_statuses = self._missing_status_dates(required, expected_symbols)
+        repaired_prices = tuple(day for day in missing_prices if day not in remaining_prices)
+        repaired_statuses = tuple(day for day in missing_statuses if day not in remaining_statuses)
         report: dict[str, object] = {
             "schema": "live-evidence-window-v1",
             "status": (
@@ -91,8 +93,8 @@ class LiveEvidenceSynchronizer:
             "window_start": required[0].isoformat(),
             "window_end": target.isoformat(),
             "window_session_count": len(required),
-            "repaired_price_dates": missing_prices,
-            "repaired_status_dates": missing_statuses,
+            "repaired_price_dates": repaired_prices,
+            "repaired_status_dates": repaired_statuses,
             "price_gap_days_after": len(remaining_prices),
             "status_gap_days_after": len(remaining_statuses),
             "remaining_price_dates": tuple(day.isoformat() for day in remaining_prices),
@@ -148,12 +150,14 @@ def synchronize_production_live_evidence(
             return
         from .backfill import run_production_backfill
 
+        failures: dict[date, Exception] = {}
         result = run_production_backfill(
             settings,
             database,
             min(days),
             max(days),
             minimum_main_board_count=minimum_price_count,
+            on_incomplete=lambda target, error: failures.__setitem__(target, error),
         )
         unresolved = tuple(day for day in days if day in result.incomplete_dates)
         if unresolved:
@@ -162,6 +166,15 @@ def synchronize_production_live_evidence(
                     "schema": "live-evidence-window-v1",
                     "status": "incomplete",
                     "remaining_price_dates": tuple(day.isoformat() for day in unresolved),
+                    "price_failures": tuple(
+                        {
+                            "trade_date": day.isoformat(),
+                            "error_class": type(failures[day]).__name__,
+                            "message": _safe_error_message(failures[day]),
+                        }
+                        for day in unresolved
+                        if day in failures
+                    ),
                 }
             )
 
@@ -224,3 +237,19 @@ def _sync_baostock_status_days(
             logout()
         finally:
             socket.setdefaulttimeout(original_timeout)
+
+
+def _repair_error(stage: str, error: Exception) -> dict[str, object]:
+    item: dict[str, object] = {
+        "stage": stage,
+        "error_class": type(error).__name__,
+    }
+    if isinstance(error, LiveEvidenceSyncError):
+        item["details"] = error.report
+    elif isinstance(error, ValueError):
+        item["message"] = _safe_error_message(error)
+    return item
+
+
+def _safe_error_message(error: Exception) -> str:
+    return " ".join(str(error).split())[:500]

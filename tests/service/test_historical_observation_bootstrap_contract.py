@@ -14,6 +14,7 @@ from stock_mcp import production
 from stock_mcp.cli import main
 from stock_mcp.config import Settings
 from stock_mcp.domain import DailyBar, MarketSnapshot, Security, StrategyVersion
+from stock_mcp.live_evidence import LiveEvidenceSyncError
 from stock_mcp.pipeline import PipelineRun
 from stock_mcp.production import ProductionPostMarketTask
 from stock_mcp.providers.runtime import BaoStockTradingCalendar
@@ -35,6 +36,110 @@ class _Provider:
 
 
 class HistoricalObservationBootstrapContractTest(unittest.TestCase):
+    def test_reconciliation_uses_previous_session_when_current_day_is_not_complete(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "current").mkdir()
+            (root / "current" / "a_share_mainboard_code_name.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "standard": "fixture-industry-v1",
+                            "mode": "retrospective_current_mapping",
+                            "as_of": "2026-08-10",
+                        },
+                        "stocks": [{"code": "600001", "exchange": "SSE", "industry": "银行"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            database = Database(root / "data" / "stock-mcp.sqlite3")
+            database.initialize()
+            security = Security(
+                "600001.SH", "完整历史", "SSE", "MAIN", date(2020, 1, 1), "银行", False
+            )
+            timestamp = datetime(2026, 8, 27, 16, 30, tzinfo=SHANGHAI)
+            sessions = tuple(timestamp.date() - timedelta(days=80 - index) for index in range(81))
+            database.save_expected_trading_days("tushare", sessions)
+            for index, session in enumerate(sessions[:-1]):
+                close = 100_000 + index
+                database.save_market_snapshot(
+                    MarketSnapshot(
+                        session,
+                        "tushare",
+                        timestamp,
+                        (security,),
+                        (
+                            DailyBar(
+                                security.symbol,
+                                session,
+                                close,
+                                close,
+                                close,
+                                close,
+                                close - 1,
+                                1_000_000,
+                                10_000_000_000,
+                                "tushare",
+                                timestamp,
+                            ),
+                        ),
+                        5_000,
+                        5_000,
+                    )
+                )
+            strategy = StrategyVersion(
+                version="v0.3-policy-1",
+                status="active",
+                parameters=v3_proposal_parameters(1),
+            )
+            synchronization_calls: list[date] = []
+
+            def synchronize(**values):
+                target = values["target"]
+                synchronization_calls.append(target)
+                if target == sessions[-1]:
+                    raise LiveEvidenceSyncError(
+                        {
+                            "schema": "live-evidence-window-v1",
+                            "status": "incomplete",
+                            "remaining_price_dates": (target.isoformat(),),
+                            "remaining_status_dates": (target.isoformat(),),
+                            "price_gap_days_after": 1,
+                            "status_gap_days_after": 1,
+                            "repair_errors": (),
+                        }
+                    )
+                return {
+                    "status": "ready",
+                    "repaired_price_dates": (),
+                    "repaired_status_dates": (),
+                    "price_gap_days_after": 0,
+                    "status_gap_days_after": 0,
+                }
+
+            report = production.reconcile_live_observation(
+                database=database,
+                root=root,
+                strategy=strategy,
+                through=sessions[-1],
+                recorded_at=timestamp,
+                context_loader=lambda _target: (
+                    (security,),
+                    BaoStockTradingCalendar(sessions),
+                ),
+                evidence_synchronizer=synchronize,
+                backup_path=root / "backups" / "fixture.sqlite3",
+            )
+
+            self.assertEqual(sessions[-2].isoformat(), report["trade_date"])
+            self.assertEqual(sessions[-1].isoformat(), report["requested_through"])
+            self.assertEqual([sessions[-1].isoformat()], report["skipped_incomplete_trade_dates"])
+            self.assertEqual([sessions[-1], sessions[-2]], synchronization_calls)
+
     def test_reconciliation_runs_twenty_day_simulation_and_dry_run_without_live_writes(
         self,
     ) -> None:
