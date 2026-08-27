@@ -12,6 +12,49 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LiveObservationStatusContractTest(unittest.TestCase):
+    def test_reconciliation_resolves_the_gap_without_rewriting_the_old_failure(self) -> None:
+        script = ROOT / "scripts" / "live_observation_status.py"
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "stock-mcp.sqlite3"
+            self._create_fixture(database)
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "UPDATE schedule_outcomes SET status='failed', "
+                    "error='missing without a recorded suspension'"
+                )
+                connection.execute(
+                    "UPDATE pipeline_runs SET status='failed', strategy_version=NULL, "
+                    "error='missing without a recorded suspension'"
+                )
+                connection.execute(
+                    "INSERT INTO historical_observation_bootstrap_runs VALUES("
+                    "'reconciliation-bootstrap','pipeline-v0.1','v0.3-policy-1','tushare',"
+                    "'historical-production-simulation-v1','2026-07-29','2026-08-24',20,"
+                    "'reconciled','{}','2026-08-27T09:00:00+00:00')"
+                )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--database",
+                    str(database),
+                    "--after",
+                    "2026-08-21",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(2, completed.returncode, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual("failed", report["schedule"]["status"])
+        self.assertEqual(20, report["historical_simulation_sessions"])
+        self.assertEqual(3, report["required_live_observation_sessions"])
+        self.assertTrue(report["historical_reconciliation_covers_trade_date"])
+        self.assertNotIn("unresolved_unrecorded_history_gap", report["validation"]["failures"])
+
     def test_reports_latest_post_cutoff_observation_and_acceptance_checks(self) -> None:
         script = ROOT / "scripts" / "live_observation_status.py"
         self.assertTrue(script.is_file(), "the read-only live observation status script must exist")

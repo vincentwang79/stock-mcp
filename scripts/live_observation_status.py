@@ -20,6 +20,7 @@ def _count(connection: sqlite3.Connection, sql: str, values: tuple[object, ...] 
 def _report(connection: sqlite3.Connection, *, after: str) -> dict[str, object]:
     connection.row_factory = sqlite3.Row
     active = _row(connection, "SELECT version FROM active_strategy WHERE singleton = 1")
+    active_version = None if active is None else str(active["version"])
     schedule = _row(
         connection,
         "SELECT trade_date,status,next_at,pipeline_version,error FROM schedule_outcomes "
@@ -82,7 +83,9 @@ def _report(connection: sqlite3.Connection, *, after: str) -> dict[str, object]:
             (strategy_version,),
         )
     historical_simulation_sessions = 0
-    if strategy_version:
+    historical_reconciliation_covers_trade_date = False
+    evidence_strategy_version = strategy_version or active_version
+    if evidence_strategy_version:
         try:
             bootstrap = _row(
                 connection,
@@ -92,9 +95,22 @@ def _report(connection: sqlite3.Connection, *, after: str) -> dict[str, object]:
                 "AND policy_version='historical-production-simulation-v1' "
                 "AND session_count=20 AND end_date>=date(?, '-35 days') AND end_date<? "
                 "ORDER BY end_date DESC, recorded_at DESC LIMIT 1",
-                (strategy_version, trade_date, trade_date),
+                (evidence_strategy_version, trade_date, trade_date),
             )
             historical_simulation_sessions = 0 if bootstrap is None else int(bootstrap[0])
+            reconciliation = _row(
+                connection,
+                "SELECT session_count FROM historical_observation_bootstrap_runs "
+                "WHERE pipeline_version='pipeline-v0.1' AND strategy_version=? "
+                "AND source='tushare' "
+                "AND policy_version='historical-production-simulation-v1' "
+                "AND session_count=20 AND start_date<=? AND end_date>=? "
+                "ORDER BY recorded_at DESC LIMIT 1",
+                (evidence_strategy_version, trade_date, trade_date),
+            )
+            if reconciliation is not None:
+                historical_reconciliation_covers_trade_date = True
+                historical_simulation_sessions = int(reconciliation[0])
         except sqlite3.OperationalError:
             # Older installations have no bootstrap tables; report no evidence rather
             # than treating a schema upgrade as a successful simulation.
@@ -103,7 +119,6 @@ def _report(connection: sqlite3.Connection, *, after: str) -> dict[str, object]:
     forward_observations = _count(connection, "SELECT COUNT(*) FROM research_forward_observations")
 
     failures: list[str] = []
-    active_version = None if active is None else str(active["version"])
     schedule_status = str(schedule["status"])
     pipeline_status = None if pipeline is None else str(pipeline["status"])
     review_status = None if review is None else str(review["status"])
@@ -135,7 +150,10 @@ def _report(connection: sqlite3.Connection, *, after: str) -> dict[str, object]:
         failures.append("target_bar_limit_feature_counts_do_not_match")
     if schedule_status == "degraded_observation" and live_sessions < 1:
         failures.append("no_successful_live_observation_session")
-    if "missing without a recorded suspension" in error_text:
+    if (
+        "missing without a recorded suspension" in error_text
+        and not historical_reconciliation_covers_trade_date
+    ):
         failures.append("unresolved_unrecorded_history_gap")
     if "insufficient history" in error_text:
         failures.append("unresolved_insufficient_history")
@@ -153,6 +171,9 @@ def _report(connection: sqlite3.Connection, *, after: str) -> dict[str, object]:
         "v3_feature_count": features,
         "live_observation_sessions": live_sessions,
         "historical_simulation_sessions": historical_simulation_sessions,
+        "historical_reconciliation_covers_trade_date": (
+            historical_reconciliation_covers_trade_date
+        ),
         "required_live_observation_sessions": required_live_observation_sessions,
         "forward_observation_count": forward_observations,
         "validation": {"status": "pass" if not failures else "fail", "failures": failures},

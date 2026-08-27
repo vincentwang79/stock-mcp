@@ -460,6 +460,18 @@ if ($tunnel -ne 'ready' -and $tunnel.status -ne 'ready') {
 }
 ```
 
+当天可立即运行只读状态检查。因为旧失败审计不会被改写，脚本可能仍以退出码 2 报告
+`schedule_is_not_a_successful_observation_or_publication`；但必须显示
+`historical_simulation_sessions=20`、`required_live_observation_sessions=3`、
+`historical_reconciliation_covers_trade_date=true`，且 `validation.failures` 不再包含
+`unresolved_unrecorded_history_gap`：
+
+```powershell
+& $py E:\code\stock-mcp\scripts\live_observation_status.py `
+  --database E:\StockMcp\data\stock-mcp.sqlite3 `
+  --after 2026-08-21
+```
+
 如果最近 20 个**已记录、连续且完整**的 Tushare 交易日及其 BaoStock 状态事实已经可用，
 管理员可在停服维护窗口执行一次只读历史生产仿真。它逐日复用生产 v3 输入构建、停牌处理、
 行业参考和规则引擎，保存不可变输入/结果哈希；不访问实时行情，不写入历史日报、候选、
