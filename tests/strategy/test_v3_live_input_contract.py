@@ -9,6 +9,48 @@ from stock_mcp.v3_facts import build_live_v3_market_input
 
 
 class V3LiveInputContractTest(unittest.TestCase):
+    def test_recorded_st_session_is_an_ineligible_day_not_a_tradable_price_gap(self) -> None:
+        target = date(2026, 8, 27)
+        sessions = tuple(target - timedelta(days=60 - index) for index in range(60))
+        formerly_st_date = sessions[-10]
+        timestamp = datetime(2026, 8, 27, 9, tzinfo=UTC)
+        securities = (
+            Security("600001.SH", "正常样本", "SSE", "MAIN", date(2020, 1, 1), "银行", False),
+            Security("600165.SH", "已摘帽样本", "SSE", "MAIN", date(2020, 1, 1), "化工", False),
+        )
+        bars = tuple(
+            _bar(security.symbol, session, timestamp)
+            for security in securities
+            for session in (*sessions, target)
+            if security.symbol != "600165.SH" or session != formerly_st_date
+        )
+        snapshot = MarketSnapshot(target, "tushare", timestamp, securities, bars, 5_000, 5_000)
+        reference = RecordedIndustryReference(
+            standard="fixture",
+            mode="retrospective_current_mapping",
+            as_of=date(2026, 8, 10),
+            mapping_sha256="e" * 64,
+            industries={security.symbol: security.industry for security in securities},
+        )
+
+        try:
+            market, _features = build_live_v3_market_input(
+                snapshot,
+                prior_dates=sessions,
+                industry_reference=reference,
+                trading_statuses={
+                    ("600165.SH", formerly_st_date): {
+                        "tradestatus": "1",
+                        "is_st": True,
+                    }
+                },
+            )
+        except ValueError as error:
+            self.fail(f"recorded ST evidence must not be rejected: {error}")
+
+        self.assertEqual(1, market.breadth.eligible_count)
+        self.assertEqual(2, len(market.securities))
+
     def test_target_day_missing_prices_use_recorded_status_in_the_same_aggregate_audit(
         self,
     ) -> None:

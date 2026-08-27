@@ -279,6 +279,38 @@ class V3StorageContractTest(unittest.TestCase):
             )
         )
 
+    def test_daily_status_eligibility_loader_preserves_point_in_time_st_fact(self) -> None:
+        load = getattr(self.database, "load_daily_security_eligibility_statuses", None)
+        self.assertTrue(
+            callable(load),
+            "live v3 status loading must preserve both tradeStatus and is_st",
+        )
+        if not callable(load):
+            return
+        self.database.save_daily_security_statuses(
+            (
+                {
+                    "symbol": "600165.SH",
+                    "trade_date": TRADE_DATE,
+                    "source": "baostock",
+                    "tradestatus": "1",
+                    "is_st": True,
+                    "source_timestamp": AS_OF,
+                    "batch_sha256": "b" * 64,
+                },
+            )
+        )
+
+        self.assertEqual(
+            {
+                ("600165.SH", TRADE_DATE): {
+                    "tradestatus": "1",
+                    "is_st": True,
+                }
+            },
+            load(TRADE_DATE, TRADE_DATE, source="baostock"),
+        )
+
     def test_v3_snapshot_features_are_batch_atomic_and_immutable(self) -> None:
         save = self._require("save_v3_snapshot_features")
         load = self._require("load_v3_snapshot_features")

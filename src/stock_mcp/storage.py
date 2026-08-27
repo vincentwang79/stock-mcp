@@ -484,6 +484,27 @@ class Database:
             ).fetchall()
         return {(str(row[0]), date.fromisoformat(str(row[1]))): str(row[2]) for row in rows}
 
+    def load_daily_security_eligibility_statuses(
+        self, start: date, end: date, *, source: str
+    ) -> dict[tuple[str, date], dict[str, object]]:
+        """Load the complete point-in-time eligibility state used by live v3."""
+
+        if end < start:
+            raise ValueError("daily security eligibility status range is invalid")
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT symbol,trade_date,tradestatus,is_st FROM daily_security_status "
+                "WHERE source=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date,symbol",
+                (source, start.isoformat(), end.isoformat()),
+            ).fetchall()
+        return {
+            (str(row[0]), date.fromisoformat(str(row[1]))): {
+                "tradestatus": str(row[2]),
+                "is_st": bool(row[3]),
+            }
+            for row in rows
+        }
+
     def has_complete_daily_security_status(
         self,
         target: date,

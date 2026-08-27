@@ -37,7 +37,7 @@ def build_live_v3_market_input(
     *,
     prior_dates: tuple[date, ...],
     industry_reference: RecordedIndustryReference,
-    trading_statuses: Mapping[tuple[str, date], str],
+    trading_statuses: Mapping[tuple[str, date], str | Mapping[str, object]],
 ) -> tuple[V3MarketInput, dict[str, object]]:
     """Build one live v3 input while degrading incomplete securities individually.
 
@@ -78,6 +78,7 @@ def build_live_v3_market_input(
     missing_status_gaps: dict[date, list[str]] = defaultdict(list)
     tradable_price_gaps: dict[date, list[str]] = defaultdict(list)
     recorded_suspension_count = 0
+    recorded_st_exclusion_count = 0
     for security in snapshot.securities:
         otherwise_eligible = (
             security.board == "MAIN"
@@ -86,15 +87,15 @@ def build_live_v3_market_input(
         )
         if not otherwise_eligible or security.symbol in target_bars:
             continue
-        trade_status = trading_statuses.get((security.symbol, target))
-        if trade_status == "0":
-            recorded_suspension_count += 1
-        elif trade_status == "1":
-            tradable_price_gaps[target].append(security.symbol)
-        elif trade_status is None:
+        eligibility = _recorded_daily_eligibility(trading_statuses.get((security.symbol, target)))
+        if eligibility is None:
             missing_status_gaps[target].append(security.symbol)
-        else:
-            raise ValueError("live v3 tradeStatus must be 0 or 1")
+        elif eligibility[0] == "0":
+            recorded_suspension_count += 1
+        elif eligibility[1]:
+            recorded_st_exclusion_count += 1
+        elif eligibility[0] == "1":
+            tradable_price_gaps[target].append(security.symbol)
     for symbol in sorted(target_bars):
         security = security_by_symbol[symbol]
         target_bar = target_bars[symbol]
@@ -127,15 +128,17 @@ def build_live_v3_market_input(
         missing_dates = tuple(day for day in prior_dates if day not in observed_prior_dates)
         if otherwise_eligible:
             for missing_date in missing_dates:
-                trade_status = trading_statuses.get((symbol, missing_date))
-                if trade_status == "0":
-                    recorded_suspension_count += 1
-                elif trade_status == "1":
-                    tradable_price_gaps[missing_date].append(symbol)
-                elif trade_status is None:
+                eligibility = _recorded_daily_eligibility(
+                    trading_statuses.get((symbol, missing_date))
+                )
+                if eligibility is None:
                     missing_status_gaps[missing_date].append(symbol)
-                else:
-                    raise ValueError("live v3 tradeStatus must be 0 or 1")
+                elif eligibility[0] == "0":
+                    recorded_suspension_count += 1
+                elif eligibility[1]:
+                    recorded_st_exclusion_count += 1
+                elif eligibility[0] == "1":
+                    tradable_price_gaps[missing_date].append(symbol)
         basic_eligible = (
             otherwise_eligible and tuple(bar.trade_date for bar in prior) == prior_dates
         )
@@ -157,6 +160,7 @@ def build_live_v3_market_input(
                 "missing_status_count": sum(map(len, missing_status_gaps.values())),
                 "tradable_price_gap_count": sum(map(len, tradable_price_gaps.values())),
                 "recorded_suspension_count": recorded_suspension_count,
+                "recorded_st_exclusion_count": recorded_st_exclusion_count,
                 "missing_status_dates": _grouped_gap_report(missing_status_gaps),
                 "tradable_price_gap_dates": _grouped_gap_report(tradable_price_gaps),
             }
@@ -205,6 +209,32 @@ def _grouped_gap_report(gaps: Mapping[date, list[str]]) -> list[dict[str, object
         }
         for trade_date, symbols in sorted(gaps.items())
     ]
+
+
+def _recorded_daily_eligibility(
+    value: str | Mapping[str, object] | None,
+) -> tuple[str, bool] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        trade_status = value
+        is_st = False
+    elif isinstance(value, Mapping):
+        trade_status = str(value.get("tradestatus", "")).strip()
+        raw_is_st = value.get("is_st", False)
+        if isinstance(raw_is_st, bool):
+            is_st = raw_is_st
+        elif isinstance(raw_is_st, int) and raw_is_st in (0, 1):
+            is_st = bool(raw_is_st)
+        elif isinstance(raw_is_st, str) and raw_is_st in ("0", "1"):
+            is_st = raw_is_st == "1"
+        else:
+            raise ValueError("live v3 is_st must be boolean")
+    else:
+        raise ValueError("live v3 daily eligibility status is invalid")
+    if trade_status not in {"0", "1"}:
+        raise ValueError("live v3 tradeStatus must be 0 or 1")
+    return trade_status, is_st
 
 
 def load_v3_market_input(

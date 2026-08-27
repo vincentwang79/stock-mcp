@@ -86,7 +86,9 @@ def bootstrap_historical_v3_observations(
                 "historical observation bootstrap lacks sixty prior sessions for "
                 f"{target.isoformat()}"
             )
-        statuses = database.load_daily_security_statuses(prior_dates[0], target, source="baostock")
+        statuses = database.load_daily_security_eligibility_statuses(
+            prior_dates[0], target, source="baostock"
+        )
         market, _features = build_live_v3_market_input(
             snapshot,
             prior_dates=prior_dates,
@@ -193,7 +195,9 @@ def reconcile_live_observation(
     )
     snapshot = database.load_market_snapshot(target, source="tushare", history_limit=61)
     prior_dates = calendar.prior_trading_days(target, 60)
-    statuses = database.load_daily_security_statuses(prior_dates[0], target, source="baostock")
+    statuses = database.load_daily_security_eligibility_statuses(
+        prior_dates[0], target, source="baostock"
+    )
     industry_reference = load_industry_reference(
         root / "current" / "a_share_mainboard_code_name.json"
     )
@@ -650,7 +654,7 @@ class ProductionPostMarketTask:
                         self.settings.root / "current" / "a_share_mainboard_code_name.json"
                     )
                     prior_dates = calendar.prior_trading_days(target, 60)
-                    trading_statuses = self.database.load_daily_security_statuses(
+                    trading_statuses = self.database.load_daily_security_eligibility_statuses(
                         prior_dates[0], target, source="baostock"
                     )
                     return build_live_v3_market_input(
