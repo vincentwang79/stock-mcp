@@ -484,6 +484,46 @@ class Database:
             ).fetchall()
         return {(str(row[0]), date.fromisoformat(str(row[1]))): str(row[2]) for row in rows}
 
+    def has_complete_daily_security_status(
+        self,
+        target: date,
+        *,
+        source: str,
+        expected_symbols: frozenset[str],
+        minimum_count: int,
+    ) -> bool:
+        if minimum_count < 1 or not expected_symbols:
+            raise ValueError("daily security status coverage contract is invalid")
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT symbol FROM daily_security_status "
+                "WHERE source=? AND trade_date=? ORDER BY symbol",
+                (source, target.isoformat()),
+            ).fetchall()
+            snapshot_rows = connection.execute(
+                "SELECT symbol FROM snapshot_securities "
+                "WHERE source='tushare' AND trade_date=? ORDER BY symbol",
+                (target.isoformat(),),
+            ).fetchall()
+            checkpoint_rows = connection.execute(
+                "SELECT checkpoint_json FROM provider_backfill_checkpoints "
+                "WHERE request_key=? AND status='complete'",
+                (target.isoformat(),),
+            ).fetchall()
+        recorded = {str(row[0]) for row in rows}
+        dated_universe = {str(row[0]) for row in snapshot_rows}
+        required = dated_universe or expected_symbols
+        checkpoints = tuple(json.loads(str(row[0])) for row in checkpoint_rows)
+        checkpoint_complete = any(
+            checkpoint.get("schema") == "baostock-daily-status-v1"
+            and checkpoint.get("trade_date") == target.isoformat()
+            and int(checkpoint.get("row_count", -1)) == len(recorded)
+            for checkpoint in checkpoints
+        )
+        return (
+            checkpoint_complete and len(recorded) >= minimum_count and required.issubset(recorded)
+        )
+
     def _save_daily_security_statuses(
         self, connection: sqlite3.Connection, statuses: Iterable[dict[str, object] | object]
     ) -> None:
@@ -2090,6 +2130,42 @@ class Database:
                 (target.isoformat(), source),
             ).fetchone()
         return row is not None
+
+    def has_complete_market_snapshot(
+        self, target: date, *, source: str, minimum_main_board_count: int
+    ) -> bool:
+        """Return whether a stored snapshot still satisfies its admission coverage floor."""
+
+        if minimum_main_board_count < 1:
+            raise ValueError("market snapshot coverage floor must be positive")
+        with self.connect() as connection:
+            snapshot = connection.execute(
+                "SELECT 1 FROM market_snapshots WHERE trade_date=? AND source=?",
+                (target.isoformat(), source),
+            ).fetchone()
+            security_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM snapshot_securities "
+                    "WHERE trade_date=? AND source=? AND board='MAIN' AND is_st=0",
+                    (target.isoformat(), source),
+                ).fetchone()[0]
+            )
+            target_bar_count = int(
+                connection.execute(
+                    "SELECT COUNT(DISTINCT b.symbol) FROM daily_bars b "
+                    "JOIN snapshot_securities s ON s.symbol=b.symbol "
+                    "AND s.trade_date=b.trade_date AND s.source=b.source "
+                    "WHERE b.trade_date=? AND b.source=? "
+                    "AND s.board='MAIN' AND s.is_st=0",
+                    (target.isoformat(), source),
+                ).fetchone()[0]
+            )
+        proportional_bar_floor = (security_count * 9_700 + 9_999) // 10_000
+        return (
+            snapshot is not None
+            and security_count >= minimum_main_board_count
+            and target_bar_count >= max(minimum_main_board_count, proportional_bar_floor)
+        )
 
     def load_market_snapshots(
         self, start: date, end: date, *, source: str = "tushare", history_limit: int = 60
@@ -3716,6 +3792,7 @@ class Database:
     def load_pipeline_run(self, trade_date: date, pipeline_version: str) -> object | None:
         from .pipeline import PipelineRun
 
+        snapshot_source: str | None = None
         with self.connect() as connection:
             row = connection.execute(
                 """
@@ -3743,14 +3820,31 @@ class Database:
                 if row[2] is None
                 else self._load_daily_review(connection, trade_date, str(row[2]))
             )
+            if str(row[0]) == "failed":
+                sources = tuple(
+                    str(item[0])
+                    for item in connection.execute(
+                        "SELECT source FROM market_snapshots WHERE trade_date=? ORDER BY source",
+                        (trade_date.isoformat(),),
+                    )
+                )
+                if "tushare" in sources:
+                    snapshot_source = "tushare"
+                elif len(sources) == 1:
+                    snapshot_source = sources[0]
         if row[0] == "ready" and review is None:
             raise ValueError("ready pipeline run has no persisted review")
+        snapshot = (
+            None
+            if snapshot_source is None
+            else self.load_market_snapshot(trade_date, source=snapshot_source, history_limit=61)
+        )
         return PipelineRun(
             trade_date=trade_date,
             pipeline_version=pipeline_version,
             status=str(row[0]),
             attempts=int(row[1]),
-            snapshot=None,
+            snapshot=snapshot,
             review=review,
             error=None if row[3] is None else str(row[3]),
         )

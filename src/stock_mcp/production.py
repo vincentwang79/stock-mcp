@@ -22,6 +22,7 @@ from .backup import BackupManager
 from .config import Settings
 from .domain import DailyBar, MarketSnapshot, Security
 from .industry import load_industry_reference
+from .live_evidence import synchronize_production_live_evidence
 from .pipeline import DailyReviewPipeline, PipelineRun
 from .providers.metadata import normalize_baostock_securities
 from .providers.runtime import (
@@ -85,9 +86,7 @@ def bootstrap_historical_v3_observations(
                 "historical observation bootstrap lacks sixty prior sessions for "
                 f"{target.isoformat()}"
             )
-        statuses = database.load_daily_security_statuses(
-            prior_dates[0], prior_dates[-1], source="baostock"
-        )
+        statuses = database.load_daily_security_statuses(prior_dates[0], target, source="baostock")
         market, _features = build_live_v3_market_input(
             snapshot,
             prior_dates=prior_dates,
@@ -122,6 +121,98 @@ def bootstrap_historical_v3_observations(
         "candidate_count": sum(int(day["candidate_count"]) for day in days),
         "zero_candidate_days": sum(int(day["candidate_count"]) == 0 for day in days),
         "live_observations_required": 3,
+    }
+
+
+def reconcile_live_observation(
+    *,
+    database: Any,
+    root: Path,
+    strategy: Any,
+    through: date,
+    recorded_at: datetime,
+    context_loader: Callable[[date], tuple[tuple[Security, ...], BaoStockTradingCalendar]] | None,
+    evidence_synchronizer: Callable[..., dict[str, object]],
+    backup_path: Path,
+) -> dict[str, object]:
+    """Repair, simulate and dry-run one bounded live observation window."""
+
+    if recorded_at.tzinfo is None or recorded_at.utcoffset() is None:
+        raise ValueError("live observation reconciliation timestamp must be timezone-aware")
+    if int(strategy.parameters.get("rule_engine_version", 0)) != 3:
+        raise ValueError("live observation reconciliation requires rule engine v3")
+    securities, calendar = (context_loader or _load_baostock_context)(through)
+    target = (
+        through
+        if calendar.is_trading_day(through)
+        else calendar.prior_trading_days(through + timedelta(days=1), 1)[-1]
+    )
+    expected_symbols = frozenset(
+        security.symbol for security in securities if security.board == "MAIN"
+    )
+    synchronization = evidence_synchronizer(
+        target=target,
+        calendar=calendar,
+        expected_symbols=expected_symbols,
+        include_target_price=True,
+        simulation_sessions=20,
+    )
+    if synchronization.get("status") != "ready":
+        raise ValueError("live observation evidence window remains incomplete")
+    sessions = tuple(
+        database.load_expected_trading_days(target - timedelta(days=200), target, source="tushare")
+    )[-20:]
+    if len(sessions) != 20 or sessions[-1] != target:
+        raise ValueError("live observation reconciliation requires twenty ending sessions")
+    bootstrap = bootstrap_historical_v3_observations(
+        database=database,
+        root=root,
+        strategy=strategy,
+        start=sessions[0],
+        end=sessions[-1],
+        recorded_at=recorded_at,
+    )
+    snapshot = database.load_market_snapshot(target, source="tushare", history_limit=61)
+    prior_dates = calendar.prior_trading_days(target, 60)
+    statuses = database.load_daily_security_statuses(prior_dates[0], target, source="baostock")
+    industry_reference = load_industry_reference(
+        root / "current" / "a_share_mainboard_code_name.json"
+    )
+    market, _features = build_live_v3_market_input(
+        snapshot,
+        prior_dates=prior_dates,
+        industry_reference=industry_reference,
+        trading_statuses=statuses,
+    )
+    review = generate_v3_daily_review(market, strategy)
+
+    def encoded_dates(name: str) -> list[str]:
+        return [
+            value.isoformat() if isinstance(value, date) else str(value)
+            for value in synchronization.get(name, ())
+        ]
+
+    historical_count = database.count_recent_historical_observation_sessions(
+        "pipeline-v0.1", strategy.version, anchor_date=target + timedelta(days=1)
+    )
+    return {
+        "schema": "live-observation-reconciliation-v1",
+        "window_status": "ready",
+        "trade_date": target.isoformat(),
+        "price_gap_days_after": int(synchronization["price_gap_days_after"]),
+        "status_gap_days_after": int(synchronization["status_gap_days_after"]),
+        "repaired_price_dates": encoded_dates("repaired_price_dates"),
+        "repaired_status_dates": encoded_dates("repaired_status_dates"),
+        "simulation_session_count": int(bootstrap["session_count"]),
+        "historical_simulation_sessions": historical_count,
+        "required_live_observation_sessions": 3 if historical_count >= 20 else 20,
+        "evidence_class": "operator_reconciliation_not_live",
+        "input_hash": canonical_v3_market_input_hash(market),
+        "result_hash": canonical_v3_result_hash(market, strategy, review),
+        "market_regime": str(review.market_regime),
+        "candidate_count": len(review.candidates),
+        "backup_path": str(backup_path),
+        "bootstrap_manifest_hash": str(bootstrap["manifest_hash"]),
     }
 
 
@@ -396,6 +487,7 @@ class ProductionPostMarketTask:
         context_loader: Callable[[date], tuple[tuple[Security, ...], BaoStockTradingCalendar]]
         | None = None,
         provider_loader: Callable[[tuple[Security, ...]], tuple[Any, Any]] | None = None,
+        evidence_synchronizer: Callable[..., dict[str, object]] | None = None,
         minimum_main_board_count: int = _MINIMUM_MAIN_BOARD_COUNT,
         required_prior_sessions: int = 20,
         required_observation_sessions: int = 20,
@@ -411,8 +503,14 @@ class ProductionPostMarketTask:
         self.settings = settings
         self.database = database
         self.clock = clock or (lambda: datetime.now(_SHANGHAI))
+        uses_default_context = context_loader is None
         self.context_loader = context_loader or _load_baostock_context
         self.provider_loader = provider_loader or self._load_providers
+        self.evidence_synchronizer = evidence_synchronizer or (
+            self._synchronize_live_evidence
+            if uses_default_context
+            else lambda **_values: {"status": "injected-context"}
+        )
         self.minimum_main_board_count = minimum_main_board_count
         self.required_prior_sessions = required_prior_sessions
         self.required_observation_sessions = required_observation_sessions
@@ -451,6 +549,24 @@ class ProductionPostMarketTask:
         registry = DatabaseStrategyRegistry(self.database)
         active_version = registry.active_version
         strategy = None if active_version is None else registry.get(active_version)
+        if (
+            context_error is None
+            and strategy is not None
+            and int(strategy.parameters["rule_engine_version"]) == 3
+            and calendar.is_trading_day(now.date())
+        ):
+            try:
+                self.evidence_synchronizer(
+                    target=now.date(),
+                    calendar=calendar,
+                    expected_symbols=frozenset(
+                        security.symbol for security in securities if security.board == "MAIN"
+                    ),
+                    include_target_price=False,
+                    simulation_sessions=1,
+                )
+            except Exception as error:
+                context_error = f"live evidence synchronization failed: {error}"
 
         def run_attempt(target: date) -> PipelineRun:
             if context_error is not None:
@@ -493,7 +609,7 @@ class ProductionPostMarketTask:
                     )
                     prior_dates = calendar.prior_trading_days(target, 60)
                     trading_statuses = self.database.load_daily_security_statuses(
-                        prior_dates[0], prior_dates[-1], source="baostock"
+                        prior_dates[0], target, source="baostock"
                     )
                     return build_live_v3_market_input(
                         snapshot,
@@ -552,6 +668,19 @@ class ProductionPostMarketTask:
             trade_date=trade_date,
             source="tushare",
             recorded_at=recorded_at.astimezone(UTC),
+        )
+
+    def _synchronize_live_evidence(self, **values: object) -> dict[str, object]:
+        return synchronize_production_live_evidence(
+            self.settings,
+            self.database,
+            target=values["target"],  # type: ignore[arg-type]
+            calendar=values["calendar"],  # type: ignore[arg-type]
+            expected_symbols=values["expected_symbols"],  # type: ignore[arg-type]
+            minimum_price_count=self.minimum_main_board_count,
+            minimum_status_count=self.minimum_main_board_count,
+            include_target_price=bool(values["include_target_price"]),
+            simulation_sessions=int(values["simulation_sessions"]),
         )
 
     def _load_providers(self, securities: tuple[Security, ...]) -> tuple[Any, Any]:

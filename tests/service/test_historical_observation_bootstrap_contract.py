@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from stock_mcp import production
 from stock_mcp.cli import main
 from stock_mcp.config import Settings
 from stock_mcp.domain import DailyBar, MarketSnapshot, Security, StrategyVersion
+from stock_mcp.pipeline import PipelineRun
 from stock_mcp.production import ProductionPostMarketTask
 from stock_mcp.providers.runtime import BaoStockTradingCalendar
 from stock_mcp.storage import Database
@@ -31,6 +35,141 @@ class _Provider:
 
 
 class HistoricalObservationBootstrapContractTest(unittest.TestCase):
+    def test_reconciliation_runs_twenty_day_simulation_and_dry_run_without_live_writes(
+        self,
+    ) -> None:
+        runner = getattr(production, "reconcile_live_observation", None)
+        self.assertTrue(callable(runner), "operator reconciliation must be available")
+        if not callable(runner):
+            return
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "current").mkdir()
+            (root / "current" / "a_share_mainboard_code_name.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "standard": "fixture-industry-v1",
+                            "mode": "retrospective_current_mapping",
+                            "as_of": "2026-08-10",
+                        },
+                        "stocks": [{"code": "600001", "exchange": "SSE", "industry": "银行"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            database = Database(root / "data" / "stock-mcp.sqlite3")
+            database.initialize()
+            security = Security(
+                "600001.SH", "完整历史", "SSE", "MAIN", date(2020, 1, 1), "银行", False
+            )
+            timestamp = datetime(2026, 8, 27, 16, 30, tzinfo=SHANGHAI)
+            sessions = tuple(date(2026, 5, 1) + timedelta(days=index) for index in range(80))
+            database.save_expected_trading_days("tushare", sessions)
+            for index, session in enumerate(sessions):
+                close = 100_000 + index
+                database.save_market_snapshot(
+                    MarketSnapshot(
+                        session,
+                        "tushare",
+                        timestamp,
+                        (security,),
+                        (
+                            DailyBar(
+                                security.symbol,
+                                session,
+                                close,
+                                close,
+                                close,
+                                close,
+                                close - 1,
+                                1_000_000,
+                                10_000_000_000,
+                                "tushare",
+                                timestamp,
+                            ),
+                        ),
+                        5_000,
+                        5_000,
+                    )
+                )
+            strategy = StrategyVersion(
+                version="v0.3-policy-1",
+                status="active",
+                parameters=v3_proposal_parameters(1),
+            )
+            old_failure_date = sessions[-3]
+            database.save_pipeline_run(
+                PipelineRun(
+                    old_failure_date,
+                    "pipeline-v0.1",
+                    "failed",
+                    1,
+                    None,
+                    None,
+                    "fixture historical failure",
+                )
+            )
+            database.save_schedule_outcome_record(
+                trade_date=old_failure_date,
+                status="failed",
+                next_at=None,
+                pipeline_version="pipeline-v0.1",
+                error="fixture historical failure",
+            )
+            synchronization_calls: list[date] = []
+
+            report = runner(
+                database=database,
+                root=root,
+                strategy=strategy,
+                through=sessions[-1],
+                recorded_at=timestamp,
+                context_loader=lambda _target: (
+                    (security,),
+                    BaoStockTradingCalendar(sessions),
+                ),
+                evidence_synchronizer=lambda **values: (
+                    synchronization_calls.append(values["target"])
+                    or {
+                        "status": "ready",
+                        "repaired_price_dates": (),
+                        "repaired_status_dates": (),
+                        "price_gap_days_after": 0,
+                        "status_gap_days_after": 0,
+                    }
+                ),
+                backup_path=root / "backups" / "fixture.sqlite3",
+            )
+
+            self.assertEqual("ready", report["window_status"])
+            self.assertEqual(20, report["simulation_session_count"])
+            self.assertEqual(20, report["historical_simulation_sessions"])
+            self.assertEqual(3, report["required_live_observation_sessions"])
+            self.assertEqual("operator_reconciliation_not_live", report["evidence_class"])
+            self.assertEqual(64, len(report["input_hash"]))
+            self.assertEqual(64, len(report["result_hash"]))
+            self.assertEqual([sessions[-1]], synchronization_calls)
+            self.assertEqual(
+                "fixture historical failure",
+                database.load_pipeline_run(old_failure_date, "pipeline-v0.1").error,
+            )
+            self.assertEqual(
+                "fixture historical failure",
+                database.load_schedule_outcome_record(old_failure_date)["error"],
+            )
+            with database.connect() as connection:
+                self.assertEqual(
+                    1, connection.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0]
+                )
+                self.assertEqual(
+                    0, connection.execute("SELECT COUNT(*) FROM daily_reviews").fetchone()[0]
+                )
+                self.assertEqual(
+                    0, connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+                )
+
     def test_verified_recent_history_reduces_live_observation_gate_to_three_sessions(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -261,6 +400,61 @@ class HistoricalObservationBootstrapContractTest(unittest.TestCase):
                         "2026-08-21",
                     )
                 )
+
+    def test_operator_cli_exposes_reconcile_live_observation_command(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "active strategy"):
+                main(
+                    (
+                        "reconcile-live-observation",
+                        "--root",
+                        str(root),
+                        "--through",
+                        "2026-08-27",
+                    )
+                )
+
+    def test_reconciliation_cli_backs_up_before_invoking_the_repair(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = Database(root / "data" / "stock-mcp.sqlite3")
+            database.initialize()
+            strategy = StrategyVersion(
+                version="v0.3-policy-1",
+                status="proposed",
+                parameters=v3_proposal_parameters(1),
+            )
+            database.save_strategy_version(strategy)
+            database.set_active_strategy_version(strategy.version)
+            output = io.StringIO()
+
+            def repaired(**values):
+                self.assertTrue(Path(values["backup_path"]).is_file())
+                return {
+                    "window_status": "ready",
+                    "backup_path": str(values["backup_path"]),
+                }
+
+            with (
+                patch("stock_mcp.production.reconcile_live_observation", side_effect=repaired),
+                redirect_stdout(output),
+            ):
+                exit_code = main(
+                    (
+                        "reconcile-live-observation",
+                        "--root",
+                        str(root),
+                        "--through",
+                        "2026-08-27",
+                    )
+                )
+
+            self.assertEqual(0, exit_code)
+            result = json.loads(output.getvalue())
+            self.assertEqual("ready", result["window_status"])
+            self.assertTrue(Path(result["backup_path"]).is_file())
+            self.assertTrue(Path(result["backup_path"] + ".sha256").is_file())
 
 
 def _bar(symbol: str, trade_date: date, timestamp: datetime) -> DailyBar:

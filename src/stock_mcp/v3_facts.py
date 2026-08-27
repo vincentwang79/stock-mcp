@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections import defaultdict
 from collections.abc import Mapping
 from datetime import date, timedelta
 from pathlib import Path
@@ -17,6 +19,17 @@ from .domain import (
 )
 from .industry import RecordedIndustryReference, load_industry_reference
 from .v3 import adjusted_close_chain, derive_daily_price_limit
+
+
+class LiveV3EvidenceError(ValueError):
+    """A live v3 input has one or more unresolved recorded-evidence gaps."""
+
+    def __init__(self, report: dict[str, object]) -> None:
+        self.report = report
+        super().__init__(
+            "live v3 history is missing without a recorded suspension: "
+            + json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
 
 
 def build_live_v3_market_input(
@@ -54,8 +67,6 @@ def build_live_v3_market_input(
         if len(matches := [bar for bar in bars if bar.trade_date == target]) == 1
         and symbol in security_by_symbol
     }
-    if not target_bars:
-        raise ValueError("live v3 input contains no target-day securities")
 
     security_inputs: list[V3SecurityInput] = []
     features: dict[str, object] = {}
@@ -64,6 +75,26 @@ def build_live_v3_market_input(
     ma20_eligible_count = 0
     above_ma20_count = 0
     industries: dict[str, str] = {}
+    missing_status_gaps: dict[date, list[str]] = defaultdict(list)
+    tradable_price_gaps: dict[date, list[str]] = defaultdict(list)
+    recorded_suspension_count = 0
+    for security in snapshot.securities:
+        otherwise_eligible = (
+            security.board == "MAIN"
+            and not security.is_st
+            and (target - security.list_date).days >= 180
+        )
+        if not otherwise_eligible or security.symbol in target_bars:
+            continue
+        trade_status = trading_statuses.get((security.symbol, target))
+        if trade_status == "0":
+            recorded_suspension_count += 1
+        elif trade_status == "1":
+            tradable_price_gaps[target].append(security.symbol)
+        elif trade_status is None:
+            missing_status_gaps[target].append(security.symbol)
+        else:
+            raise ValueError("live v3 tradeStatus must be 0 or 1")
     for symbol in sorted(target_bars):
         security = security_by_symbol[symbol]
         target_bar = target_bars[symbol]
@@ -94,12 +125,17 @@ def build_live_v3_market_input(
         )
         observed_prior_dates = {bar.trade_date for bar in prior}
         missing_dates = tuple(day for day in prior_dates if day not in observed_prior_dates)
-        if otherwise_eligible and any(
-            trading_statuses.get((symbol, missing_date)) != "0" for missing_date in missing_dates
-        ):
-            raise ValueError(
-                f"live v3 history is missing without a recorded suspension for {symbol}"
-            )
+        if otherwise_eligible:
+            for missing_date in missing_dates:
+                trade_status = trading_statuses.get((symbol, missing_date))
+                if trade_status == "0":
+                    recorded_suspension_count += 1
+                elif trade_status == "1":
+                    tradable_price_gaps[missing_date].append(symbol)
+                elif trade_status is None:
+                    missing_status_gaps[missing_date].append(symbol)
+                else:
+                    raise ValueError("live v3 tradeStatus must be 0 or 1")
         basic_eligible = (
             otherwise_eligible and tuple(bar.trade_date for bar in prior) == prior_dates
         )
@@ -113,6 +149,20 @@ def build_live_v3_market_input(
             ma20_eligible_count += 1
             if adjusted[-1] > sum(adjusted[-20:]) / 20:
                 above_ma20_count += 1
+    if missing_status_gaps or tradable_price_gaps:
+        raise LiveV3EvidenceError(
+            {
+                "schema": "live-v3-evidence-audit-v1",
+                "status": "incomplete",
+                "missing_status_count": sum(map(len, missing_status_gaps.values())),
+                "tradable_price_gap_count": sum(map(len, tradable_price_gaps.values())),
+                "recorded_suspension_count": recorded_suspension_count,
+                "missing_status_dates": _grouped_gap_report(missing_status_gaps),
+                "tradable_price_gap_dates": _grouped_gap_report(tradable_price_gaps),
+            }
+        )
+    if not target_bars:
+        raise ValueError("live v3 input contains no target-day securities")
     if not eligible_count:
         raise ValueError("live v3 market breadth has no eligible main-board securities")
     coverage_bps = ma20_eligible_count * 10_000 // eligible_count
@@ -144,6 +194,17 @@ def build_live_v3_market_input(
         ),
         features,
     )
+
+
+def _grouped_gap_report(gaps: Mapping[date, list[str]]) -> list[dict[str, object]]:
+    return [
+        {
+            "trade_date": trade_date.isoformat(),
+            "count": len(symbols),
+            "sample_symbols": sorted(symbols)[:10],
+        }
+        for trade_date, symbols in sorted(gaps.items())
+    ]
 
 
 def load_v3_market_input(

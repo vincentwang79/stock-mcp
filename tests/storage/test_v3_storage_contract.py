@@ -10,7 +10,7 @@ from hashlib import sha256
 from inspect import signature
 from pathlib import Path
 
-from stock_mcp.domain import StrategyVersion
+from stock_mcp.domain import DailyBar, MarketSnapshot, Security, StrategyVersion
 from stock_mcp.storage import Database
 
 AS_OF = datetime(2026, 8, 7, 8, 30, tzinfo=UTC)
@@ -126,6 +126,158 @@ class V3StorageContractTest(unittest.TestCase):
                 limits={"600001.SH": {"limit_up_1e4": 111_000, "limit_down_1e4": 90_000}},
             )
         self.assertEqual(original, load(TRADE_DATE, source=SOURCE))
+
+    def test_complete_market_snapshot_requires_admitted_main_board_bar_coverage(self) -> None:
+        securities = tuple(
+            Security(
+                f"60000{index}.SH",
+                f"样本{index}",
+                "SSE",
+                "MAIN",
+                date(2020, 1, 1),
+                "银行",
+                False,
+            )
+            for index in range(1, 3)
+        )
+        bars = tuple(
+            DailyBar(
+                security.symbol,
+                TRADE_DATE,
+                100_000,
+                101_000,
+                99_000,
+                100_000,
+                100_000,
+                1_000_000,
+                10_000_000_000,
+                "tushare",
+                AS_OF,
+            )
+            for security in securities
+        )
+        self.database.save_market_snapshot(
+            MarketSnapshot(
+                TRADE_DATE,
+                "tushare",
+                AS_OF,
+                securities,
+                bars[:1],
+                5_000,
+                5_000,
+            )
+        )
+
+        self.assertFalse(
+            self.database.has_complete_market_snapshot(
+                TRADE_DATE,
+                source="tushare",
+                minimum_main_board_count=2,
+            )
+        )
+
+        complete_day = TRADE_DATE + timedelta(days=1)
+        complete_bars = tuple(
+            DailyBar(
+                bar.symbol,
+                complete_day,
+                bar.open_1e4,
+                bar.high_1e4,
+                bar.low_1e4,
+                bar.close_1e4,
+                bar.pre_close_1e4,
+                bar.volume_shares,
+                bar.amount_fen,
+                bar.source,
+                bar.source_timestamp,
+            )
+            for bar in bars
+        )
+        self.database.save_market_snapshot(
+            MarketSnapshot(
+                complete_day,
+                "tushare",
+                AS_OF,
+                securities,
+                complete_bars,
+                5_000,
+                5_000,
+            )
+        )
+        self.assertTrue(
+            self.database.has_complete_market_snapshot(
+                complete_day,
+                source="tushare",
+                minimum_main_board_count=2,
+            )
+        )
+
+    def test_daily_status_batch_is_complete_only_when_expected_universe_is_covered(self) -> None:
+        complete = self._require("has_complete_daily_security_status")
+        statuses = tuple(
+            {
+                "symbol": symbol,
+                "trade_date": TRADE_DATE,
+                "source": "baostock",
+                "tradestatus": "1",
+                "is_st": False,
+                "source_timestamp": AS_OF,
+                "batch_sha256": sha256(symbol.encode()).hexdigest(),
+            }
+            for symbol in ("600001.SH", "600002.SH")
+        )
+        self.database.save_baostock_status_batch(
+            run_id="fixture-status-run",
+            trade_date=TRADE_DATE,
+            statuses=statuses,
+            checkpoint={
+                "schema": "baostock-daily-status-v1",
+                "status": "complete",
+                "trade_date": TRADE_DATE.isoformat(),
+                "row_count": 2,
+            },
+        )
+
+        self.assertTrue(
+            complete(
+                TRADE_DATE,
+                source="baostock",
+                expected_symbols=frozenset({"600001.SH", "600002.SH"}),
+                minimum_count=2,
+            )
+        )
+        self.assertFalse(
+            complete(
+                TRADE_DATE,
+                source="baostock",
+                expected_symbols=frozenset({"600001.SH", "600003.SH"}),
+                minimum_count=2,
+            )
+        )
+
+    def test_daily_status_rows_without_atomic_checkpoint_are_not_complete(self) -> None:
+        self.database.save_daily_security_statuses(
+            (
+                {
+                    "symbol": "600001.SH",
+                    "trade_date": TRADE_DATE,
+                    "source": "baostock",
+                    "tradestatus": "1",
+                    "is_st": False,
+                    "source_timestamp": AS_OF,
+                    "batch_sha256": "a" * 64,
+                },
+            )
+        )
+
+        self.assertFalse(
+            self.database.has_complete_daily_security_status(
+                TRADE_DATE,
+                source="baostock",
+                expected_symbols=frozenset({"600001.SH"}),
+                minimum_count=1,
+            )
+        )
 
     def test_v3_snapshot_features_are_batch_atomic_and_immutable(self) -> None:
         save = self._require("save_v3_snapshot_features")

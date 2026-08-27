@@ -33,6 +33,73 @@ class _Provider:
 
 
 class ProductionCompositionContractTest(unittest.TestCase):
+    def test_v3_task_synchronizes_live_evidence_before_fetching_the_snapshot(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "current").mkdir()
+            (root / "current" / "a_share_mainboard_code_name.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "standard": "fixture",
+                            "mode": "retrospective_current_mapping",
+                            "as_of": "2026-08-10",
+                        },
+                        "stocks": [{"code": "600001", "exchange": "SSE", "industry": "银行"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            database = Database(root / "data" / "stock-mcp.sqlite3")
+            database.initialize()
+            strategy = StrategyVersion(
+                version="v0.3-policy-1",
+                status="proposed",
+                parameters=v3_proposal_parameters(1),
+            )
+            database.save_strategy_version(strategy)
+            database.set_active_strategy_version(strategy.version)
+            security = Security("600001.SH", "样本", "SSE", "MAIN", date(2020, 1, 1), "银行", False)
+            sessions = tuple(DAY - timedelta(days=60 - index) for index in range(61))
+            timestamp = datetime(2026, 8, 7, 16, 30, tzinfo=SHANGHAI)
+            snapshot = MarketSnapshot(
+                DAY,
+                "tushare",
+                timestamp,
+                (security,),
+                tuple(_stable_bar(security.symbol, session, timestamp) for session in sessions),
+                5_000,
+                5_000,
+            )
+            events: list[str] = []
+
+            def synchronize(*_args, **_kwargs):
+                events.append("sync")
+                return {"status": "ready"}
+
+            class OrderedProvider(_Provider):
+                def fetch_snapshot(self, trade_date: date) -> MarketSnapshot:
+                    events.append("fetch")
+                    return super().fetch_snapshot(trade_date)
+
+            outcome = ProductionPostMarketTask(
+                Settings(root=root, tushare_token="fixture"),
+                database,
+                clock=lambda: timestamp,
+                context_loader=lambda _day: ((security,), BaoStockTradingCalendar(sessions)),
+                provider_loader=lambda _securities: (
+                    OrderedProvider(snapshot),
+                    OrderedProvider(snapshot),
+                ),
+                evidence_synchronizer=synchronize,
+                minimum_main_board_count=1,
+                required_prior_sessions=60,
+            )()
+
+            self.assertEqual(["sync", "fetch"], events[:2])
+            self.assertIn(outcome.status, {"degraded_observation", "ready"})
+
     def test_v3_live_observation_excludes_one_suspended_history_without_blocking_market(
         self,
     ) -> None:

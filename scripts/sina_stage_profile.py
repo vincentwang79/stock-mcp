@@ -105,9 +105,7 @@ def _offline_result(payload: bytes, *, endpoint_kind: str, request_key: str) -> 
 def _sqlite_counts(database: Any) -> tuple[int, int]:
     connection = database.connect()
     try:
-        daily_bar_rows = int(
-            connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()[0]
-        )
+        daily_bar_rows = int(connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()[0])
         share_capital_rows = int(
             connection.execute("SELECT COUNT(*) FROM share_capital_facts").fetchone()[0]
         )
@@ -211,9 +209,7 @@ def main() -> int:
     capital_wait_cpu = 0.0 if limiter is None else limiter.cpu_seconds - prior_wait_cpu
     timings.wall["capital_http"] -= capital_wait_wall
     timings.cpu["capital_http"] -= capital_wait_cpu
-    timings.set(
-        "capital_rate_limit_wait", wall=capital_wait_wall, cpu=capital_wait_cpu
-    )
+    timings.set("capital_rate_limit_wait", wall=capital_wait_wall, cpu=capital_wait_cpu)
     capital_rows = timings.measure(
         "capital_decode",
         lambda: parse_jsonp_assignment(

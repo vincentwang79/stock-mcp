@@ -62,6 +62,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "backfill",
             "build-v3-facts",
             "bootstrap-live-observation",
+            "reconcile-live-observation",
             "build-v4-status-facts",
             "backfill-baostock-statuses",
             "prepare-sina-backfill-manifest",
@@ -432,6 +433,57 @@ def main(argv: Sequence[str] | None = None) -> int:
             start=args.start,
             end=args.end,
             recorded_at=datetime.now(UTC),
+        )
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if args.command == "reconcile-live-observation":
+        from .backfill import MINIMUM_MAIN_BOARD_COUNT
+        from .backup import BackupManager
+        from .live_evidence import synchronize_production_live_evidence
+        from .production import reconcile_live_observation
+        from .storage import Database
+        from .strategy import DatabaseStrategyRegistry
+
+        if args.through is None:
+            parser.error("reconcile-live-observation requires --through")
+        database = Database(settings.database_path)
+        database.initialize()
+        strategies = DatabaseStrategyRegistry(database)
+        active_version = strategies.active_version
+        if active_version is None:
+            raise ValueError("live observation reconciliation requires an active strategy")
+        recorded_at = datetime.now(UTC)
+        backup = BackupManager(settings.root / "backups", retention=14).create(
+            database,
+            label=(
+                f"live-reconcile-{args.through.isoformat()}-"
+                f"{recorded_at.strftime('%Y%m%dT%H%M%SZ')}"
+            ),
+        )
+
+        def synchronize(**values: object) -> dict[str, object]:
+            return synchronize_production_live_evidence(
+                settings,
+                database,
+                target=values["target"],  # type: ignore[arg-type]
+                calendar=values["calendar"],  # type: ignore[arg-type]
+                expected_symbols=values["expected_symbols"],  # type: ignore[arg-type]
+                minimum_price_count=MINIMUM_MAIN_BOARD_COUNT,
+                minimum_status_count=MINIMUM_MAIN_BOARD_COUNT,
+                include_target_price=bool(values["include_target_price"]),
+                simulation_sessions=int(values["simulation_sessions"]),
+            )
+
+        report = reconcile_live_observation(
+            database=database,
+            root=settings.root,
+            strategy=strategies.get(active_version),
+            through=args.through,
+            recorded_at=recorded_at,
+            context_loader=None,
+            evidence_synchronizer=synchronize,
+            backup_path=backup.database_path,
         )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0

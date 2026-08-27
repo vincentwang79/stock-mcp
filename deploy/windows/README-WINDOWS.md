@@ -415,6 +415,51 @@ Invoke-RestMethod http://127.0.0.1:8766/readyz -TimeoutSec 10
 
 ### v3 历史生产仿真与真实观察门禁
 
+若盘后流水线曾因 Tushare 历史缺日或 BaoStock 状态缺失失败，先在停服维护窗口使用共享的
+生产证据同步器一次性修复完整滚动窗口。该命令只补生产评审和最近 20 日仿真所需的有界
+窗口，先自动备份数据库，再使用与真实盘后任务相同的 Tushare/BaoStock、v3 输入构建和
+规则引擎完成补数、20 日仿真及目标日 dry-run：
+
+```powershell
+$py = 'E:\StockMcp\current\.venv\Scripts\python.exe'
+
+Stop-Service StockMcpTunnel -Force -ErrorAction SilentlyContinue
+Stop-Service StockMcpService -Force -ErrorAction SilentlyContinue
+
+& $py -m stock_mcp.cli reconcile-live-observation `
+  --root E:\StockMcp `
+  --through 2026-08-27
+
+if ($LASTEXITCODE -ne 0) {
+    throw 'Live observation reconciliation failed.'
+}
+```
+
+成功 JSON 必须同时包含 `window_status="ready"`、`price_gap_days_after=0`、
+`status_gap_days_after=0`、`simulation_session_count=20`、
+`historical_simulation_sessions=20`、`required_live_observation_sessions=3`、
+`evidence_class="operator_reconciliation_not_live"`、64 字符的 `input_hash/result_hash`，
+以及实际存在的 `backup_path`。它不会改写旧 `schedule_outcomes`、旧 `pipeline_runs`、日报、
+候选或真实观察计数；2026-08-25/26 等既有失败记录必须继续保留。失败时异常中的
+`remaining_price_dates`、`remaining_status_dates` 或 `live-v3-evidence-audit-v1` 报告是完整
+剩余缺口，不得用 Sina、AKShare、较早收盘价或手工改库绕过。
+
+命令成功后按顺序启动服务并检查就绪：
+
+```powershell
+Start-Service StockMcpService
+Start-Sleep -Seconds 30
+$mcp = Invoke-RestMethod 'http://127.0.0.1:8765/readyz' -TimeoutSec 5
+if ($mcp.status -ne 'ready') { throw 'MCP is not ready.' }
+
+Start-Service StockMcpTunnel
+Start-Sleep -Seconds 5
+$tunnel = Invoke-RestMethod 'http://127.0.0.1:8766/readyz' -TimeoutSec 5
+if ($tunnel -ne 'ready' -and $tunnel.status -ne 'ready') {
+    throw 'Tunnel is not ready.'
+}
+```
+
 如果最近 20 个**已记录、连续且完整**的 Tushare 交易日及其 BaoStock 状态事实已经可用，
 管理员可在停服维护窗口执行一次只读历史生产仿真。它逐日复用生产 v3 输入构建、停牌处理、
 行业参考和规则引擎，保存不可变输入/结果哈希；不访问实时行情，不写入历史日报、候选、

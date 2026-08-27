@@ -113,6 +113,13 @@ class DailyReviewPipeline:
             return existing
 
         failures: list[str] = []
+        if existing is not None and existing.snapshot is not None:
+            try:
+                self._validate_snapshot(existing.snapshot, trade_date)
+            except Exception as error:
+                failures.append(f"retained snapshot: {error}")
+            else:
+                return self._publish_ready(existing.snapshot, existing.attempts + 1)
         for attempt in range(1, self._max_attempts + 1):
             primary_snapshot = self._fetch_complete(self._primary, trade_date, "primary", failures)
             if primary_snapshot is not None:
@@ -204,7 +211,7 @@ class DailyReviewPipeline:
                 pipeline_version=self._pipeline_version,
                 status="failed",
                 attempts=attempts,
-                snapshot=None,
+                snapshot=snapshot,
                 review=None,
                 error=f"review: {error}",
             )

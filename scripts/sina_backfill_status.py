@@ -29,8 +29,7 @@ def main() -> int:
 
     with sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True) as connection:
         rows = connection.execute(
-            "SELECT symbol, status FROM sina_backfill_checkpoints "
-            "WHERE run_id = ? ORDER BY symbol",
+            "SELECT symbol, status FROM sina_backfill_checkpoints WHERE run_id = ? ORDER BY symbol",
             (run_id,),
         ).fetchall()
         evidence_filter = "source = 'sina'"
@@ -87,9 +86,7 @@ def main() -> int:
                 "count": int(row[3]),
                 "sample_request_keys": list(
                     dict.fromkeys(
-                        str(sample[3])
-                        for sample in failure_sample_rows
-                        if sample[:3] == row[:3]
+                        str(sample[3]) for sample in failure_sample_rows if sample[:3] == row[:3]
                     )
                 )[:5],
             }

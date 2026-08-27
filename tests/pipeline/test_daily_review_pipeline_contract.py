@@ -3,9 +3,13 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from stock_mcp.domain import DailyBar, MarketSnapshot, Security, StrategyVersion
 from stock_mcp.pipeline import DailyReviewPipeline
+from stock_mcp.production import SQLitePipelineRepository
+from stock_mcp.storage import Database
 
 TRADE_DATE = date(2026, 8, 7)
 PIPELINE_VERSION = "pipeline-v0.1"
@@ -129,6 +133,7 @@ def _pipeline(
     backup: FakeProvider,
     repository: FakeRepository,
     max_attempts: int = 3,
+    review_input_builder=None,
 ) -> DailyReviewPipeline:
     return DailyReviewPipeline(
         calendar=calendar,
@@ -140,10 +145,70 @@ def _pipeline(
         expected_main_board_count=2,
         required_prior_sessions=0,
         max_attempts=max_attempts,
+        review_input_builder=review_input_builder,
     )
 
 
+def _raise_review_gap():
+    raise ValueError("fixture v3 evidence gap")
+
+
 class DailyReviewPipelineContractTest(unittest.TestCase):
+    def test_failed_review_persists_valid_snapshot_for_the_following_day(self) -> None:
+        first_day = TRADE_DATE - date.resolution
+        first_snapshot = _snapshot(source="tushare", trade_date=first_day)
+        with TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "stock.sqlite3")
+            database.initialize()
+            database.save_strategy_version(_strategy())
+            pipeline = DailyReviewPipeline(
+                calendar=FakeCalendar({first_day}),
+                primary_provider=FakeProvider(source="tushare", outcomes=[first_snapshot]),
+                backup_provider=FakeProvider(source="backup", outcomes=[]),
+                repository=SQLitePipelineRepository(database),
+                strategy=_strategy(),
+                pipeline_version=PIPELINE_VERSION,
+                expected_main_board_count=2,
+                required_prior_sessions=0,
+                review_input_builder=lambda _snapshot: (_raise_review_gap(), {}),
+            )
+
+            failed = pipeline.run(first_day)
+
+            self.assertEqual("failed", failed.status)
+            self.assertTrue(database.has_market_snapshot(first_day, source="tushare"))
+            self.assertEqual(
+                (first_day,),
+                tuple(
+                    bar.trade_date
+                    for bar in database.load_symbol_history(
+                        first_snapshot.bars[0].symbol,
+                        end_date=first_day,
+                        source="tushare",
+                        limit=1,
+                    )
+                ),
+            )
+            retry_primary = FakeProvider(
+                source="tushare",
+                outcomes=[RuntimeError("the retained snapshot must avoid a refetch")],
+            )
+            retried = DailyReviewPipeline(
+                calendar=FakeCalendar({first_day}),
+                primary_provider=retry_primary,
+                backup_provider=FakeProvider(source="backup", outcomes=[]),
+                repository=SQLitePipelineRepository(database),
+                strategy=_strategy(),
+                pipeline_version=PIPELINE_VERSION,
+                expected_main_board_count=2,
+                required_prior_sessions=0,
+                review_input_builder=lambda snapshot: (snapshot, {}),
+            ).run(first_day)
+
+            self.assertEqual("ready", retried.status)
+            self.assertEqual(0, retry_primary.fetch_calls)
+            self.assertEqual(first_snapshot.source_timestamp, retried.snapshot.source_timestamp)
+
     def test_non_trading_day_is_skipped_without_fetching_or_persisting(self) -> None:
         primary = FakeProvider(source="primary", outcomes=[_snapshot(source="primary")])
         backup = FakeProvider(source="backup", outcomes=[_snapshot(source="backup")])
@@ -346,6 +411,26 @@ class DailyReviewPipelineContractTest(unittest.TestCase):
         self.assertEqual("ready", second.status)
         self.assertEqual(second, third)
         self.assertEqual(2, primary.fetch_calls)
+
+    def test_validated_snapshot_is_retained_when_review_input_building_fails(self) -> None:
+        snapshot = _snapshot(source="primary")
+        primary = FakeProvider(source="primary", outcomes=[snapshot])
+        repository = FakeRepository()
+
+        result = _pipeline(
+            calendar=FakeCalendar({TRADE_DATE}),
+            primary=primary,
+            backup=FakeProvider(source="backup", outcomes=[]),
+            repository=repository,
+            review_input_builder=lambda _snapshot: (_ for _ in ()).throw(
+                ValueError("fixture evidence gap")
+            ),
+        ).run(TRADE_DATE)
+
+        self.assertEqual("failed", result.status)
+        self.assertEqual(snapshot, result.snapshot)
+        self.assertIsNone(result.review)
+        self.assertIn("fixture evidence gap", result.error or "")
 
     def test_same_source_history_is_allowed_but_future_bars_are_rejected(self) -> None:
         snapshot = _snapshot(source="primary")
