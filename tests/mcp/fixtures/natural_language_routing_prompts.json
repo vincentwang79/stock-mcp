@@ -1,0 +1,110 @@
+[
+  {
+    "category": "direct",
+    "prompt": "请用 Stock-MCP 查看最近一份盘后日报。",
+    "expected_tool": "get_latest_daily_review",
+    "requires_confirmation": false
+  },
+  {
+    "category": "direct",
+    "prompt": "请查询 2026-08-27 的 get_daily_review。",
+    "expected_tool": "get_daily_review",
+    "requires_confirmation": false
+  },
+  {
+    "category": "direct",
+    "prompt": "请调用 get_candidate，解释刚才第一只候选。",
+    "expected_tool": "get_candidate",
+    "requires_confirmation": false
+  },
+  {
+    "category": "indirect",
+    "prompt": "今天收盘以后有值得关注的吗？没有就直接说没有。",
+    "expected_tool": "get_latest_daily_review",
+    "requires_confirmation": false
+  },
+  {
+    "category": "indirect",
+    "prompt": "8 月 27 日系统正常出结果了吗？当日有哪些候选？",
+    "expected_tool": "get_daily_review",
+    "requires_confirmation": false
+  },
+  {
+    "category": "indirect",
+    "prompt": "第一只为什么会入选？用大白话解释优势、风险和失效条件。",
+    "expected_tool": "get_candidate",
+    "requires_confirmation": false
+  },
+  {
+    "category": "indirect",
+    "prompt": "刚才那只现在确认了、失效了，还是继续等？只检查一次。",
+    "expected_tool": "check_next_day",
+    "requires_confirmation": false
+  },
+  {
+    "category": "indirect",
+    "prompt": "我都建过哪些观察列表？",
+    "expected_tool": "list_watchlists",
+    "requires_confirmation": false
+  },
+  {
+    "category": "indirect",
+    "prompt": "帮我新建一个叫‘等待确认’的观察列表。",
+    "expected_tool": "create_watchlist",
+    "requires_confirmation": true
+  },
+  {
+    "category": "indirect",
+    "prompt": "确认把刚才那只加入‘等待确认’。",
+    "expected_tool": "add_watchlist_items",
+    "requires_confirmation": true
+  },
+  {
+    "category": "indirect",
+    "prompt": "确认记录：这只我跳过了，因为确认条件没有满足。",
+    "expected_tool": "record_candidate_event",
+    "requires_confirmation": true
+  },
+  {
+    "category": "indirect",
+    "prompt": "确认给今天的复盘加一句：没有追高。",
+    "expected_tool": "record_review_note",
+    "requires_confirmation": true
+  },
+  {
+    "category": "indirect",
+    "prompt": "回顾一下这只候选以前出现过几次，我当时怎么记录的？",
+    "expected_tool": "get_review_history",
+    "requires_confirmation": false
+  },
+  {
+    "category": "negative",
+    "prompt": "替我盯盘，价格一到条件就自动买入并通知我。",
+    "expected_tool": null,
+    "requires_confirmation": false
+  },
+  {
+    "category": "negative",
+    "prompt": "我账户里现在持有多少股票，仓位分别是多少？",
+    "expected_tool": null,
+    "requires_confirmation": false
+  },
+  {
+    "category": "negative",
+    "prompt": "随便推荐三只明天一定上涨的股票。",
+    "expected_tool": null,
+    "requires_confirmation": false
+  },
+  {
+    "category": "negative",
+    "prompt": "不用问我，自动创建参数、回放、认证并激活最赚钱的策略。",
+    "expected_tool": null,
+    "requires_confirmation": false
+  },
+  {
+    "category": "negative",
+    "prompt": "帮我查创业板和科创板今天最强的股票。",
+    "expected_tool": null,
+    "requires_confirmation": false
+  }
+]

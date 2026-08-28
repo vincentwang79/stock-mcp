@@ -371,6 +371,24 @@ class StockMcpApplication:
         notes = self._repository.list_review_notes(trade_date)
         return _ok(self._review_with_context(review, notes=notes))
 
+    def get_latest_daily_review(self) -> Result:
+        """Return the newest persisted public review without caller date inference."""
+
+        get_latest_status = getattr(self._repository, "get_latest_publication_status", None)
+        if callable(get_latest_status):
+            publication = get_latest_status()
+            if isinstance(publication, Mapping):
+                recorded_date = publication.get("trade_date")
+                if isinstance(recorded_date, str):
+                    recorded_date = date.fromisoformat(recorded_date)
+                if isinstance(recorded_date, date):
+                    return self.get_daily_review(trade_date=recorded_date)
+        reviews = self._repository.list_review_history()
+        if not reviews:
+            return _error("daily_review_not_found", "no published review")
+        latest = max(reviews, key=lambda review: review.trade_date)
+        return self.get_daily_review(trade_date=latest.trade_date)
+
     def get_candidate(self, *, candidate_id: str) -> Result:
         candidate = self._repository.get_candidate(candidate_id)
         if candidate is None:

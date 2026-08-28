@@ -291,6 +291,14 @@ class StockMcpApplicationContractTests(unittest.TestCase):
         self.assertEqual(1, candidate["data"]["rank"])
         self.assertEqual("v0.1-proposed", candidate["data"]["strategy_version"])
 
+    def test_latest_daily_review_selects_the_most_recent_recorded_trading_day(self) -> None:
+        result = self.application.get_latest_daily_review()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(TRADE_DATE.isoformat(), result["data"]["trade_date"])
+        self.assertEqual("published", result["data"]["status"])
+        self.assertEqual("600000.SH", result["data"]["candidates"][0]["symbol"])
+
     def test_missing_published_records_are_business_errors(self) -> None:
         missing_review = self.application.get_daily_review(trade_date=date(2099, 1, 1))
         self.assertEqual(

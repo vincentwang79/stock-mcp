@@ -33,6 +33,12 @@ class McpApplicationDispatchIntegrationTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(TRADE_DATE.isoformat(), result["data"]["trade_date"])
 
+    def test_latest_review_requires_no_date_or_internal_identifier(self) -> None:
+        result = self.tools["get_latest_daily_review"].handler()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(TRADE_DATE.isoformat(), result["data"]["trade_date"])
+
     def test_watchlist_and_event_field_names_dispatch_without_adapter_drift(self) -> None:
         self.tools["create_watchlist"].handler(name="focus", idempotency_key="create-1")
         added = self.tools["add_watchlist_items"].handler(

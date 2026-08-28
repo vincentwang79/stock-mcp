@@ -8,6 +8,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 EXPECTED_TOOL_NAMES = frozenset(
     {
+        "get_latest_daily_review",
         "get_daily_review",
         "get_candidate",
         "check_next_day",
@@ -44,6 +45,7 @@ EXPECTED_TOOL_NAMES = frozenset(
 
 READ_TOOL_NAMES = frozenset(
     {
+        "get_latest_daily_review",
         "get_daily_review",
         "get_candidate",
         "check_next_day",
@@ -119,6 +121,15 @@ class FakeApplicationService:
                 return self._idempotent_results[key]
             if tool_name == "get_daily_review":
                 return {"ok": True, "data": {"candidates": []}}
+            if tool_name == "get_latest_daily_review":
+                return {
+                    "ok": True,
+                    "data": {
+                        "status": "published",
+                        "trade_date": "2026-08-27",
+                        "candidates": [],
+                    },
+                }
             if tool_name == "check_next_day":
                 return {
                     "ok": True,
@@ -241,6 +252,20 @@ class ToolCatalogContractTests(unittest.TestCase):
 
         server = create_server(self.service)
         self.assertIsNotNone(server)
+
+    def test_real_server_advertises_plain_language_scope_and_safety_boundary(self) -> None:
+        from stock_mcp.mcp_server import create_server
+
+        server = create_server(self.service)
+        low_level = getattr(server, "_lowlevel_server", None)
+        if low_level is None:
+            self.skipTest("MCP SDK runtime is not installed")
+
+        self.assertEqual("家庭 A 股盘后助手", low_level.title)
+        self.assertIn("沪深主板", low_level.description)
+        self.assertIn("自然语言", low_level.instructions)
+        self.assertIn("不得执行交易", low_level.instructions)
+        self.assertIn("不得自行增加候选", low_level.instructions)
 
     def test_idempotency_key_conflicts_are_structured_business_errors(self) -> None:
         from stock_mcp.mcp_tools import build_tool_catalog

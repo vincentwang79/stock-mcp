@@ -27,6 +27,9 @@ class _PublicationRepository:
             "error": "fixture provider unavailable",
         }
 
+    def get_latest_publication_status(self) -> dict[str, object]:
+        return self.get_publication_status(TRADE_DATE)
+
 
 class _CandidateRepository:
     def __init__(self) -> None:
@@ -116,6 +119,16 @@ class ApplicationPublicationStatusContractTest(unittest.TestCase):
             object(),
         ).get_daily_review(trade_date=TRADE_DATE)
         self.assertEqual("degraded_observation", observation_with_review["data"]["status"])
+
+    def test_latest_daily_review_prefers_the_newest_non_ready_publication_status(self) -> None:
+        result = StockMcpApplication(
+            _PublicationRepository("failed"), object(), object()
+        ).get_latest_daily_review()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("failed", result["data"]["status"])
+        self.assertEqual(TRADE_DATE.isoformat(), result["data"]["trade_date"])
+        self.assertEqual("fixture provider unavailable", result["data"]["error"])
 
     def test_candidate_includes_its_review_provenance_and_industry_context(self) -> None:
         result = StockMcpApplication(_CandidateRepository(), object(), object()).get_candidate(

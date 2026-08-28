@@ -3939,6 +3939,35 @@ class Database:
             }
         return {"trade_date": trade_date, **record}
 
+    def get_latest_publication_status(self) -> dict[str, object] | None:
+        """Return the newest persisted public pipeline/review date and its status."""
+
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(trade_date) FROM (
+                    SELECT trade_date FROM schedule_outcomes
+                    UNION ALL
+                    SELECT trade_date FROM pipeline_runs
+                    UNION ALL
+                    SELECT trade_date FROM daily_reviews
+                )
+                """
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        trade_date = date.fromisoformat(str(row[0]))
+        publication = self.get_publication_status(trade_date)
+        if publication is not None:
+            return publication
+        return {
+            "trade_date": trade_date,
+            "status": "ready",
+            "next_at": None,
+            "pipeline_version": None,
+            "error": None,
+        }
+
     def count_live_observation_sessions(
         self, pipeline_version: str, *, strategy_version: str | None = None
     ) -> int:

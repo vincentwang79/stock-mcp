@@ -128,6 +128,34 @@ class ApplicationRepositoryContractTest(unittest.TestCase):
 
         self.assertEqual(published_review, self.database.get_daily_review(TRADE_DATE))
 
+    def test_latest_publication_status_uses_the_newest_recorded_pipeline_date(self) -> None:
+        older = TRADE_DATE.replace(day=6)
+        self.database.save_schedule_outcome_record(
+            trade_date=older,
+            status="ready",
+            next_at=None,
+            pipeline_version="pipeline-v0.1",
+            error=None,
+        )
+        self.database.save_schedule_outcome_record(
+            trade_date=TRADE_DATE,
+            status="failed",
+            next_at=None,
+            pipeline_version="pipeline-v0.1",
+            error="fixture evidence gap",
+        )
+
+        self.assertEqual(
+            {
+                "trade_date": TRADE_DATE,
+                "status": "failed",
+                "next_at": None,
+                "pipeline_version": "pipeline-v0.1",
+                "error": "fixture evidence gap",
+            },
+            self.database.get_latest_publication_status(),
+        )
+
     def test_concurrent_identical_idempotent_writes_share_one_result(self) -> None:
         self.database.create_watchlist(name="focus", idempotency_key="create-focus")
         workers = 12

@@ -14,6 +14,17 @@ from typing import Any
 
 from .mcp_tools import ToolDefinition, ToolResult, build_tool_catalog
 
+_SERVER_TITLE = "家庭 A 股盘后助手"
+_SERVER_DESCRIPTION = "面向非技术用户的沪深主板 A 股盘后研究、候选解释、观察列表和复盘记录服务。"
+_SERVER_INSTRUCTIONS = """\
+用户可以只用自然语言交流；不要要求用户记忆或提供工具名、API 名、候选 ID、幂等键、哈希或数据库字段。
+没有指定日期而询问今天、最近或最新盘后结果时，使用最新盘后结果工具，不得猜测交易日期。
+只能解释服务端返回的证据，不得自行增加候选、改变分数或排序，也不得把分数解释为上涨概率。
+写入观察列表、决策记录、笔记或治理状态前，必须先复述内容并取得用户明确确认。
+不得执行交易、连接券商账户、决定仓位、承诺收益、持续盘中监控或主动提醒。
+数据不完整、尚在观察、降级或失败时必须如实说明，不得拼接其他来源或展示较早成功结果冒充最新结果。
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class CatalogBackedServer:
@@ -41,7 +52,12 @@ def create_server(
     except ImportError:
         return CatalogBackedServer(catalog)
 
-    server = MCPServer("stock-mcp")
+    server = MCPServer(
+        "stock-mcp",
+        title=_SERVER_TITLE,
+        description=_SERVER_DESCRIPTION,
+        instructions=_SERVER_INSTRUCTIONS,
+    )
     for definition in catalog:
         _register_tool(server, definition, ToolAnnotations)
     _register_health_routes(server, health_provider)
@@ -91,9 +107,10 @@ def _register_tool(server: Any, definition: ToolDefinition, annotations_type: An
 
     invoke.__name__ = definition.name
     invoke.__qualname__ = definition.name
-    invoke.__doc__ = f"Stock MCP tool: {definition.name}."
+    invoke.__doc__ = definition.description
     invoke.__signature__ = _signature_for(definition)
     annotations = annotations_type(
+        title=definition.title,
         read_only_hint=definition.annotations["readOnlyHint"],
         destructive_hint=definition.annotations["destructiveHint"],
         idempotent_hint=definition.annotations["idempotentHint"],
