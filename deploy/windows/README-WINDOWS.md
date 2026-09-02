@@ -129,7 +129,7 @@ Test-NetConnection api.openai.com -Port 443
 
 如果网络要求代理或 TLS 解密，应由服务器网络管理员配置受信任的系统代理和根证书；不要关闭 TLS 校验，也不要修改工具清单中的固定 SHA-256。对于本服务器，在 `configure.ps1` 的 `Optional HTTPS proxy` 提示中输入 `http://127.0.0.1:7897`；该值会写入受 ACL 保护的应用配置，并且只用于 Tunnel 访问 OpenAI control plane，不会代理 Tunnel 到 `127.0.0.1:8765/mcp` 的本机连接。当前会话的环境变量不会自动传给 Windows 服务。
 
-`StockMcpService` 会对按需的东财确认行情主机 `82.push2.eastmoney.com` 设置仅该主机的直连例外；Tunnel 仍使用其独立配置的代理。若服务器不能直连该主机，候选的“次日确认”会明确返回“暂无法核验”，不会影响盘后日报或把网络异常伪装成确认结果。
+`StockMcpService` 会对按需的东财确认行情主机 `82.push2.eastmoney.com` 设置仅该主机的直连例外；确认工具只请求对应证券的一条东财报价，不通过 AKShare 拉取全市场分页数据。Tunnel 仍使用其独立配置的代理。若服务器不能直连该主机，候选的“次日确认”会明确返回“暂无法核验”，不会影响盘后日报或把网络异常伪装成确认结果。
 
 配置脚本通过安全交互提示采集生产密钥，并只将其保存到 ACL 保护的主机配置文件。它完成数据权限检查、三年历史回填、Tunnel 自检、MCP 本地就绪检查和 Tunnel 服务身份就绪检查后，才启动 `StockMcpService` 与 `StockMcpTunnel`。
 

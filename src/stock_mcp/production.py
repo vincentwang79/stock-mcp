@@ -14,6 +14,7 @@ import math
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -24,9 +25,9 @@ from .domain import DailyBar, MarketSnapshot, Security
 from .industry import load_industry_reference
 from .live_evidence import LiveEvidenceSyncError, synchronize_production_live_evidence
 from .pipeline import DailyReviewPipeline, PipelineRun
+from .providers.eastmoney import EastmoneyQuoteProvider
 from .providers.metadata import normalize_baostock_securities
 from .providers.runtime import (
-    AKShareQuoteProvider,
     AKShareSnapshotProvider,
     BaoStockTradingCalendar,
     TushareDailyProvider,
@@ -262,15 +263,63 @@ def _can_use_previous_complete_session(
     return remaining == {target.isoformat()}
 
 
-class LazyAKShareQuoteProvider:
-    """Import AKShare only for the explicit ``check_next_day`` tool call."""
+class DirectEastmoneyQuoteProvider:
+    """Fetch one confirmation quote without inheriting host proxy settings."""
+
+    _endpoint = "https://82.push2.eastmoney.com/api/qt/stock/get"
+
+    def __init__(
+        self,
+        *,
+        session_factory: Callable[[], Any] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._session_factory = (
+            _new_direct_eastmoney_session if session_factory is None else session_factory
+        )
+        self._clock = (lambda: datetime.now(_SHANGHAI)) if clock is None else clock
 
     def fetch_quote(self, symbol: str) -> dict[str, object]:
-        import akshare  # type: ignore[import-not-found]
+        return EastmoneyQuoteProvider(client=self, clock=self._clock).fetch_quote(symbol)
 
-        return AKShareQuoteProvider(
-            client=akshare, clock=lambda: datetime.now(_SHANGHAI)
-        ).fetch_quote(symbol)
+    def fetch_quote_payload(self, symbol: str) -> object:
+        session = self._session_factory()
+        try:
+            # This is intentionally the same proxy behavior as the verified
+            # operator probe: do not inherit process or Windows proxy settings.
+            session.trust_env = False
+            response = session.get(
+                self._endpoint,
+                params=_eastmoney_quote_parameters(symbol),
+                headers={"Accept": "application/json", "User-Agent": "stock-mcp/0.1"},
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            return response.json(parse_float=Decimal)
+        finally:
+            close = getattr(session, "close", None)
+            if callable(close):
+                close()
+
+
+def _eastmoney_quote_parameters(symbol: str) -> dict[str, str]:
+    code, separator, exchange = symbol.strip().upper().partition(".")
+    if separator != "." or exchange not in {"SH", "SZ"} or len(code) != 6 or not code.isdigit():
+        raise ValueError("symbol must be a six digit .SH or .SZ A-share symbol")
+    return {
+        "invt": "2",
+        "fltt": "2",
+        "fields": "f43,f57",
+        "secid": f"{1 if exchange == 'SH' else 0}.{code}",
+    }
+
+
+def _new_direct_eastmoney_session() -> object:
+    """Create the optional runtime HTTP client only when a quote is requested."""
+
+    import requests  # type: ignore[import-not-found]
+
+    return requests.Session()
 
 
 class SinaShadowTask:

@@ -25,7 +25,7 @@ from .application import StockMcpApplication
 from .config import Settings
 from .mcp_server import create_server
 from .production import (
-    LazyAKShareQuoteProvider,
+    DirectEastmoneyQuoteProvider,
     ProductionPostMarketTask,
     is_v4_research_allowed,
 )
@@ -193,7 +193,7 @@ def _default_dependencies(settings: Settings) -> dict[str, object]:
     )
     application = StockMcpApplication(
         database,
-        LazyAKShareQuoteProvider(),
+        DirectEastmoneyQuoteProvider(),
         strategy_registry,
         replay=replay_runner,
         v4_research=v4_research,
