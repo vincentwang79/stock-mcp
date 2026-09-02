@@ -261,7 +261,12 @@ class AKShareQuoteProvider:
 
     def fetch_quote(self, symbol: str) -> dict[str, object]:
         code = _symbol_code(symbol)
-        response = _call_spot(self._client)
+        try:
+            response = _call_spot(self._client)
+        except Exception as error:
+            # The on-demand quote is optional evidence.  A provider transport
+            # failure must not escape the MCP request as an unstructured error.
+            raise ProviderRuntimeError("AKShare quote request failed") from error
         for row in _records(response):
             if str(row.get("代码", "")).strip().zfill(6) != code:
                 continue

@@ -215,6 +215,11 @@ class FakeQuoteProvider:
         return {"symbol": symbol, "close_1e4": self.close_1e4, "source": "akshare", "as_of": AS_OF}
 
 
+class UnavailableQuoteProvider:
+    def fetch_quote(self, _symbol: str) -> dict[str, object]:
+        raise OSError("proxy tunnel closed upstream connection")
+
+
 class FakeStrategyRegistry:
     def __init__(self) -> None:
         self.versions = {
@@ -346,6 +351,24 @@ class StockMcpApplicationContractTests(unittest.TestCase):
 
         self.assertEqual("pending", equal_confirmation["data"]["status"])
         self.assertEqual("invalidated", equal_invalidation["data"]["status"])
+
+    def test_next_day_transport_failure_is_a_structured_unavailable_result(self) -> None:
+        application = type(self.application)(
+            self.repository, UnavailableQuoteProvider(), self.registry, replay=self.replay
+        )
+
+        result = application.check_next_day(candidate_id="candidate-1")
+
+        self.assertEqual(
+            {
+                "ok": False,
+                "error": {
+                    "code": "next_day_quote_unavailable",
+                    "message": "current quote is unavailable",
+                },
+            },
+            result,
+        )
 
     def test_watchlists_are_named_and_write_operations_are_idempotent(self) -> None:
         created = self.application.create_watchlist(name="focus", idempotency_key="create-1")

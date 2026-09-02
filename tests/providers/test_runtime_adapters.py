@@ -45,6 +45,11 @@ class _AKShareClient:
         return self.frame
 
 
+class _UnavailableAKShareClient:
+    def stock_zh_a_spot_em(self) -> _Frame:
+        raise OSError("proxy tunnel closed upstream connection")
+
+
 def _tushare_rows() -> list[dict[str, object]]:
     return [
         {
@@ -300,6 +305,12 @@ class AKShareRuntimeAdapterContractTest(RuntimeAdapterContractTestCase):
                 client=_AKShareClient([{"代码": "600001"}]),
                 clock=lambda: NOW,
             ).fetch_quote("600001.SH")
+
+    def test_quote_normalizes_transport_failure_to_provider_runtime_error(self) -> None:
+        provider = self.AKShareQuoteProvider(client=_UnavailableAKShareClient(), clock=lambda: NOW)
+
+        with self.assertRaisesRegex(self.ProviderRuntimeError, "quote request failed"):
+            provider.fetch_quote("600001.SH")
 
 
 if __name__ == "__main__":

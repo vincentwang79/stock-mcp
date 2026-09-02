@@ -203,6 +203,14 @@ class WindowsDeploymentContractTest(unittest.TestCase):
         self.assertIn("StockMcpTunnel", install)
         self.assertNotIn("LocalSystem", install)
 
+    def test_mcp_service_bypasses_inherited_proxy_for_the_on_demand_quote_host(self) -> None:
+        service = (WINDOWS / "deploy" / "services" / "StockMcpService.xml.tmpl").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('name="NO_PROXY"', service)
+        self.assertIn("82.push2.eastmoney.com", service)
+
     def test_configuration_reads_secrets_interactively_not_from_parameters(self) -> None:
         configure = self._read_required("configure.ps1")
         library = (WINDOWS / "deploy" / "lib.ps1").read_text(encoding="utf-8")

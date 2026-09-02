@@ -5,6 +5,10 @@
   <executable>__INSTALL_ROOT__\current\.venv\Scripts\python.exe</executable>
   <arguments>-m stock_mcp.service --root &quot;__INSTALL_ROOT__&quot;</arguments>
   <workingdirectory>__INSTALL_ROOT__\current</workingdirectory>
+  <!-- Keep the optional on-demand quote check direct even when this host has
+       an inherited corporate proxy.  Tunnel proxy configuration is separate. -->
+  <env name="NO_PROXY" value="127.0.0.1,localhost,82.push2.eastmoney.com" />
+  <env name="no_proxy" value="127.0.0.1,localhost,82.push2.eastmoney.com" />
   <logpath>__INSTALL_ROOT__\logs</logpath>
   <autoRefresh>false</autoRefresh>
   <stoptimeout>30 sec</stoptimeout>

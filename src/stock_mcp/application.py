@@ -421,7 +421,9 @@ class StockMcpApplication:
             close = quote["close_1e4"]
             source = quote["source"]
             as_of = quote["as_of"]
-        except (AttributeError, KeyError, TypeError, RuntimeError, ValueError):
+        # Quote providers are external, on-demand adapters.  Do not allow a
+        # transport/proxy implementation detail to break the MCP response.
+        except Exception:
             return _error("next_day_quote_unavailable", "current quote is unavailable")
         if (
             not isinstance(close, int)
