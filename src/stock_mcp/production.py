@@ -244,6 +244,59 @@ def reconcile_live_observation(
     }
 
 
+def publish_late_reconciled_v3_daily_review(
+    *,
+    database: Any,
+    root: Path,
+    strategy: Any,
+    trade_date: date,
+    recorded_at: datetime,
+    idempotency_key: str,
+) -> dict[str, object]:
+    """Publish a labelled historical report from recorded facts only.
+
+    This deliberately has no provider, scheduler, or clock-side-effect dependency.
+    The original non-ready schedule outcome stays authoritative for the fact that
+    the report was not available during its post-market publication window.
+    """
+
+    if recorded_at.tzinfo is None or recorded_at.utcoffset() is None:
+        raise ValueError("late reconciled publication timestamp must be timezone-aware")
+    if strategy.status != "active" or int(strategy.parameters.get("rule_engine_version", 0)) != 3:
+        raise ValueError("late reconciled publication requires an active rule engine v3 strategy")
+    sessions = tuple(
+        database.load_expected_trading_days(
+            trade_date - timedelta(days=200), trade_date, source="tushare"
+        )
+    )
+    if len(sessions) < 61 or sessions[-1] != trade_date:
+        raise ValueError("late reconciled publication requires sixty recorded prior sessions")
+    prior_dates = sessions[-61:-1]
+    snapshot = database.load_market_snapshot(trade_date, source="tushare", history_limit=61)
+    statuses = database.load_daily_security_eligibility_statuses(
+        prior_dates[0], trade_date, source="baostock"
+    )
+    industry_reference = load_industry_reference(
+        root / "current" / "a_share_mainboard_code_name.json"
+    )
+    market, features = build_live_v3_market_input(
+        snapshot,
+        prior_dates=prior_dates,
+        industry_reference=industry_reference,
+        trading_statuses=statuses,
+    )
+    review = generate_v3_daily_review(market, strategy)
+    return database.publish_late_reconciled_daily_review(
+        review=review,
+        snapshot=snapshot,
+        snapshot_features=features,
+        input_hash=canonical_v3_market_input_hash(market),
+        result_hash=canonical_v3_result_hash(market, strategy, review),
+        reconciled_at=recorded_at,
+        idempotency_key=idempotency_key,
+    )
+
+
 def _can_use_previous_complete_session(
     error: LiveEvidenceSyncError,
     *,

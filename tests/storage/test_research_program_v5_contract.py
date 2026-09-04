@@ -18,8 +18,8 @@ class ResearchProgramV5StorageContractTest(unittest.TestCase):
         self.database = storage.Database(Path(self.temporary.name) / "research.sqlite3")
         self.database.initialize()
 
-    def test_schema_v14_persists_security_observations_and_outcomes_immutably(self) -> None:
-        self.assertEqual(14, storage.SCHEMA_VERSION)
+    def test_schema_v15_preserves_security_observations_and_outcomes_immutably(self) -> None:
+        self.assertEqual(15, storage.SCHEMA_VERSION)
         register = getattr(self.database, "register_research_hypotheses", None)
         save_trial = getattr(self.database, "save_research_trial", None)
         save_observation = getattr(self.database, "save_research_forward_observation", None)
@@ -228,7 +228,7 @@ class ResearchProgramV5StorageContractTest(unittest.TestCase):
         migrated = storage.Database(legacy_path)
         migrated.initialize()
         rows = migrated.list_research_forward_observations(hypothesis_id="legacy-v1")
-        self.assertEqual(14, migrated.schema_version())
+        self.assertEqual(15, migrated.schema_version())
         self.assertEqual("legacy-unspecified", rows[0]["symbol"])
         self.assertEqual({"retained": True}, rows[0]["observation"])
 

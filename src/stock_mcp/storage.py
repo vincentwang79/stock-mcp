@@ -29,7 +29,7 @@ from stock_mcp.domain import (
     StrategyVersion,
 )
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 class IdempotencyKeyReuseError(ValueError):
@@ -3599,6 +3599,158 @@ class Database:
         with self.connect() as connection:
             self._save_daily_review(connection, review)
 
+    def publish_late_reconciled_daily_review(
+        self,
+        *,
+        review: DailyReview,
+        snapshot: MarketSnapshot,
+        snapshot_features: Mapping[str, object],
+        input_hash: str,
+        result_hash: str,
+        reconciled_at: datetime,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        """Append one explicitly-labelled late publication without changing its audit outcome."""
+
+        if review.trade_date != snapshot.trade_date:
+            raise ValueError("late reconciled review date must match the market snapshot")
+        if review.source != "tushare" or snapshot.source != review.source:
+            raise ValueError("late reconciled publication requires a Tushare-only snapshot")
+        if reconciled_at.tzinfo is None or reconciled_at.utcoffset() is None:
+            raise ValueError("late reconciled publication timestamp must be timezone-aware")
+        if not idempotency_key:
+            raise ValueError("late reconciled publication requires an idempotency key")
+        self._validate_sha256(input_hash, "late reconciled input")
+        self._validate_sha256(result_hash, "late reconciled result")
+        operation = "publish_late_reconciled_daily_review"
+        request = {
+            "trade_date": review.trade_date.isoformat(),
+            "strategy_version": review.strategy_version,
+            "input_hash": input_hash,
+            "result_hash": result_hash,
+            "publication_class": "late_reconciled",
+        }
+        request_hash = self._request_hash(operation, request)
+        with self._idempotent_write_connection() as connection:
+            cached = self._idempotent_result(connection, operation, idempotency_key, request_hash)
+            if cached is not None:
+                return dict(cached)
+            schedule = connection.execute(
+                """
+                SELECT status, next_at, pipeline_version, error
+                FROM schedule_outcomes WHERE trade_date = ?
+                """,
+                (review.trade_date.isoformat(),),
+            ).fetchone()
+            if schedule is None or str(schedule[0]) not in {"retry_scheduled", "failed"}:
+                raise ValueError(
+                    "late reconciled publication requires a recorded "
+                    "retry_scheduled or failed outcome"
+                )
+            existing_review = connection.execute(
+                """
+                SELECT strategy_version
+                FROM daily_reviews
+                WHERE trade_date = ?
+                LIMIT 1
+                """,
+                (review.trade_date.isoformat(),),
+            ).fetchone()
+            if existing_review is not None:
+                raise ValueError(
+                    "late reconciled publication cannot shadow an existing normal daily review"
+                )
+            stored_review = replace(review, status="published")
+            self._save_market_snapshot(connection, snapshot)
+            self._save_snapshot_price_limits(connection, snapshot)
+            self._save_v3_fact_batch_connection(
+                connection,
+                "v3_snapshot_features",
+                "feature_json",
+                review.trade_date,
+                review.source,
+                snapshot_features,
+            )
+            self._save_daily_review(connection, stored_review)
+            publication_payload = {
+                "schema": "late-reconciled-daily-publication-v1",
+                "publication_class": "late_reconciled",
+                "trade_date": review.trade_date.isoformat(),
+                "strategy_version": review.strategy_version,
+                "source": review.source,
+                "source_timestamp": review.source_timestamp.isoformat(),
+                "reconciled_at": reconciled_at.isoformat(),
+                "original_schedule_status": str(schedule[0]),
+                "original_schedule_next_at": None if schedule[1] is None else str(schedule[1]),
+                "original_schedule_pipeline_version": (
+                    None if schedule[2] is None else str(schedule[2])
+                ),
+                "original_schedule_error": None if schedule[3] is None else str(schedule[3]),
+                "input_hash": input_hash,
+                "result_hash": result_hash,
+                "candidate_count": len(stored_review.candidates),
+                "market_regime": stored_review.market_regime.value,
+            }
+            publication_hash = hashlib.sha256(
+                self._json(publication_payload).encode("utf-8")
+            ).hexdigest()
+            connection.execute(
+                """
+                INSERT INTO late_reconciled_daily_publications(
+                    trade_date, strategy_version, original_schedule_status,
+                    original_schedule_next_at, original_schedule_pipeline_version,
+                    original_schedule_error, input_hash, result_hash, reconciled_at,
+                    publication_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review.trade_date.isoformat(),
+                    review.strategy_version,
+                    str(schedule[0]),
+                    None if schedule[1] is None else str(schedule[1]),
+                    None if schedule[2] is None else str(schedule[2]),
+                    None if schedule[3] is None else str(schedule[3]),
+                    input_hash,
+                    result_hash,
+                    reconciled_at.isoformat(),
+                    publication_hash,
+                ),
+            )
+            result = {**publication_payload, "publication_hash": publication_hash}
+            self._save_idempotent_result(
+                connection, operation, idempotency_key, request_hash, result
+            )
+            return result
+
+    def get_late_reconciled_publication(self, trade_date: date) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT strategy_version, original_schedule_status, original_schedule_next_at,
+                       original_schedule_pipeline_version, original_schedule_error,
+                       input_hash, result_hash, reconciled_at, publication_hash
+                FROM late_reconciled_daily_publications
+                WHERE trade_date = ?
+                """,
+                (trade_date.isoformat(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "schema": "late-reconciled-daily-publication-v1",
+            "publication_class": "late_reconciled",
+            "trade_date": trade_date,
+            "strategy_version": str(row[0]),
+            "original_schedule_status": str(row[1]),
+            "original_schedule_next_at": None if row[2] is None else str(row[2]),
+            "original_schedule_pipeline_version": None if row[3] is None else str(row[3]),
+            "original_schedule_error": None if row[4] is None else str(row[4]),
+            "input_hash": str(row[5]),
+            "result_hash": str(row[6]),
+            "reconciled_at": datetime.fromisoformat(str(row[7])),
+            "publication_hash": str(row[8]),
+        }
+
     def _save_daily_review(self, connection: sqlite3.Connection, review: DailyReview) -> None:
         existing = self._load_daily_review(connection, review.trade_date, review.strategy_version)
         if existing is not None:
@@ -5716,6 +5868,27 @@ class Database:
                         REFERENCES historical_observation_bootstrap_runs(bootstrap_id)
                 );
                 PRAGMA user_version = 14;
+                """
+            )
+        if version < 15:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS late_reconciled_daily_publications (
+                    trade_date TEXT NOT NULL,
+                    strategy_version TEXT NOT NULL,
+                    original_schedule_status TEXT NOT NULL,
+                    original_schedule_next_at TEXT,
+                    original_schedule_pipeline_version TEXT,
+                    original_schedule_error TEXT,
+                    input_hash TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    reconciled_at TEXT NOT NULL,
+                    publication_hash TEXT NOT NULL UNIQUE,
+                    PRIMARY KEY (trade_date, strategy_version),
+                    FOREIGN KEY (trade_date, strategy_version)
+                        REFERENCES daily_reviews(trade_date, strategy_version)
+                );
+                PRAGMA user_version = 15;
                 """
             )
 

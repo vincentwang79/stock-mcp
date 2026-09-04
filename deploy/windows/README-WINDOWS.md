@@ -452,6 +452,32 @@ if ($LASTEXITCODE -ne 0) {
 `live-v3-evidence-audit-v1` 报告是完整剩余缺口，不得用 Sina、AKShare、较早收盘价或手工
 改库绕过。`repaired_*_dates` 只列出复核后确实完整的日期，不再把“尝试过但仍缺失”记为已修复。
 
+### 补发一份延迟日报（仅限已修复的历史失败日）
+
+若某个历史交易日的正式盘后窗口因完整性门禁失败，而后续维护已补齐**同一份
+Tushare/BaoStock 事实**，管理员可以在停服维护窗口补发日报。它不是、也不得声称是
+当日准时发布的结果：原 `retry_scheduled` 或 `failed` 调度记录保留不变，新增日报会携带
+`publication_class="late_reconciled"`、实际 `reconciled_at`、原调度状态和不可变输入/结果
+哈希。该操作不能覆盖已有正常日报，也不能用于没有原始失败审计、没有 60 个先前会话或
+仍缺失事实的日期。
+
+先运行并验收 `reconcile-live-observation`；只有它返回
+`window_status="ready"`、两个 gap 均为零时才能继续。然后使用一个未用过的本地幂等键：
+
+```powershell
+& $py -m stock_mcp.cli publish-late-reconciled-daily-review `
+  --root E:\StockMcp `
+  --trade-date 2026-09-03 `
+  --idempotency-key publish-2026-09-03-late-reconciled-1 `
+  --confirm-late-reconciled-publication
+```
+
+成功 JSON 必须包含 `publication_class="late_reconciled"`、原始
+`original_schedule_status`、64 字符的 `input_hash`、`result_hash` 与
+`publication_hash`，以及候选数。用**同一个**幂等键重试会返回相同结果；改用相同键但不同
+日期或哈希会显式拒绝。成功后恢复服务。ChatGPT 可以读取并解释补发日报，但必须说明其为
+延迟补发，不能将其描述为当日盘后准时发布。
+
 命令成功后按顺序启动服务并检查就绪：
 
 ```powershell

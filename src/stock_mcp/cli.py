@@ -63,6 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "build-v3-facts",
             "bootstrap-live-observation",
             "reconcile-live-observation",
+            "publish-late-reconciled-daily-review",
             "build-v4-status-facts",
             "backfill-baostock-statuses",
             "prepare-sina-backfill-manifest",
@@ -97,6 +98,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--qualification-id")
     parser.add_argument("--study-id")
     parser.add_argument("--capability", action="append", default=[])
+    parser.add_argument("--idempotency-key")
+    parser.add_argument("--confirm-late-reconciled-publication", action="store_true")
     args = parser.parse_args(argv)
     settings = Settings.load(root=args.root)
 
@@ -484,6 +487,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             context_loader=None,
             evidence_synchronizer=synchronize,
             backup_path=backup.database_path,
+        )
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if args.command == "publish-late-reconciled-daily-review":
+        from .production import publish_late_reconciled_v3_daily_review
+        from .storage import Database
+        from .strategy import DatabaseStrategyRegistry
+
+        if args.trade_date is None:
+            parser.error("publish-late-reconciled-daily-review requires --trade-date")
+        if not args.idempotency_key:
+            parser.error("publish-late-reconciled-daily-review requires --idempotency-key")
+        if not args.confirm_late_reconciled_publication:
+            parser.error(
+                "publish-late-reconciled-daily-review requires "
+                "--confirm-late-reconciled-publication"
+            )
+        database = Database(settings.database_path)
+        database.initialize()
+        strategies = DatabaseStrategyRegistry(database)
+        active_version = strategies.active_version
+        if active_version is None:
+            raise ValueError("late reconciled publication requires an active strategy")
+        report = publish_late_reconciled_v3_daily_review(
+            database=database,
+            root=settings.root,
+            strategy=strategies.get(active_version),
+            trade_date=args.trade_date,
+            recorded_at=datetime.now(UTC),
+            idempotency_key=args.idempotency_key,
         )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0

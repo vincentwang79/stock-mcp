@@ -31,6 +31,24 @@ class _PublicationRepository:
         return self.get_publication_status(TRADE_DATE)
 
 
+class _LateReconciledPublicationRepository(_PublicationRepository):
+    def __init__(self) -> None:
+        super().__init__("retry_scheduled", _CandidateRepository().review)
+
+    def get_late_reconciled_publication(self, trade_date: date) -> dict[str, object] | None:
+        if trade_date != TRADE_DATE:
+            return None
+        return {
+            "publication_class": "late_reconciled",
+            "reconciled_at": datetime(2026, 9, 4, 1, 34, tzinfo=UTC),
+            "original_schedule_status": "retry_scheduled",
+            "publication_hash": "a" * 64,
+        }
+
+    def list_review_notes(self, _trade_date: date) -> tuple[object, ...]:
+        return ()
+
+
 class _CandidateRepository:
     def __init__(self) -> None:
         self.candidate = Candidate(
@@ -93,6 +111,19 @@ class _CandidateRepository:
 
 
 class ApplicationPublicationStatusContractTest(unittest.TestCase):
+    def test_late_reconciled_publication_is_readable_without_hiding_its_original_retry_audit(
+        self,
+    ) -> None:
+        result = StockMcpApplication(
+            _LateReconciledPublicationRepository(), object(), object()
+        ).get_daily_review(trade_date=TRADE_DATE)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("published", result["data"]["status"])
+        self.assertEqual("late_reconciled", result["data"]["publication_class"])
+        self.assertEqual("retry_scheduled", result["data"]["original_schedule_status"])
+        self.assertEqual("a" * 64, result["data"]["publication_hash"])
+
     def test_unpublished_pipeline_outcomes_are_visible_as_explicit_structured_statuses(
         self,
     ) -> None:

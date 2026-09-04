@@ -353,6 +353,19 @@ class StockMcpApplication:
     def get_daily_review(self, *, trade_date: date) -> Result:
         get_status = getattr(self._repository, "get_publication_status", None)
         publication = get_status(trade_date) if callable(get_status) else None
+        get_late_reconciled = getattr(self._repository, "get_late_reconciled_publication", None)
+        late_reconciled = (
+            get_late_reconciled(trade_date) if callable(get_late_reconciled) else None
+        )
+        if isinstance(late_reconciled, Mapping):
+            review = self._repository.get_daily_review(trade_date)
+            if review is None or review.status not in {"published", "ready"}:
+                return _error(
+                    "late_reconciled_review_missing",
+                    "late reconciled publication has no published daily review",
+                )
+            notes = self._repository.list_review_notes(trade_date)
+            return _ok(self._review_with_context(review, notes=notes))
         if publication is not None and publication.get("status") != "ready":
             data = dict(publication)
             recorded_date = data.get("trade_date")
@@ -590,12 +603,31 @@ class StockMcpApplication:
                 value = publication.get("pipeline_version")
                 if isinstance(value, str):
                     pipeline_version = value
-        return _review(
+        result = _review(
             review,
             notes=notes,
             candidate_contexts=contexts,
             pipeline_version=pipeline_version,
         )
+        get_late_reconciled = getattr(self._repository, "get_late_reconciled_publication", None)
+        late_reconciled = (
+            get_late_reconciled(review.trade_date) if callable(get_late_reconciled) else None
+        )
+        if isinstance(late_reconciled, Mapping):
+            result.update(
+                {
+                    key: value
+                    for key, value in late_reconciled.items()
+                    if key
+                    in {
+                        "publication_class",
+                        "reconciled_at",
+                        "original_schedule_status",
+                        "publication_hash",
+                    }
+                }
+            )
+        return result
 
     def list_strategy_versions(self) -> Result:
         versions = self._strategy_registry.list_versions()

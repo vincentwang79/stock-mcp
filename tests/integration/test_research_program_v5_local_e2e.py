@@ -27,7 +27,7 @@ class ResearchProgramV5LocalE2ETest(unittest.TestCase):
             database = Database(root / "data" / "stock-mcp.sqlite3")
             hypotheses = database.list_research_hypotheses()
             self.assertEqual(11, len(hypotheses))
-            self.assertEqual(14, database.schema_version())
+            self.assertEqual(15, database.schema_version())
 
             timestamp = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
             march = normalize_tushare_fina_indicator(

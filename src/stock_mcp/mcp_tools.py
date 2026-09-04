@@ -441,6 +441,10 @@ class DailyReviewData(_Dto):
     next_at: datetime | None = None
     pipeline_version: str | None = None
     error: str | None = None
+    publication_class: str | None = None
+    reconciled_at: datetime | None = None
+    original_schedule_status: str | None = None
+    publication_hash: str | None = None
 
 
 class GetDailyReviewResult(_Dto):

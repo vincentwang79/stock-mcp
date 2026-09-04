@@ -32,6 +32,27 @@ class ConfigAndCliContractTest(unittest.TestCase):
         self.assertEqual(settings.mcp_path, "/mcp")
         self.assertEqual(settings.timezone, "Asia/Shanghai")
 
+    def test_late_reconciled_publication_cli_requires_an_active_strategy(self) -> None:
+        try:
+            with self.assertRaisesRegex(ValueError, "active strategy"):
+                main(
+                    (
+                        "publish-late-reconciled-daily-review",
+                        "--root",
+                        str(self.root),
+                        "--trade-date",
+                        "2026-09-03",
+                        "--idempotency-key",
+                        "publish-2026-09-03-fixture-1",
+                        "--confirm-late-reconciled-publication",
+                    )
+                )
+        except SystemExit as error:
+            self.fail(
+                "late reconciled publication must be a registered explicit CLI command; "
+                f"parser exited with {error.code}"
+            )
+
     def test_non_loopback_bind_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             Settings.load(root=self.root, environ={"STOCK_MCP_HOST": "0.0.0.0"})
@@ -131,7 +152,7 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
 
         self.assertEqual(0, exit_code)
         report = json.loads(output.getvalue())
-        self.assertEqual(14, report["schema"])
+        self.assertEqual(15, report["schema"])
         self.assertEqual("ok", report["integrity"])
         self.assertEqual(0, report["tushare_days"])
         self.assertEqual(0, report["tushare_rows"])
@@ -247,7 +268,7 @@ environment_file = "E:\StockMcp\\config\\secrets.env"
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual(14, json.loads(completed.stdout)["schema"])
+        self.assertEqual(15, json.loads(completed.stdout)["schema"])
 
     def test_cli_writes_a_read_only_v4_study_amendment(self) -> None:
         destination = self.root / "state" / "v4-amendment.json"
